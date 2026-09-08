@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <filesystem>
 #include <mutex>
@@ -40,6 +41,8 @@ std::atomic_bool g_agent_snapshotting = false;
 std::atomic<std::uint16_t> g_agent_snapshot_interval_seconds = 0;
 std::atomic_bool g_agent_viewing_broadcast = false;
 std::atomic_bool g_desired_locked = false;
+std::mutex g_agent_launch_mutex;
+std::chrono::steady_clock::time_point g_next_agent_launch{};
 constexpr std::size_t kMaximumQueuedAgentMessages = 256;
 constexpr std::size_t kMaximumQueuedOutboundMessages = 32;
 
@@ -90,6 +93,8 @@ void wake_pipe_listener() {
     }
 }
 
+void launch_agent();
+
 void agent_pipe_loop() {
     while (!g_stop_requested.load()) {
         nstu::client::NamedPipe pipe;
@@ -100,7 +105,31 @@ void agent_pipe_loop() {
             }
             continue;
         }
+        std::filesystem::path expected_agent_path;
+        {
+            std::scoped_lock lock(g_agent_path_mutex);
+            expected_agent_path = g_agent_path;
+        }
+        if (!pipe.validate_client_process(expected_agent_path.wstring(),
+                                          nullptr, nullptr)) {
+            // The pipe DACL permits the interactive user to connect, but only
+            // the installed agent may occupy the service channel. Closing an
+            // untrusted client here also lets the watchdog accept the real
+            // agent on the next pipe instance.
+            if (!g_stop_requested.load()) {
+                Sleep(250);
+            }
+            continue;
+        }
         g_agent_connected = true;
+        {
+            std::scoped_lock launch_lock(g_agent_launch_mutex);
+            // A completed pipe connection proves that the previous launch
+            // succeeded. Permit the disconnect path to replace this process
+            // even when it exits inside the normal launch cooldown.
+            g_next_agent_launch = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(500);
+        }
         queue_agent_message({g_desired_locked.load()
                                  ? nstu::client::AgentMessageType::lock
                                  : nstu::client::AgentMessageType::unlock,
@@ -172,6 +201,17 @@ void agent_pipe_loop() {
         }
         g_agent_connected = false;
         pipe.close();
+        if (!g_stop_requested.load()) {
+            // A student can close the interactive agent with End Task. Give
+            // the desktop a short settling period, then restore the agent in
+            // the active session without creating a tight restart loop.
+            for (int tick = 0; tick < 10 && !g_stop_requested.load(); ++tick) {
+                Sleep(50);
+            }
+            if (!g_stop_requested.load()) {
+                (void)launch_agent();
+            }
+        }
     }
 }
 
@@ -311,6 +351,15 @@ void remote_control_loop(std::stop_token stop_token) {
 }
 
 void launch_agent() {
+    std::scoped_lock launch_lock(g_agent_launch_mutex);
+    if (g_stop_requested.load()) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < g_next_agent_launch) {
+        return;
+    }
+    g_next_agent_launch = now + std::chrono::seconds(2);
     std::filesystem::path agent_path;
     {
         std::scoped_lock lock(g_agent_path_mutex);
@@ -322,7 +371,23 @@ void launch_agent() {
     std::string ignored_error;
     const bool agent_started = nstu::client::launch_agent_in_active_session(
         agent_path.wstring(), &ignored_error);
-    (void)agent_started;
+    if (!agent_started) {
+        g_next_agent_launch = now + std::chrono::seconds(5);
+    }
+}
+
+void agent_supervisor_loop(std::stop_token stop_token) {
+    while (!stop_token.stop_requested() && !g_stop_requested.load()) {
+        if (!g_agent_connected.load()) {
+            launch_agent();
+        }
+        for (int tick = 0;
+             tick < 20 && !stop_token.stop_requested() &&
+             !g_stop_requested.load();
+             ++tick) {
+            Sleep(100);
+        }
+    }
 }
 
 void report_status(DWORD state, DWORD error = NO_ERROR) {
@@ -385,18 +450,23 @@ void WINAPI service_main(DWORD, wchar_t**) {
     g_stop_requested = false;
     std::thread pipe_thread(agent_pipe_loop);
     std::jthread control_thread(remote_control_loop);
+    std::jthread agent_supervisor_thread(agent_supervisor_loop);
     launch_agent();
     report_status(SERVICE_RUNNING);
     WaitForSingleObject(g_stop_event, INFINITE);
     g_stop_requested = true;
     queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
     control_thread.request_stop();
+    agent_supervisor_thread.request_stop();
     wake_pipe_listener();
     if (pipe_thread.joinable()) {
         pipe_thread.join();
     }
     if (control_thread.joinable()) {
         control_thread.join();
+    }
+    if (agent_supervisor_thread.joinable()) {
+        agent_supervisor_thread.join();
     }
     CloseHandle(g_stop_event);
     g_stop_event = nullptr;

@@ -4,14 +4,26 @@
 
 ```text
 nstu-server.exe       ImGui/D3D11 administration UI and client state
-nstu-service.exe      Session 0 service, policy and privileged lifecycle
-nstu-agent.exe        Interactive tray and fullscreen overlay
+nstu-service.exe      LocalSystem Session 0 service, policy and lifecycle
+nstu-agent.exe        Logged-in-user tray and fullscreen overlay
 ```
 
 The service and agent are separate because Windows services cannot interact
 directly with the logged-in user's desktop. IPC uses a local named pipe whose
 DACL permits SYSTEM, Administrators, and the interactive user and rejects
-remote clients.
+remote clients. After a connection, the service obtains the peer PID from the
+pipe and accepts it only when the process image is the installed
+`nstu-agent.exe` in an active interactive session.
+
+The installer registers the service explicitly under `LocalSystem`. The
+service launches the agent with the active user's token through
+`WTSQueryUserToken` and `CreateProcessAsUserW`; the agent is not elevated to
+SYSTEM. The service DACL prevents a standard classroom account from stopping or
+deleting the service, and the service attempts a bounded agent relaunch after
+an established pipe disconnect. This protects the privileged core while
+preserving Windows' Session 0 boundary. It does not override a local
+administrator or kernel-level security product. The disposable and reboot test
+procedures are documented in `docs/VM_TESTING.md`.
 
 The service loads its client identity and PSK from a machine-scoped DPAPI
 configuration, reconnects to the teacher server, completes the mutual HMAC

@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) | [Kiểm thử VM](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -56,8 +56,8 @@ model và các hạng mục production chưa hoàn thành tại
 
 ## Bản đồ tài liệu
 
-- [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md): nội dung installer,
-  `nstu-setup.exe`, script enrollment, target và cờ build/runtime.
+- [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md): installer hợp nhất chọn vai
+  trò, diagnostics, script enrollment và các cờ build/runtime.
 - [Kiến trúc](docs/ARCHITECTURE.md): process model, đường dữ liệu client/server,
   video pipeline, control channel và giới hạn hiện tại.
 - [Bảo mật](docs/SECURITY.md): authentication, enrollment, secret và ranh giới
@@ -66,6 +66,8 @@ model và các hạng mục production chưa hoàn thành tại
   quy trình CI.
 - [Production validation](docs/PRODUCTION_VALIDATION.md): checklist kiểm thử
   phần cứng, mạng, Deep Freeze và thời gian dài.
+- [Kiểm thử vòng đời trên VM](docs/VM_TESTING.md): kiểm tra bằng Sandbox,
+  validation qua restart, ranh giới quyền và evidence cần lưu.
 
 ## Năng lực hướng đến
 
@@ -77,9 +79,9 @@ model và các hạng mục production chưa hoàn thành tại
 - Có thể bật/tắt điều khiển từ xa cho một client đã chọn. Chuột được gửi từ
   preview bằng tọa độ chuẩn hóa; ô bàn phím riêng gửi văn bản ASCII khi nhấn
   Enter.
-- Có thể áp dụng allowlist website IPv4 do quản trị viên nhập qua Windows
-  Filtering Platform (WFP), chặn TCP 80/443 ngoại trừ các địa chỉ được phép.
-  Đây là thao tác opt-in và có nút xóa policy trong setup tool.
+- Giữ nền tảng allowlist IPv4 native bằng Windows Filtering Platform (WFP) cho
+  policy quản trị viên trong tương lai. Installer hợp nhất và diagnostics
+  hiện chưa cung cấp control cho policy này.
 - Giữ nền tảng H.264 multicast/unicast cho chế độ broadcast liên tục tùy chọn
   trong tương lai, không dùng làm đường monitoring mặc định.
 - Hiển thị screen wall responsive của các snapshot mới nhất, cùng telemetry,
@@ -127,14 +129,14 @@ cmake --build build-release --parallel 4
 | `CMAKE_BUILD_TYPE=Debug\|Release` | tùy generator | Chọn symbol debug hoặc binary release tối ưu |
 | `NSTU_BUILD_CLIENT=ON\|OFF` | `ON` | Build `nstu-service`, `nstu-agent` và tool provision |
 | `NSTU_BUILD_SERVER=ON\|OFF` | `ON` | Build server và giao diện giáo viên |
-| `NSTU_BUILD_SETUP=ON\|OFF` | `ON` trên Windows | Build bootstrapper và kiểm tra phần cứng/policy |
+| `NSTU_BUILD_SETUP=ON\|OFF` | `ON` trên Windows | Build helper `nstu-diagnostics` cho installer và boot check |
 | `NSTU_BUILD_VIDEO=ON\|OFF` | `ON` | Build DXGI, Media Foundation và video transport |
 | `NSTU_BUILD_TESTS=ON\|OFF` | `ON` | Build các bài test unit/integration |
 | `NSTU_SERVER_USE_IMGUI=ON\|OFF` | `ON` | Bật/tắt executable UI Dear ImGui |
 | `NSTU_ENABLE_WERROR=ON\|OFF` | `OFF` | Coi warning là error; nên bật khi kiểm tra release |
-| `NSTU_ENABLE_PACKAGING=ON\|OFF` | `ON` | Bật target đóng gói CPack/NSIS |
+| `NSTU_ENABLE_PACKAGING=ON\|OFF` | `ON` | Bật các target đóng gói NSIS hợp nhất |
 
-Để chỉ build setup tool cho kỹ thuật viên:
+Để chỉ build diagnostics helper cho kỹ thuật viên:
 
 ```powershell
 cmake -S . -B build-setup -G "MinGW Makefiles" `
@@ -142,7 +144,7 @@ cmake -S . -B build-setup -G "MinGW Makefiles" `
   -DNSTU_BUILD_CLIENT=OFF -DNSTU_BUILD_SERVER=OFF `
   -DNSTU_BUILD_VIDEO=OFF -DNSTU_BUILD_TESTS=OFF `
   -DNSTU_ENABLE_WERROR=ON
-cmake --build build-setup --target nstu-setup
+cmake --build build-setup --target nstu-diagnostics
 ```
 
 Server nhận các cờ runtime `--language=en`, `--language=vi`, `--dark` và
@@ -151,15 +153,17 @@ debug Direct3D 11. Trong giao diện, Language, Appearance và Screen refresh n�
 trong phần `Settings`; Screen refresh là chu kỳ snapshot, giới hạn từ 5 đến
 10 giây.
 
-Bootstrapper quản trị mở đầu bằng lựa chọn rõ ràng: `Client`, `Server` hoặc
-`Both`. Nhờ đó kỹ thuật viên chỉ thấy các điều kiện phù hợp với vai trò và
-không áp dụng kiểm tra dành cho server lên máy client. Có thể truyền lựa chọn
-khi chạy không tương tác bằng `--target=client`, `--target=server` hoặc
-`--target=both`; `--graphics-debug` yêu cầu lớp debug D3D11 và ghi lại thông
-tin fallback. Popup `Diagnostics` của setup hiển thị adapter và hãng DXGI,
-feature level, khả dụng Desktop Duplication, trạng thái dự phòng WARP và các
-HRESULT gần đây có giới hạn. Nếu khởi tạo đồ họa thất bại trước khi giao diện
-mở, Windows sẽ hiển thị hộp thoại chẩn đoán gốc với lỗi đã ghi nhận.
+Installer hợp nhất mở đầu bằng hai lựa chọn: `Install for Client` hoặc
+`Install for Server`. Không hỗ trợ cài `Both` vì hai vai trò có vòng đời và
+trách nhiệm port khác nhau. Installer gọi `nstu-diagnostics` theo từng bước.
+Kỹ thuật viên cũng có thể chạy riêng với `--target=client|server`,
+`--server-ip=...`, `--server-port=...`, `--installer`, `--boot-check`,
+`--auto-close` và `--log=...`.
+
+Popup `Diagnostics` riêng bên trong `nstu-server.exe` hiển thị adapter/hãng
+DXGI, feature level, khả dụng Desktop Duplication, trạng thái dự phòng WARP
+và các HRESULT gần đây có giới hạn. Nếu khởi tạo đồ họa thất bại
+trước khi server UI mở, Windows hiển thị hộp thoại gốc với lỗi đã ghi.
 
 #### Chẩn đoán đồ họa của server
 
@@ -355,14 +359,14 @@ development chưa được ký số nên Microsoft Defender SmartScreen có th�
 Hãy xác minh nguồn release và SHA-256 trước khi chạy:
 
 ```powershell
-Get-FileHash .\nstu-server-*.exe -Algorithm SHA256
-Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
+Get-FileHash .\nstu-*-setup.exe -Algorithm SHA256
 ```
 
 ### Server
 
-1. Tải `nstu-server-<version>.exe` từ pre-release mới nhất.
-2. Chạy installer và chấp nhận UAC nếu Windows yêu cầu.
+1. Tải `nstu-<version>-setup.exe` từ pre-release mới nhất.
+2. Chạy installer hợp nhất, chọn **Install for Server** và chấp nhận UAC nếu
+   Windows yêu cầu.
 3. Khởi động:
 
    ```powershell
@@ -371,13 +375,14 @@ Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
 
 Server không được đăng ký thành Windows service và mặc định không tự chạy khi
 Windows khởi động; kỹ thuật viên mở thủ công hoặc tạo shortcut/task do trường
-quản lý trên máy giáo viên. `nstu-setup.exe` cũng chỉ chạy thủ công bằng quyền
-Administrator khi máy đang ở trạng thái thawed.
+quản lý trên máy giáo viên. Helper diagnostics đi kèm installer có thể chạy lại
+để kiểm tra phần cứng và mạng khi máy đang ở trạng thái thawed.
 
 Để gỡ server, dùng **Installed apps** của Windows hoặc server uninstaller.
-Trình gỡ sẽ buộc dừng `nstu-server.exe` đã cài, xóa file server/setup và lên
-lịch xóa các file bị khóa ở lần Windows boot tiếp theo. Hãy hoàn tất restart
-được yêu cầu trước khi cài vai trò client trên máy đó.
+Lần gọi đầu chỉ stage việc gỡ và yêu cầu restart; không xóa service, process hay
+package file. Sau reboot, trình gỡ mới buộc dừng `nstu-server.exe`, xóa file
+server và diagnostics, rồi lên lịch xóa file còn khóa ở boot sau. Hãy hoàn tất
+restart được yêu cầu trước khi cài vai trò client trên máy đó.
 
 Dashboard không tự chèn dữ liệu demo. Registry client khởi động ở trạng thái
 trống và chỉ hiển thị record do runtime registry cung cấp. Giáo viên có thể
@@ -399,22 +404,21 @@ Trong `Selected client`, chỉ bấm `Start remote` khi quản trị viên thự
 cạnh gửi văn bản ASCII khi nhấn Enter. Remote control tự dừng khi đổi client,
 client offline, đổi view hoặc server thoát.
 
-Setup tool có panel `Website allowlist (IPv4)` với danh sách địa chỉ phân tách
-bởi dấu phẩy. Nhập danh sách rồi bấm `Apply website allowlist`; bấm
-`Clear website allowlist` để xóa các đối tượng WFP do NSTU sở hữu. WFP làm việc
-với IP đích và port nên quản trị viên phải tự duy trì việc phân giải domain.
-NSTU không giải mã HTTPS và không dùng MITM.
+Repository vẫn giữ nền tảng WFP native, nhưng installer hợp nhất và diagnostics
+hiện tại chưa có panel allowlist. WFP làm việc với IP đích và port nên policy
+tương lai phải tự duy trì việc phân giải domain. NSTU không giải mã HTTPS và
+không dùng MITM.
 
 Xem [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) để biết đầy đủ tính năng
-setup tool, nội dung installer, vị trí script và sự khác nhau giữa tùy chọn
-build CMake `NSTU_BUILD_SETUP` với tham số runtime. Cụ thể, không có cờ runtime
-`--setup`: chạy trực tiếp `nstu-setup.exe`, có thể thêm
-`--target=client|server|both` và `--graphics-debug`.
+installer, vị trí script, tùy chọn diagnostics và sự khác nhau giữa tùy chọn
+build CMake `NSTU_BUILD_SETUP` với tham số runtime. Không có cờ runtime
+`--setup`; khi cần kiểm tra riêng, chạy
+`diagnostics\nstu-diagnostics.exe`.
 
 Server và client là hai vai trò cài đặt loại trừ lẫn nhau trên cùng một máy
-Windows. Full installer kiểm tra vai trò còn lại trước khi chép file và dừng
-với thông báo rõ ràng nếu vai trò đó đã được cài. Không có triển khai installer
-`Both` được hỗ trợ; hãy dùng máy riêng cho server giáo viên và client học sinh.
+Windows. Installer hợp nhất kiểm tra registry vai trò và layout đã cài trước
+khi chép file, rồi dừng với thông báo rõ ràng nếu vai trò đối diện đã có mặt.
+Hãy dùng máy riêng cho server giáo viên và client học sinh.
 
 Cũng có thể chọn sẵn Tiếng Việt và dark mode khi khởi động:
 
@@ -424,8 +428,10 @@ Cũng có thể chọn sẵn Tiếng Việt và dark mode khi khởi động:
 
 ### Client
 
-1. Tải và chạy `nstu-client-<version>.exe` bằng quyền Administrator.
-2. Installer tự đăng ký `nstu-service` để khởi động cùng Windows và cấu hình
+1. Tải và chạy `nstu-<version>-setup.exe` bằng quyền Administrator, chọn
+   **Install for Client**, rồi nhập IP server và cổng điều khiển.
+2. Installer chạy diagnostics client, đăng ký `nstu-service` để khởi động cùng
+   Windows và cấu hình
    service recovery. Service không được khởi động ngay bên trong phiên cài đặt.
 3. Restart Windows khi installer yêu cầu. Ở lần boot tiếp theo, service tự chạy
    và khởi động đúng một instance `nstu-agent.exe` trong user session đang active
@@ -440,25 +446,35 @@ Thành phần tự khởi động là client service: installer đăng ký servi
 `start= auto`; lần restart bắt buộc sẽ kích hoạt service, sau đó service mở
 `nstu-agent.exe` trong user session đã đăng nhập.
 
-Để gỡ client, dùng **Installed apps** của Windows hoặc NSTU uninstaller. Trình
-gỡ cài đặt sẽ buộc dừng các process agent/service của NSTU, xóa service, xóa
-file package và lên lịch xóa các file đang bị khóa ở lần Windows boot tiếp theo.
-Installer đánh dấu thao tác cần restart; hãy hoàn tất restart trước khi cài vai
-trò đối lập. Gỡ service thủ công không phải quy trình triển khai được hỗ trợ.
+`nstu-service.exe` được đăng ký rõ ràng bằng tài khoản `LocalSystem` và chạy ở
+Session 0. `nstu-agent.exe` phải chạy trong interactive session của user đang
+đăng nhập để Windows cho phép tray, capture, overlay và input. Standard user
+không được cấp quyền stop/delete service; sau khi kết nối pipe của agent bị
+ngắt, service sẽ thử mở lại agent với retry có giới hạn. NSTU không tuyên bố có
+thể chống lại local Administrator hoặc phần mềm kernel-level. Xem
+[hướng dẫn kiểm thử vòng đời trên VM](docs/VM_TESTING.md)
+để biết các assertion bảo mật cụ thể.
+
+Để gỡ client, dùng **Installed apps** của Windows hoặc NSTU uninstaller. Lần gọi
+đầu chỉ xác minh yêu cầu và stage startup task chạy một lần bằng SYSTEM. Nếu
+quản trị viên không chấp nhận restart ngay, service, process, file package và
+pending-delete state đều không thay đổi. Sau reboot, task mới buộc dừng process
+NSTU, xóa service, xóa package và lên lịch file còn khóa cho lần boot kế tiếp.
+Gỡ service thủ công không phải quy trình được hỗ trợ.
 
 ## Kết nối một phòng máy
 
 Quy trình enrollment hiện dùng command line và phải thực hiện khi máy đang
-thawed, trong PowerShell chạy bằng quyền Administrator. Trước tiên cài
-installer NSTU server trên máy giáo viên và installer NSTU client trên từng máy
-học sinh. Đặt các máy trong cùng VLAN tin cậy và cho phép TCP port `47001` giữa
+thawed, trong PowerShell chạy bằng quyền Administrator. Chạy cùng installer hợp
+nhất trên mỗi máy, chọn Server cho máy giáo viên và Client cho từng máy học
+sinh. Đặt các máy trong cùng VLAN tin cậy và cho phép TCP port `47001` giữa
 client với server.
 
 Các lệnh dưới đây dùng script được đóng gói cùng installer. Installer đầy đủ
 đặt script tại `C:\Program Files\NSTU\docs\deployment`; file tải riêng
 `nstu-server.exe` hoặc `nstu-client.exe` không chứa PowerShell script. Nếu chỉ
-có binary riêng, hãy tải installer server/client tương ứng hoặc checkout source
-đúng phiên bản trước khi tiếp tục. Trong source checkout, các file tương ứng
+có binary riêng, hãy tải installer hợp nhất hoặc checkout source đúng phiên bản
+trước khi tiếp tục. Trong source checkout, các file tương ứng
 nằm trong thư mục `packaging\`.
 
 Nếu dùng source checkout, thay `$deployment` trong ví dụ bằng thư mục
@@ -480,7 +496,7 @@ và xuất secret dùng một lần để provision client:
 ```powershell
 $deployment = Join-Path $env:ProgramFiles "NSTU\docs\deployment"
 if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
-  throw "Thiếu script triển khai NSTU; hãy cài đầy đủ server installer."
+  throw "Thiếu script triển khai NSTU; hãy cài lại NSTU và chọn vai trò Server."
 }
 New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
 & (Join-Path $deployment "configure-data-root.ps1") `
@@ -497,7 +513,7 @@ máy học sinh.
 ### 2. Provision từng client
 
 Trên từng máy học sinh, khi server đang chạy, dùng identity 128-bit và key ID
-riêng. `nstu-provision.exe` được cài cùng client installer:
+riêng. `nstu-provision.exe` được cài khi chọn vai trò Client:
 
 ```powershell
 $clientId = [guid]::NewGuid().ToString("N")

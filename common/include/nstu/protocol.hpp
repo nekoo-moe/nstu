@@ -58,6 +58,7 @@ enum class CommandType : std::uint16_t {
 enum class ConnectionRole : std::uint8_t {
     client = 1,
     server = 2,
+    diagnostic = 3,
 };
 
 struct ConnectionPreamble {

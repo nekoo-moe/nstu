@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [VM testing](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -55,8 +55,8 @@ its threat model and unfinished production work public in
 
 ## Documentation map
 
-- [Setup guide](docs/SETUP_GUIDE.md): installer contents, `nstu-setup.exe`,
-  enrollment scripts, role targets, and runtime/build flags.
+- [Setup guide](docs/SETUP_GUIDE.md): the unified role-selecting installer,
+  diagnostics checks, enrollment scripts, and runtime/build flags.
 - [Architecture](docs/ARCHITECTURE.md): process model, client/server data
   paths, video pipeline, control channel, and known limitations.
 - [Security](docs/SECURITY.md): authentication, enrollment, secrets, and
@@ -65,6 +65,8 @@ its threat model and unfinished production work public in
   and CI workflow.
 - [Production validation](docs/PRODUCTION_VALIDATION.md): hardware, network,
   Deep Freeze, and long-duration test checklist.
+- [VM lifecycle testing](docs/VM_TESTING.md): disposable Sandbox checks,
+  persistent reboot validation, privilege boundaries, and expected evidence.
 
 ## Intended capabilities
 
@@ -76,9 +78,9 @@ its threat model and unfinished production work public in
 - Explicitly start and stop remote control for one selected client. Mouse
   movement/clicks are sent from the preview using normalized coordinates, and
   typed ASCII text can be dispatched from the focused remote-keyboard field.
-- Apply an administrator-managed IPv4 website allowlist through Windows
-  Filtering Platform (WFP), blocking outbound TCP 80/443 except for permitted
-  addresses. The policy is opt-in and can be cleared from the setup tool.
+- Retain the native Windows Filtering Platform (WFP) allowlist foundation for a
+  future administrator-managed website policy. The unified installer and
+  diagnostics helper do not currently expose policy controls.
 - Retain H.264 multicast/unicast foundations for a future optional continuous
   broadcast mode without making it the default monitoring path.
 - Show a responsive wall of the latest client snapshots, plus focused
@@ -129,12 +131,12 @@ The main CMake switches are:
 | `CMAKE_BUILD_TYPE=Debug\|Release` | generator-dependent | Select debug symbols or optimized release binaries |
 | `NSTU_BUILD_CLIENT=ON\|OFF` | `ON` | Build `nstu-service`, `nstu-agent`, and provisioning tools |
 | `NSTU_BUILD_SERVER=ON\|OFF` | `ON` | Build the teacher server and its UI |
-| `NSTU_BUILD_SETUP=ON\|OFF` | `ON` on Windows | Build the administrator bootstrapper and hardware/policy checks |
+| `NSTU_BUILD_SETUP=ON\|OFF` | `ON` on Windows | Build the `nstu-diagnostics` helper used by the installer and boot checks |
 | `NSTU_BUILD_VIDEO=ON\|OFF` | `ON` | Build DXGI, Media Foundation, and video transport components |
 | `NSTU_BUILD_TESTS=ON\|OFF` | `ON` | Build the unit/integration test executables |
 | `NSTU_SERVER_USE_IMGUI=ON\|OFF` | `ON` | Enable or disable the Dear ImGui server executable |
 | `NSTU_ENABLE_WERROR=ON\|OFF` | `OFF` | Treat compiler warnings as errors; recommended for release validation |
-| `NSTU_ENABLE_PACKAGING=ON\|OFF` | `ON` | Enable CPack/NSIS packaging targets |
+| `NSTU_ENABLE_PACKAGING=ON\|OFF` | `ON` | Enable unified NSIS packaging targets |
 
 For technician setup validation without building the client or server:
 
@@ -144,7 +146,7 @@ cmake -S . -B build-setup -G "MinGW Makefiles" `
   -DNSTU_BUILD_CLIENT=OFF -DNSTU_BUILD_SERVER=OFF `
   -DNSTU_BUILD_VIDEO=OFF -DNSTU_BUILD_TESTS=OFF `
   -DNSTU_ENABLE_WERROR=ON
-cmake --build build-setup --target nstu-setup
+cmake --build build-setup --target nstu-diagnostics
 ```
 
 The server runtime accepts `--language=en`, `--language=vi`, `--dark`, and
@@ -153,16 +155,17 @@ Direct3D 11 debug layer, respectively. Language, Appearance, and Screen
 refresh controls are also available from the dashboard `Settings` section.
 Screen refresh is the bounded snapshot interval, from 5 to 10 seconds.
 
-The administrator bootstrapper opens with an explicit target choice: `Client`,
-`Server`, or `Both`. This keeps role-specific prerequisites visible and avoids
-technicians applying server-only checks to a client workstation. The same
-selection can be supplied for unattended launch with `--target=client`,
-`--target=server`, or `--target=both`; `--graphics-debug` enables the D3D11
-debug-layer request and records fallback details. The setup window's
-`Diagnostics` popup reports DXGI adapters and vendors, feature level, Desktop
-Duplication support, WARP fallback state, and bounded recent HRESULT events.
-If graphics initialization fails before the UI can open, a native Windows
-diagnostics message box displays the recorded failure.
+The unified installer opens with an explicit role choice: `Install for Client`
+or `Install for Server`. There is no supported `Both` installation because the
+roles use different lifecycle and port responsibilities. The installer invokes
+`nstu-diagnostics` sequentially. Technicians can also run it directly with
+`--target=client|server`, `--server-ip=...`, `--server-port=...`, `--installer`,
+`--boot-check`, `--auto-close`, and `--log=...`.
+
+The separate `Diagnostics` popup inside `nstu-server.exe` reports DXGI adapters
+and vendors, feature level, Desktop Duplication support, WARP fallback state,
+and bounded recent HRESULT events. If graphics initialization fails before the
+server UI can open, a native Windows message box displays the recorded failure.
 
 #### Server graphics diagnostics
 
@@ -361,14 +364,14 @@ development artifacts and may trigger Microsoft Defender SmartScreen. Verify
 the release origin and SHA-256 digest before running them:
 
 ```powershell
-Get-FileHash .\nstu-server-*.exe -Algorithm SHA256
-Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
+Get-FileHash .\nstu-*-setup.exe -Algorithm SHA256
 ```
 
 ### Server
 
-1. Download `nstu-server-<version>.exe` from the latest pre-release.
-2. Run the installer and accept the Windows elevation prompt if requested.
+1. Download `nstu-<version>-setup.exe` from the latest pre-release.
+2. Run the unified installer, select **Install for Server**, and accept the
+   Windows elevation prompt if requested.
 3. Start:
 
    ```powershell
@@ -377,14 +380,16 @@ Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
 
 The server executable is not registered as a Windows service and does not
 launch automatically by default; technicians start it manually or create an
-organization-managed shortcut/task for the teacher workstation. The
-`nstu-setup.exe` bootstrapper is also manual-only and should be run by an
-administrator while the machine is thawed.
+organization-managed shortcut/task for the teacher workstation. The same
+installer's diagnostics helper can be run later to repeat hardware and network
+checks while the machine is thawed.
 
 To remove the server, use Windows **Installed apps** or the server uninstaller.
-It force-terminates the installed `nstu-server.exe`, removes server/setup files,
-and schedules any locked files for deletion at the next Windows boot. Complete
-the requested restart before installing the client role on that machine.
+The first invocation stages removal and requires a restart; it does not remove
+the service, process, or package files. After reboot it force-terminates the
+installed `nstu-server.exe`, removes the server and diagnostics files, and
+schedules any remaining locked files for a later boot. Complete the requested
+restart before installing the client role on that machine.
 
 The dashboard does not inject demonstration records. It starts with an empty
 client registry and displays only records supplied by the runtime registry.
@@ -405,23 +410,23 @@ the adjacent keyboard field sends ASCII text when Enter is pressed. Remote
 control is stopped automatically when the selected client changes, goes offline,
 the view changes, or the server exits.
 
-The setup tool's `Website allowlist (IPv4)` panel is also opt-in. Enter
-comma-separated IPv4 addresses, then click `Apply website allowlist`; click
-`Clear website allowlist` to remove only NSTU-owned WFP objects. WFP operates on
-destination IPs and ports, so domain names must be resolved and maintained by
-the administrator. No HTTPS interception or MITM decryption is used.
+The repository retains a native WFP allowlist foundation, but the unified
+installer and current diagnostics helper do not expose an allowlist panel.
+WFP operates on destination IPs and ports, so any future policy must resolve and
+maintain domain addresses explicitly. No HTTPS interception or MITM decryption
+is used.
 
-For the complete setup-tool feature list, installer contents, script locations,
+For the complete installer feature list, script locations, diagnostics options,
 and the distinction between the CMake build option `NSTU_BUILD_SETUP` and
-runtime arguments, see the [Setup Guide](docs/SETUP_GUIDE.md). In particular,
-there is no `--setup` runtime flag: run `nstu-setup.exe` directly, optionally
-with `--target=client|server|both` and `--graphics-debug`.
+runtime arguments, see the [Setup Guide](docs/SETUP_GUIDE.md). There is no
+`--setup` runtime flag; run `diagnostics\nstu-diagnostics.exe` directly when a
+technician needs a standalone check.
 
 Server and client are mutually exclusive installation roles on one Windows
-machine. The full installers check for the other role before copying files and
-abort with an explanatory message if it is already installed. There is no
-supported `Both` installer deployment; use separate machines for the teacher
-server and student clients.
+machine. The unified installer checks the registered role and installed layout
+before copying files, and aborts with an explanatory message if the opposite
+role is already present. Use separate machines for the teacher server and
+student clients.
 
 Vietnamese and dark mode can also be selected at startup:
 
@@ -431,8 +436,10 @@ Vietnamese and dark mode can also be selected at startup:
 
 ### Client
 
-1. Download and run `nstu-client-<version>.exe` as an administrator.
-2. The installer registers `nstu-service` for automatic startup and configures
+1. Download and run `nstu-<version>-setup.exe` as an administrator, select
+   **Install for Client**, and enter the server IP address and control port.
+2. The installer runs the client diagnostics, registers `nstu-service` for
+   automatic startup, and configures
    service recovery. It deliberately does not start the service inside the
    installer session.
 3. Restart Windows when setup requests it. On the next boot the service starts
@@ -449,27 +456,36 @@ registers it with Windows `start= auto`; the required restart activates the
 service, and the service launches the interactive agent in the logged-on user
 session.
 
+`nstu-service.exe` is registered explicitly as `LocalSystem` and runs in
+Session 0. `nstu-agent.exe` must remain in the logged-in user's interactive
+session so Windows permits tray, capture, overlay, and input operations. A
+standard user is not granted service stop/delete access; after an established
+agent pipe disconnects, the service attempts a bounded relaunch. NSTU does not
+claim to be immune to a local administrator or kernel-level software. See the
+[VM lifecycle test guide](docs/VM_TESTING.md) for the exact security assertions.
+
 Use Windows **Installed apps** or the NSTU uninstaller to remove the client.
-The uninstaller force-terminates NSTU-owned agent/service processes, deletes the
-service, removes package files, and schedules any locked files for deletion at
-the next Windows boot. The installer marks the operation as requiring a
-restart; complete that restart before installing the opposite role. Direct
-manual service removal is not a supported deployment workflow.
+The first uninstaller invocation only validates the request and stages a
+one-shot SYSTEM startup task. It changes no service, process, package file, or
+pending-delete state unless the administrator accepts an immediate restart.
+After reboot, the task force-terminates NSTU-owned agent/service processes,
+deletes the service, removes package files, and schedules any still-locked file
+for the following boot. Direct manual service removal is not supported.
 
 ## Connecting a computer room
 
 The current enrollment flow is command-line based and must be performed while
-the machines are thawed, from an elevated PowerShell prompt. Install the NSTU
-server installer on the teacher machine and the NSTU client installer on each
-student machine first. Put them on the same trusted VLAN and allow TCP port
-`47001` between clients and the server.
+the machines are thawed, from an elevated PowerShell prompt. Run the same
+unified installer on each machine, choosing Server on the teacher machine and
+Client on each student machine. Put them on the same trusted VLAN and allow TCP
+port `47001` between clients and the server.
 
 The commands below use scripts shipped by the installer. A complete installer
 places them under `C:\Program Files\NSTU\docs\deployment`; a standalone
 `nstu-server.exe` or `nstu-client.exe` download does not contain PowerShell
-scripts. If only standalone binaries were downloaded, obtain the matching
-server/client installer or a source checkout before continuing. From a source
-checkout, the equivalent files are under `packaging\`.
+scripts. If only standalone binaries were downloaded, obtain the unified
+installer or a source checkout before continuing. From a source checkout, the
+equivalent files are under `packaging\`.
 
 For a source checkout, replace `$deployment` in the example with the checkout's
 packaging directory, for example:
@@ -490,7 +506,7 @@ enrollment secret and exports a one-time secret for client provisioning:
 ```powershell
 $deployment = Join-Path $env:ProgramFiles "NSTU\docs\deployment"
 if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
-  throw "NSTU deployment scripts are missing; install the complete NSTU server package."
+  throw "NSTU deployment scripts are missing; reinstall NSTU and select the Server role."
 }
 New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
 & (Join-Path $deployment "configure-data-root.ps1") `
@@ -507,7 +523,8 @@ on student machines.
 ### 2. Provision each client
 
 On each student machine, while the server is running, use a unique 128-bit
-identity and key ID. `nstu-provision.exe` is included in the client installer:
+identity and key ID. `nstu-provision.exe` is installed when the Client role is
+selected:
 
 ```powershell
 $clientId = [guid]::NewGuid().ToString("N")

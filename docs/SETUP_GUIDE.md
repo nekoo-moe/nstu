@@ -2,116 +2,94 @@
 
 [English README](../README.md) | [Tiếng Việt](../README.vi.md)
 
-This guide separates three different things that are often confused:
+## Unified installer
 
-1. The NSTU installers, which install binaries and invoke their own lifecycle
-   scripts.
-2. `nstu-setup.exe`, the interactive administrator bootstrapper.
-3. PowerShell deployment scripts, which are shipped as files and can be run
-   manually for enrollment or validation.
+Release builds provide one role-selecting package: `nstu-<version>-setup.exe`.
+The first page offers **Install for Client** or **Install for Server** and never
+installs both roles into the same directory. The installer checks for an
+existing opposite role before copying files.
 
-## What each download contains
+For a client, enter the server IP address and control port (`47001` by default).
+The installer runs the diagnostics helper before service registration. It then
+registers `nstu-service` as an automatic `LocalSystem` service, stores the
+server address for subsequent logon diagnostics, and sets a mandatory reboot
+flag. The service remains stopped until that restart activates the client. The
+address entered here is not an enrollment credential and is not yet the
+service's authenticated runtime configuration.
 
-| Download | `nstu-setup.exe` | Deployment scripts | Automatic action |
-| --- | --- | --- | --- |
-| Full server installer | Yes, under `setup\\` | Yes, under `docs\\deployment\\` | Validates the server and configures the protected data root |
-| Full client installer | No | Yes; client lifecycle helpers under `client\\`, shared scripts under `docs\\deployment\\` | Registers `nstu-service` and requests a reboot |
-| Standalone `nstu-server.exe` | No | No | Nothing; start it manually |
-| Standalone client EXEs | No | No | Nothing; use the full client installer for service registration |
+For a server, diagnostics check the display, network link, and hardware H.264
+encoder before the server files and protected data root are installed.
 
-The scripts are therefore available after installing the complete package. A
-GitHub release asset that is only an EXE is not a complete package and cannot
-be used as the source for the commands in the enrollment guide. A source
-checkout is an alternative; its scripts are in `packaging\\`.
+## Integrated diagnostics
 
-## `nstu-setup.exe` interface
-
-`nstu-setup.exe` is a manual, elevated administrator tool. It does not run as a
-service, does not start the client service, and does not replace the NSIS
-installer. With no arguments it opens a role selector:
+`diagnostics\nstu-diagnostics.exe` is used by the installer and can be run by a
+technician. It displays checks sequentially. Without `--auto-close`, the window
+stays open for review. With `--auto-close`, only a completely clean run closes
+automatically; warnings and failures remain visible, and failures return a
+non-zero exit code. Use `--log=<path>` to retain the result list.
 
 ```powershell
-& "$env:ProgramFiles\\NSTU\\setup\\nstu-setup.exe"
+& "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" --target=client --server-ip=192.168.10.10 --server-port=47001 --installer
+& "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" --target=client --boot-check --auto-close --log="$env:ProgramData\NSTU\boot-check.log"
 ```
 
-Choose one of `Client`, `Server`, or `Both` for prerequisite auditing. `Both`
-combines the audit panels; it does not install both product roles on one
-machine. The same choice can be supplied for a controlled launch:
+The installer registers this command in the machine `Run` key, so the client
+health window starts when a user signs in after boot. It verifies that the
+service is running as `LocalSystem` in Session 0, that the installed agent is
+running in the signed-in session, that an operational network adapter exists,
+and that the configured server's TCP port is reachable. It is not a pre-logon
+Session 0 check. The agent intentionally does not run as SYSTEM: Windows
+Session 0 isolation means screen, tray, overlay, and input operations belong in
+the interactive user session.
+
+The diagnostics helper does not enroll a client or derive a protocol key from an
+IP address. Enrollment remains the authenticated one-time operation documented
+below.
+
+## Installer and scripts
+
+The complete installer includes lifecycle scripts under `client\` and
+`docs\deployment\`. Standalone EXEs do not register services and are not a
+supported installation source.
+
+Both roles are checked before installation to prevent conflicts. The client
+helper configures the service, data root, recovery policy, and protected ACLs.
+The server helper validates the role and protected data root.
+
+## Uninstall requires a restart
+
+The unified uninstaller deliberately performs no removal on the first invocation.
+It checks administrator access and Deep Freeze state, records a removal plan,
+creates a one-shot SYSTEM startup task, and requires a Windows restart. If the
+user declines or skips the restart, no service, process, or package file is
+changed. After reboot, the startup task verifies that uptime changed, then the
+role-specific uninstaller stops owned processes, removes the service, and
+schedules any locked files for next-boot deletion.
+
+Deep Freeze is third-party disk-freezing software. Uninstallation is blocked
+while its recognized protection services are active; boot Thawed and disable
+protection before staging removal.
+
+## Enrollment
+
+After installing the server, create a one-time enrollment secret with
+`docs\deployment\new-enrollment-secret.ps1`. Provision each client with the
+packaged `client\nstu-provision.exe`. Provisioning writes the authenticated
+DPAPI-protected runtime configuration used by `nstu-service`; the address
+entered in the installer is retained for diagnostics only until this exchange
+succeeds.
+
+## Build
+
+The diagnostics target is the standalone check helper used by the unified
+installer:
 
 ```powershell
-& "$env:ProgramFiles\\NSTU\\setup\\nstu-setup.exe" --target=server
-& "$env:ProgramFiles\\NSTU\\setup\\nstu-setup.exe" --target=client
-& "$env:ProgramFiles\\NSTU\\setup\\nstu-setup.exe" --target=both
+cmake -S . -B build -G "MinGW Makefiles" -DNSTU_ENABLE_PACKAGING=ON
+cmake --build build --target nstu-diagnostics
+cmake --build build --target nstu-package
 ```
 
-`--graphics-debug` requests the Direct3D 11 debug layer and records whether
-the layer was available. It can be combined with a target, for example:
-
-```powershell
-& "$env:ProgramFiles\\NSTU\\setup\\nstu-setup.exe" `
-  --target=server --graphics-debug
-```
-
-The setup window provides:
-
-- Role-specific prerequisite panels. Server checks show display and hardware
-  H.264 encoder readiness; client checks show network/display-session context.
-- Network adapter names, operational state, and link speed.
-- Policy audit for Task Manager, Command Prompt, Control Panel, and Drive C:
-  visibility.
-- An opt-in IPv4 website allowlist panel. Applying it changes WFP policy and
-  must be done only by an administrator who intends to enforce that policy.
-- A `Diagnostics` popup with DXGI adapter/vendor names, D3D feature level,
-  Desktop Duplication status, hardware/WARP device mode, and bounded recent
-  HRESULT events.
-
-The setup tool does not silently apply lockdown or WFP rules. Those operations
-require an explicit button press. It also does not configure autologon,
-install Deep Freeze, or enroll a client by itself.
-
-## Installer and script relationship
-
-The installer invokes lifecycle scripts automatically:
-
-- The server package runs `test-system-setup.ps1` and
-  `configure-data-root.ps1` during installation, after a role-conflict check
-  confirms that no NSTU client is installed.
-- The client package runs `client\\install-client-service.ps1`; that helper
-  is guarded by the same role-conflict check, invokes `test-system-setup.ps1`
-  and `configure-data-root.ps1`, registers the service as `start= auto`, and
-  requests a reboot.
-- The client uninstaller runs `client\\uninstall-client-service.ps1`, which
-  force-terminates NSTU-owned agent/service processes, stops/removes the
-  service, and requires a reboot. Any package file that is still locked is
-  registered with Windows `MoveFileEx(..., MOVEFILE_DELAY_UNTIL_REBOOT)` for
-  deletion during the next boot. It fails closed if the recognized Deep Freeze
-  services indicate that protection is still active.
-
-The server uninstaller runs `docs\\deployment\\uninstall-server.ps1`,
-force-terminates the installed `nstu-server.exe`, removes the server/setup
-files, schedules locked files for next-boot deletion, and sets the NSIS reboot
-flag.
-
-The enrollment secret is a separate administrator operation. After the server
-installer has completed, run `new-enrollment-secret.ps1` from
-`docs\\deployment\\` on the server, then use the installed
-`client\\nstu-provision.exe` on each client. See the
-[computer-room enrollment section](../README.md#connecting-a-computer-room)
-for the exact commands.
-
-## Build versus runtime flags
-
-`NSTU_BUILD_SETUP=ON` is a CMake configure option that decides whether the
-`nstu-setup` executable is built. It is not a command-line argument to the
-finished executable. There is currently no `--setup` runtime flag. The runtime
-flags are `--target=client|server|both` and `--graphics-debug`.
-
-To build the tool from source:
-
-```powershell
-cmake -S . -B build-setup -G "MinGW Makefiles" `
-  -DCMAKE_BUILD_TYPE=Release -DNSTU_BUILD_SETUP=ON `
-  -DNSTU_BUILD_CLIENT=OFF -DNSTU_BUILD_SERVER=OFF `
-  -DNSTU_BUILD_VIDEO=OFF -DNSTU_BUILD_TESTS=OFF
-cmake --build build-setup --target nstu-setup
-```
+`nstu-package` requires NSIS `makensis.exe`. The generated package is the release
+installer. Use [VM lifecycle testing](VM_TESTING.md) for the destructive service,
+End Task, uninstall, and persistent reboot validation.

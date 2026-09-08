@@ -85,6 +85,33 @@ int main() {
     std::string error;
     assert(server.start(std::move(config), &error));
 
+    nstu::net::TcpSocket diagnostic_socket;
+    assert(diagnostic_socket.connect("127.0.0.1", server.local_port(), &error));
+    assert(diagnostic_socket.set_io_timeouts(5000, 5000, &error));
+    nstu::protocol::ConnectionPreamble diagnostic_request;
+    diagnostic_request.role = nstu::protocol::ConnectionRole::diagnostic;
+    const auto diagnostic_wire =
+        nstu::protocol::encode_connection_preamble(diagnostic_request);
+    assert(diagnostic_socket.send_all(diagnostic_wire, &error) ==
+           static_cast<int>(diagnostic_wire.size()));
+    std::array<std::byte, nstu::protocol::kConnectionPreambleBytes>
+        diagnostic_response{};
+    std::size_t diagnostic_received = 0;
+    while (diagnostic_received < diagnostic_response.size()) {
+        const int received = diagnostic_socket.receive(
+            std::span<std::byte>(diagnostic_response).subspan(
+                diagnostic_received),
+            &error);
+        assert(received > 0);
+        diagnostic_received += static_cast<std::size_t>(received);
+    }
+    const auto decoded_diagnostic =
+        nstu::protocol::decode_connection_preamble(diagnostic_response);
+    assert(decoded_diagnostic.has_value());
+    assert(decoded_diagnostic->role ==
+           nstu::protocol::ConnectionRole::server);
+    diagnostic_socket.close();
+
     const auto now = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());

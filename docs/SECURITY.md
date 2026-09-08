@@ -143,6 +143,15 @@ metadata before UDP reception begins.
 
 ## Remaining blockers
 
+- The unified installer and diagnostics helper do not apply Task Manager,
+  Command Prompt, Control Panel, or drive-visibility policy. Production
+  student-account hardening therefore still requires centrally managed Group
+  Policy or a separately reviewed target-SID-aware deployment mechanism.
+- Local service-agent IPC rejects remote clients and verifies that the pipe peer
+  is the installed `nstu-agent.exe` in an active interactive session. It still
+  lacks a per-launch authenticated bootstrap and heartbeat. Add both before
+  treating deliberate same-user launch racing or suspension of the genuine
+  agent as fully mitigated.
 - Membership-driven video group-key generation, rotation, and distribution wired
   into live stream startup and UDP reception.
 - Confidentiality: HMAC authenticates but does not encrypt screen content.

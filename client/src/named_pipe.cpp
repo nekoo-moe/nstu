@@ -4,9 +4,11 @@
 
 #include <windows.h>
 #include <sddl.h>
+#include <wtsapi32.h>
 
 #include <limits>
 #include <utility>
+#include <vector>
 
 namespace nstu::client {
 namespace {
@@ -74,6 +76,125 @@ bool NamedPipe::wait_for_client(std::string* error) const {
     }
     set_error(error, "ConnectNamedPipe failed");
     return false;
+}
+
+bool NamedPipe::validate_client_process(
+    std::wstring_view expected_image_path, std::uint32_t* session_id,
+    std::string* error) const {
+    if (session_id != nullptr) {
+        *session_id = 0;
+    }
+    if (!is_open()) {
+        set_error(error, "pipe is not open");
+        return false;
+    }
+    if (expected_image_path.empty()) {
+        set_error(error, "expected client image path is empty");
+        return false;
+    }
+
+    DWORD client_pid = 0;
+    if (!GetNamedPipeClientProcessId(reinterpret_cast<HANDLE>(handle_),
+                                     &client_pid) ||
+        client_pid == 0) {
+        set_error(error, "GetNamedPipeClientProcessId failed");
+        return false;
+    }
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 client_pid);
+    if (process == nullptr) {
+        set_error(error, "OpenProcess for pipe client failed");
+        return false;
+    }
+
+    bool valid = false;
+    do {
+        DWORD client_session = 0;
+        if (!ProcessIdToSessionId(client_pid, &client_session) ||
+            client_session == 0) {
+            set_error(error, "pipe client is not in an interactive session");
+            break;
+        }
+
+        LPWSTR state_buffer = nullptr;
+        DWORD state_bytes = 0;
+        const bool state_queried = WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE, client_session, WTSConnectState,
+            &state_buffer, &state_bytes) != FALSE;
+        WTS_CONNECTSTATE_CLASS state = WTSDown;
+        if (state_queried && state_buffer != nullptr &&
+            state_bytes >= sizeof(state)) {
+            state = *reinterpret_cast<WTS_CONNECTSTATE_CLASS*>(state_buffer);
+        }
+        if (state_buffer != nullptr) {
+            WTSFreeMemory(state_buffer);
+        }
+        if (!state_queried || (state != WTSActive && state != WTSConnected)) {
+            set_error(error, "pipe client session is not interactive");
+            break;
+        }
+
+        DWORD capacity = MAX_PATH;
+        std::vector<wchar_t> image_buffer(capacity);
+        std::wstring image_path;
+        for (;;) {
+            DWORD image_length = capacity;
+            if (QueryFullProcessImageNameW(process, 0, image_buffer.data(),
+                                           &image_length)) {
+                image_path.assign(image_buffer.data(), image_length);
+                break;
+            }
+            const DWORD query_error = GetLastError();
+            if (query_error != ERROR_INSUFFICIENT_BUFFER || capacity >= 32768) {
+                set_error(error, "QueryFullProcessImageNameW failed");
+                break;
+            }
+            capacity = std::min<DWORD>(capacity * 2, 32768);
+            image_buffer.resize(capacity);
+        }
+        if (image_path.empty()) {
+            break;
+        }
+
+        auto get_full_path = [](const std::wstring& input) {
+            DWORD path_capacity = MAX_PATH;
+            std::vector<wchar_t> path_buffer(path_capacity);
+            for (;;) {
+                const DWORD path_length = GetFullPathNameW(
+                    input.c_str(), path_capacity, path_buffer.data(), nullptr);
+                if (path_length == 0) {
+                    return std::wstring{};
+                }
+                if (path_length < path_capacity) {
+                    return std::wstring(path_buffer.data(), path_length);
+                }
+                if (path_length >= 32768) {
+                    return std::wstring{};
+                }
+                path_capacity = path_length + 1;
+                path_buffer.resize(path_capacity);
+            }
+        };
+        const std::wstring actual_full_path = get_full_path(image_path);
+        const std::wstring expected_full_path =
+            get_full_path(std::wstring(expected_image_path));
+        if (actual_full_path.empty() || expected_full_path.empty() ||
+            CompareStringOrdinal(actual_full_path.c_str(), -1,
+                                 expected_full_path.c_str(), -1, TRUE) !=
+                CSTR_EQUAL) {
+            set_error(error, "pipe client image path does not match NSTU agent");
+            break;
+        }
+
+        if (session_id != nullptr) {
+            *session_id = client_session;
+        }
+        valid = true;
+    } while (false);
+
+    CloseHandle(process);
+    return valid;
 }
 
 bool NamedPipe::connect_client(std::wstring_view name, std::uint32_t timeout_ms,

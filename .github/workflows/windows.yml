@@ -13,18 +13,16 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5
+      - name: Install NSIS
+        run: choco install nsis --no-progress --yes --force
       - name: Configure
         run: cmake -S . -B build -A x64 -DNSTU_ENABLE_WERROR=ON
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
-      - name: Install NSIS
-        run: choco install nsis --no-progress --yes
-      - name: Package server installer
-        run: cmake --build build --config Release --target nstu-package-server --parallel
-      - name: Package client installer
-        run: cmake --build build --config Release --target nstu-package-client --parallel
+      - name: Package unified installer
+        run: cmake --build build --config Release --target nstu-package --parallel
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:

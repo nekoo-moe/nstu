@@ -74,7 +74,8 @@ std::vector<std::byte> encode_connection_preamble(
     if (preamble.preamble_bytes != kConnectionPreambleBytes ||
         preamble.reserved != 0 ||
         (preamble.role != ConnectionRole::client &&
-         preamble.role != ConnectionRole::server)) {
+         preamble.role != ConnectionRole::server &&
+         preamble.role != ConnectionRole::diagnostic)) {
         return {};
     }
     std::vector<std::byte> wire(kConnectionPreambleBytes);
@@ -116,7 +117,8 @@ std::optional<ConnectionPreamble> decode_connection_preamble(
         preamble.preamble_bytes != kConnectionPreambleBytes ||
         preamble.reserved != 0 ||
         (preamble.role != ConnectionRole::client &&
-         preamble.role != ConnectionRole::server)) {
+         preamble.role != ConnectionRole::server &&
+         preamble.role != ConnectionRole::diagnostic)) {
         return std::nullopt;
     }
     std::copy_n(wire.begin() + static_cast<std::ptrdiff_t>(offset),
@@ -128,7 +130,8 @@ std::optional<ConnectionPreamble> decode_connection_preamble(
         (!identity_present || preamble.key_id == 0)) {
         return std::nullopt;
     }
-    if (preamble.role == ConnectionRole::server &&
+    if ((preamble.role == ConnectionRole::server ||
+         preamble.role == ConnectionRole::diagnostic) &&
         (identity_present || preamble.key_id != 0)) {
         return std::nullopt;
     }

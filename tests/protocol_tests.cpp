@@ -36,6 +36,13 @@ int main() {
     assert(decoded_preamble->role == ConnectionRole::client);
     assert(decoded_preamble->key_id == preamble.key_id);
     assert(decoded_preamble->identity == preamble.identity);
+    ConnectionPreamble diagnostic;
+    diagnostic.role = ConnectionRole::diagnostic;
+    const auto diagnostic_wire = encode_connection_preamble(diagnostic);
+    const auto decoded_diagnostic =
+        decode_connection_preamble(diagnostic_wire);
+    assert(decoded_diagnostic.has_value());
+    assert(decoded_diagnostic->role == ConnectionRole::diagnostic);
     auto invalid_preamble = preamble_wire;
     invalid_preamble[6] = std::byte{0xff};
     assert(!decode_connection_preamble(invalid_preamble).has_value());

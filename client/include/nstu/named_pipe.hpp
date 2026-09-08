@@ -22,6 +22,10 @@ public:
     [[nodiscard]] bool create_server(std::wstring_view name,
                                      std::string* error = nullptr);
     [[nodiscard]] bool wait_for_client(std::string* error = nullptr) const;
+    [[nodiscard]] bool validate_client_process(
+        std::wstring_view expected_image_path,
+        std::uint32_t* session_id = nullptr,
+        std::string* error = nullptr) const;
     [[nodiscard]] bool connect_client(std::wstring_view name,
                                       std::uint32_t timeout_ms,
                                       std::string* error = nullptr);

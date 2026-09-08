@@ -5,6 +5,9 @@
 #include <userenv.h>
 #include <wtsapi32.h>
 
+#include <algorithm>
+#include <vector>
+
 namespace nstu::client {
 namespace {
 
@@ -14,18 +17,47 @@ void set_error(std::string* error, const char* message) {
     }
 }
 
+std::vector<DWORD> interactive_session_candidates() {
+    std::vector<DWORD> candidates;
+    const DWORD console_session = WTSGetActiveConsoleSessionId();
+    if (console_session != 0xffffffffu) {
+        candidates.push_back(console_session);
+    }
+
+    PWTS_SESSION_INFOW sessions = nullptr;
+    DWORD count = 0;
+    if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions,
+                               &count)) {
+        return candidates;
+    }
+    const auto append_state = [&](WTS_CONNECTSTATE_CLASS state) {
+        for (DWORD index = 0; index < count; ++index) {
+            if (sessions[index].State != state ||
+                std::ranges::find(candidates, sessions[index].SessionId) !=
+                    candidates.end()) {
+                continue;
+            }
+            candidates.push_back(sessions[index].SessionId);
+        }
+    };
+    append_state(WTSActive);
+    append_state(WTSConnected);
+    WTSFreeMemory(sessions);
+    return candidates;
+}
+
 } // namespace
 
 bool launch_agent_in_active_session(const std::wstring& agent_path,
-                                    std::string* error) {
-    const DWORD session_id = WTSGetActiveConsoleSessionId();
-    if (session_id == 0xffffffffu) {
-        set_error(error, "no active console session");
-        return false;
-    }
+                                     std::string* error) {
     HANDLE user_token = nullptr;
-    if (!WTSQueryUserToken(session_id, &user_token)) {
-        set_error(error, "WTSQueryUserToken failed");
+    for (const DWORD session_id : interactive_session_candidates()) {
+        if (WTSQueryUserToken(session_id, &user_token)) {
+            break;
+        }
+    }
+    if (user_token == nullptr) {
+        set_error(error, "no active interactive user token");
         return false;
     }
     void* environment = nullptr;

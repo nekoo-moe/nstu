@@ -14,9 +14,9 @@
 - [x] DPAPI machine-scoped secret storage with restrictive ACL and atomic replace.
 - [x] In-process key enrollment, monotonic rotation, revocation, and zeroization.
 - [x] Bounded unauthenticated handshake rate limiter with temporary blocking.
-- [x] CPack/NSIS server and client installers with automatic service
-      registration, recovery policy, reboot activation, and package-owned
-      uninstall handling.
+- [x] Unified NSIS role-selecting installer with automatic client service
+      registration, recovery policy, reboot activation, conflict checks, and
+      package-owned uninstall handling.
 - [x] Teacher-focused server UI with a responsive latest-snapshot wall,
       adjustable 5-10 second interval, health summary, filtering, focused
       telemetry, chat and controls; lightweight Native Win32 client chat shell.
@@ -75,7 +75,8 @@
 ## Remaining production release gates
 
 - [ ] Run the production workflow with the real code-signing certificate and
-      verify signatures/timestamps on both installers and installed binaries.
+      verify signatures/timestamps on the unified installer and installed
+      binaries.
 - [ ] Validate the conservative Deep Freeze install/uninstall/data-root behavior
       against every edition and version the project claims to support.
 - [ ] Execute and attach evidence for the 50-client soak, multicast switch

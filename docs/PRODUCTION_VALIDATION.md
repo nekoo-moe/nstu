@@ -11,7 +11,7 @@ required rows.
 
 | Gate | Required evidence | Result | Evidence path/link |
 |---|---|---|---|
-| Authenticode | Valid signatures and trusted timestamp on both installers and installed executables | Pending | |
+| Authenticode | Valid signature and trusted timestamp on the unified installer and installed executables | Pending | |
 | 50-client soak | At least 8 hours, reconnect/lock/chat/snapshot/annotation/broadcast cycles, no crash or unbounded memory growth | Pending | |
 | CPU/RAM/network | `collect-benchmarks.ps1` CSV at 5, 7, and 10 second snapshot intervals plus server/client hardware specification | Pending | |
 | Multicast switches | Sender/receiver output for every supported switch/VLAN/IGMP configuration | Pending | |
@@ -24,4 +24,7 @@ required rows.
 
 Use `packaging/test-production-deployment.ps1 -RequireSignedArtifacts` on each
 machine before and after the soak. Use `tools/production/test-multicast.ps1` on
-separate sender and receiver machines for the switch matrix.
+separate sender and receiver machines for the switch matrix. Run the guarded
+Windows Sandbox lifecycle harness for pre-reboot service/uninstall evidence,
+then complete the persistent reboot and Deep Freeze sequence in
+`docs/VM_TESTING.md`; Sandbox results alone cannot pass those gates.

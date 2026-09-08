@@ -2,6 +2,7 @@
 #include "nstu/client_config.hpp"
 
 #include <windows.h>
+#include <wtsapi32.h>
 
 #include <array>
 #include <cassert>
@@ -21,6 +22,39 @@ int main() {
     std::thread server_thread([&server] {
         std::string thread_error;
         assert(server.wait_for_client(&thread_error));
+        wchar_t executable[MAX_PATH]{};
+        assert(GetModuleFileNameW(nullptr, executable, MAX_PATH) != 0);
+        std::uint32_t session_id = 0;
+        DWORD current_session = 0;
+        assert(ProcessIdToSessionId(GetCurrentProcessId(), &current_session));
+        LPWSTR state_buffer = nullptr;
+        DWORD state_bytes = 0;
+        const bool state_queried =
+            current_session != 0 &&
+            WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,
+                                        current_session, WTSConnectState,
+                                        &state_buffer, &state_bytes) != FALSE;
+        WTS_CONNECTSTATE_CLASS state = WTSDown;
+        if (state_queried && state_buffer != nullptr &&
+            state_bytes >= sizeof(state)) {
+            state = *reinterpret_cast<WTS_CONNECTSTATE_CLASS*>(state_buffer);
+        }
+        if (state_buffer != nullptr) {
+            WTSFreeMemory(state_buffer);
+        }
+        const bool interactive_session =
+            state_queried && (state == WTSActive || state == WTSConnected);
+        const bool valid_client = server.validate_client_process(
+            executable, &session_id, &thread_error);
+        assert(valid_client == interactive_session);
+        if (interactive_session) {
+            assert(session_id == current_session);
+        } else {
+            assert(session_id == 0);
+        }
+        assert(!server.validate_client_process(
+            L"C:\\NSTU\\missing\\nstu-agent.exe", &session_id,
+            &thread_error));
         std::array<std::byte, 1> command{};
         assert(server.read(command, &thread_error) == 1);
         assert(command[0] == std::byte{0x01});

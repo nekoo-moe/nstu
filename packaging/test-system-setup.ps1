@@ -61,12 +61,17 @@ try {
         $resolvedDataRoot.TrimEnd('\') -eq $driveRoot.TrimEnd('\')) {
         throw "DataRoot must be an absolute subdirectory."
     }
-    $drive = Get-Volume -DriveLetter $driveRoot.Substring(0, 1) -ErrorAction Stop
-    if ($drive.FileSystem -notin @("NTFS", "ReFS")) {
-        $failures.Add("NSTU DataRoot must use NTFS or ReFS for protected ACLs; found $($drive.FileSystem).")
+    # DriveInfo avoids a CIM dependency in hardened Windows Sandbox guests;
+    # the filesystem format is all this preflight needs from the volume API.
+    $drive = [IO.DriveInfo]::new($driveRoot)
+    if (-not $drive.IsReady) {
+        throw "The data-root volume is not ready: $driveRoot"
+    }
+    if ($drive.DriveFormat -notin @("NTFS", "ReFS")) {
+        $failures.Add("NSTU DataRoot must use NTFS or ReFS for protected ACLs; found $($drive.DriveFormat).")
     }
     New-Item -ItemType Directory -Path $resolvedDataRoot -Force | Out-Null
-    $probe = Join-Path $resolvedDataRoot ".nstu-setup-$PID.tmp"
+    $probe = Join-Path $resolvedDataRoot ".nstu-diagnostics-$PID.tmp"
     [IO.File]::WriteAllText($probe, "NSTU setup probe")
     Remove-Item -LiteralPath $probe -Force
 } catch {
@@ -77,17 +82,51 @@ $firewallService = Get-Service -Name MpsSvc -ErrorAction SilentlyContinue
 if ($null -eq $firewallService -or $firewallService.Status -ne "Running") {
     $failures.Add("Windows Defender Firewall service must be running.")
 }
-$disabledProfiles = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue |
-    Where-Object { -not $_.Enabled } |
-    Select-Object -ExpandProperty Name)
+$disabledProfiles = @()
+try {
+    $disabledProfiles = @(Get-NetFirewallProfile -ErrorAction Stop |
+        Where-Object { -not $_.Enabled } |
+        Select-Object -ExpandProperty Name)
+} catch {
+    $warnings.Add(("Could not query firewall profiles through the NetSecurity/CIM " +
+        "provider: {0}. Falling back to the registry." -f $_.Exception.Message))
+    $profileRegistryPaths = [ordered]@{
+        Domain = "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile"
+        Private = "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile"
+        Public = "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile"
+    }
+    foreach ($profileName in $profileRegistryPaths.Keys) {
+        try {
+            $profilePath = $profileRegistryPaths[$profileName]
+            $profileValue = (Get-ItemProperty -LiteralPath $profilePath `
+                -Name EnableFirewall -ErrorAction Stop).EnableFirewall
+            if ([int]$profileValue -eq 0) {
+                $disabledProfiles += $profileName
+            } elseif ([int]$profileValue -ne 1) {
+                $warnings.Add(("Firewall profile '{0}' has an unexpected registry " +
+                    "EnableFirewall value '{1}'." -f $profileName, $profileValue))
+            }
+        } catch {
+            $warnings.Add(("Could not determine firewall profile '{0}' from the " +
+                "registry: {1}" -f $profileName, $_.Exception.Message))
+        }
+    }
+}
 if ($disabledProfiles.Count -gt 0) {
     $warnings.Add("Firewall profiles disabled: $($disabledProfiles -join ', ').")
 }
 
 if ($Role -eq "Server") {
-    $tcpConflict = Get-NetTCPConnection -State Listen -LocalPort $ControlPort `
-        -ErrorAction SilentlyContinue
-    if ($null -ne $tcpConflict) {
+    $tcpConflict = $null
+    try {
+        $tcpConflict = @(Get-NetTCPConnection -State Listen `
+            -LocalPort $ControlPort -ErrorAction Stop)
+    } catch {
+        $warnings.Add(("Could not query TCP listeners for port {0}: {1}. " +
+            "The port conflict check could not be completed." -f $ControlPort,
+            $_.Exception.Message))
+    }
+    if ($null -ne $tcpConflict -and $tcpConflict.Count -gt 0) {
         $unexpectedTcp = @($tcpConflict | Where-Object {
             -not (Test-ExpectedServerProcess -ProcessId $_.OwningProcess)
         })
@@ -97,9 +136,16 @@ if ($Role -eq "Server") {
             $warnings.Add("The installed NSTU server is using TCP $ControlPort. Close it before launching the upgraded server.")
         }
     }
-    $udpConflict = Get-NetUDPEndpoint -LocalPort $VideoPort `
-        -ErrorAction SilentlyContinue
-    if ($null -ne $udpConflict) {
+    $udpConflict = $null
+    try {
+        $udpConflict = @(Get-NetUDPEndpoint -LocalPort $VideoPort `
+            -ErrorAction Stop)
+    } catch {
+        $warnings.Add(("Could not query UDP endpoints for port {0}: {1}. " +
+            "The port conflict check could not be completed." -f $VideoPort,
+            $_.Exception.Message))
+    }
+    if ($null -ne $udpConflict -and $udpConflict.Count -gt 0) {
         $unexpectedUdp = @($udpConflict | Where-Object {
             -not (Test-ExpectedServerProcess -ProcessId $_.OwningProcess)
         })
@@ -109,16 +155,24 @@ if ($Role -eq "Server") {
             $warnings.Add("The installed NSTU server is using UDP $VideoPort. Close it before launching the upgraded server.")
         }
     }
-    $allowRules = @(Get-NetFirewallRule -Enabled True -Direction Inbound `
-        -Action Allow -ErrorAction SilentlyContinue | ForEach-Object {
-            $rule = $_
-            Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule `
-                -ErrorAction SilentlyContinue | Where-Object {
-                    ($_.Protocol -eq "TCP" -and $_.LocalPort -eq "$ControlPort") -or
-                    ($_.Protocol -eq "UDP" -and $_.LocalPort -eq "$VideoPort")
-                }
-        })
-    if ($allowRules.Count -eq 0) {
+    $allowRules = @()
+    $allowRulesQueryable = $true
+    try {
+        $allowRules = @(Get-NetFirewallRule -Enabled True -Direction Inbound `
+            -Action Allow -ErrorAction Stop | ForEach-Object {
+                $rule = $_
+                Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule `
+                    -ErrorAction Stop | Where-Object {
+                        ($_.Protocol -eq "TCP" -and $_.LocalPort -eq "$ControlPort") -or
+                        ($_.Protocol -eq "UDP" -and $_.LocalPort -eq "$VideoPort")
+                    }
+            })
+    } catch {
+        $allowRulesQueryable = $false
+        $warnings.Add(("Could not query inbound firewall port rules: {0}. " +
+            "Verify the TCP/UDP allow rules manually." -f $_.Exception.Message))
+    }
+    if ($allowRulesQueryable -and $allowRules.Count -eq 0) {
         $warnings.Add("No enabled inbound allow rule was found for TCP $ControlPort or UDP $VideoPort. Add rules scoped to the classroom VLAN before deployment.")
     }
 }

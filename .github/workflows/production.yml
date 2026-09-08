@@ -18,6 +18,8 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v5
+      - name: Install NSIS
+        run: choco install nsis --no-progress --yes --force
 
       - name: Validate tag
         shell: pwsh
@@ -85,6 +87,7 @@ jobs:
         run: >-
           cmake -S . -B build -A x64
           -DNSTU_ENABLE_WERROR=ON
+          -DNSTU_PACKAGE_INSTALL_CONFIG=Release
           -DNSTU_ENABLE_SIGNING=ON
           -DNSTU_SIGNTOOL_EXECUTABLE="${{ steps.signtool.outputs.path }}"
           -DNSTU_SIGN_CERT_SHA1="${{ steps.certificate.outputs.thumbprint }}"
@@ -96,22 +99,20 @@ jobs:
 
       - name: Package signed installers
         run: |
-          choco install nsis --no-progress --yes
-          cmake --build build --config Release --target nstu-package-server --parallel
-          cmake --build build --config Release --target nstu-package-client --parallel
+          cmake --build build --config Release --target nstu-package --parallel
 
       - name: Verify signatures and hashes
         shell: pwsh
         run: |
           $installers = @(Get-ChildItem build\nstu-*.exe -File)
-          if ($installers.Count -ne 2) { throw 'Expected two installers.' }
+          if ($installers.Count -ne 1) { throw 'Expected one unified installer.' }
           $requiredBinaries = @(
             'nstu-server.exe', 'nstu-service.exe', 'nstu-agent.exe',
-            'nstu-provision.exe', 'nstu_video_probe.exe')
+            'nstu-provision.exe', 'nstu-diagnostics.exe')
           $artifacts = @($installers)
           foreach ($name in $requiredBinaries) {
             $binaryMatches = @(Get-ChildItem build -Recurse -Filter $name -File |
-              Where-Object { $_.FullName -notmatch '\\_CPack_Packages\\' })
+              Where-Object { $_.FullName -notmatch '\\_CPack_Packages\\|\\unified-installer-stage\\' })
             if ($binaryMatches.Count -ne 1) {
               throw "Expected one built artifact named $name, found $($binaryMatches.Count)."
             }

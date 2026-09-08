@@ -102,6 +102,7 @@ public:
         initial,
         enrollment,
         enrollment_complete,
+        probe_complete,
         auth_hello,
         auth_proof,
         authenticated,
@@ -315,8 +316,27 @@ private:
                 const auto preamble = protocol::decode_connection_preamble(
                     std::span<const std::byte>(state->initial_buffer)
                         .first(protocol::kConnectionPreambleBytes));
-                if (!preamble ||
-                    preamble->role != protocol::ConnectionRole::client) {
+                if (!preamble) {
+                    fail_handshake(*state, "invalid client preamble");
+                    return;
+                }
+                if (preamble->role == protocol::ConnectionRole::diagnostic) {
+                    protocol::ConnectionPreamble response;
+                    response.role = protocol::ConnectionRole::server;
+                    const auto probe_response =
+                        protocol::encode_connection_preamble(response);
+                    if (probe_response.empty() ||
+                        !dispatcher_.send(state->connection_id, probe_response,
+                                          nullptr)) {
+                        fail_handshake(*state,
+                                       "diagnostic response could not be sent");
+                        return;
+                    }
+                    state->initial_buffer.clear();
+                    state->stage = Stage::probe_complete;
+                    return;
+                }
+                if (preamble->role != protocol::ConnectionRole::client) {
                     fail_handshake(*state, "invalid client preamble");
                     return;
                 }
@@ -352,7 +372,8 @@ private:
         if (state.stage == Stage::enrollment) {
             return process_enrollment(state, frame);
         }
-        if (state.stage == Stage::enrollment_complete) {
+        if (state.stage == Stage::enrollment_complete ||
+            state.stage == Stage::probe_complete) {
             dispatcher_.disconnect(state.connection_id);
             return false;
         }

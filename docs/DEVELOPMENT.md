@@ -116,12 +116,13 @@ Release dùng `windows-release` thay cho `windows-debug`.
 
 - `NSTU_BUILD_CLIENT=ON|OFF`: build service và agent client.
 - `NSTU_BUILD_SERVER=ON|OFF`: build server UI.
-- `NSTU_BUILD_SETUP=ON|OFF`: build administrator bootstrapper trên Windows.
+- `NSTU_BUILD_SETUP=ON|OFF`: build the `nstu-diagnostics` helper used by the
+  unified installer and client boot checks.
 - `NSTU_BUILD_VIDEO=ON|OFF`: build DXGI/Media Foundation trên Windows.
 - `NSTU_BUILD_TESTS=ON|OFF`: build test suite.
 - `NSTU_SERVER_USE_IMGUI=ON|OFF`: bật/tắt server UI Dear ImGui.
 - `NSTU_ENABLE_WERROR=ON|OFF`: coi warning là error.
-- `NSTU_ENABLE_PACKAGING=ON|OFF`: bật/tắt target CPack/NSIS.
+- `NSTU_ENABLE_PACKAGING=ON|OFF`: bật/tắt target installer NSIS hợp nhất.
 
 Ví dụ chỉ build core protocol/test:
 
@@ -166,17 +167,19 @@ và `Request keyframe` của H.264 vẫn còn cho continuous-video mode tùy ch�
 
 ## Cài đặt và kiểm thử
 
-Client installer tự gọi service lifecycle script với quyền Administrator. Cài
-đặt đăng ký service ở chế độ automatic, cấu hình recovery và đặt cờ bắt buộc
-restart; service bắt đầu ở lần boot tiếp theo. Uninstaller dừng agent, xóa
-service trước khi xóa file và cũng đặt cờ restart.
+Installer hợp nhất tự gọi service lifecycle script với quyền Administrator.
+Cài đặt client đăng ký service ở chế độ automatic, cấu hình recovery và đặt cờ
+bắt buộc restart; service bắt đầu ở lần boot tiếp theo. Lần gọi uninstaller đầu
+chỉ stage startup task và không thay đổi service, process hoặc file; việc dừng,
+xóa và xử lý file bị khóa chỉ chạy sau restart.
 
-Installer chạy `test-system-setup.ps1` để kiểm tra Windows x64, quyền
-Administrator, data root NTFS/ReFS có thể ghi, Windows Firewall, port conflict
-và cấu hình autologon. Script không bật autologon hoặc lưu credential; built-in
-Administrator autologon bị từ chối, còn dedicated standard-user autologon chỉ
-được nêu như lựa chọn. Khi upgrade server, listener thuộc đúng binary NSTU đã
-cài được cảnh báo thay vì bị nhầm với ứng dụng chiếm port khác.
+Lifecycle helper chạy `test-system-setup.ps1` để kiểm tra Windows x64,
+quyền Administrator, data root NTFS/ReFS có thể ghi, Windows Firewall và
+cấu hình autologon. Vai trò Server còn kiểm tra xung đột control/video port.
+Script không bật autologon hoặc lưu credential; built-in Administrator
+autologon bị từ chối, còn dedicated standard-user autologon chỉ được nêu
+như lựa chọn. Khi upgrade server, listener thuộc đúng binary NSTU đã cài
+được cảnh báo thay vì bị nhầm với ứng dụng chiếm port khác.
 
 Kiểm thử nhanh sau build:
 
@@ -190,40 +193,40 @@ thay thế soak test hoặc kiểm tra multicast trên switch thật.
 
 ## Đóng gói installer
 
-Trên Windows, CMake tạo hai target CPack/NSIS độc lập:
+Trên Windows, CMake tạo một target NSIS hợp nhất:
 
 ```powershell
-cmake --build build-msvc --config Release --target nstu-package-server
-cmake --build build-msvc --config Release --target nstu-package-client
+cmake --build build-msvc --config Release --target nstu-package
 ```
 
-Kết quả là `nstu-server-0.1.0.exe` và `nstu-client-0.1.0.exe` trong build
-directory. Cần cài [NSIS](https://nsis.sourceforge.io/) và đặt `makensis.exe`
-trong `PATH`. Nếu môi trường build không có NSIS, có thể tạo archive để kiểm
-tra layout bằng CPack:
+Kết quả là `nstu-0.1.0-setup.exe` trong build directory. Installer mở đầu bằng
+lựa chọn Client hoặc Server, kiểm tra vai trò đối diện trước khi cài và gọi
+`nstu-diagnostics` theo từng bước. Cần cài [NSIS](https://nsis.sourceforge.io/)
+và đặt `makensis.exe` trong `PATH`. Nếu môi trường build không có NSIS, vẫn có
+thể kiểm tra layout bằng script staging:
 
 ```powershell
-cpack --config build-msvc/CPackConfig.cmake -G ZIP `
-  -DCPACK_COMPONENTS_ALL="server;docs" `
-  -DCPACK_PACKAGE_FILE_NAME=nstu-server-0.1.0
-cpack --config build-msvc/CPackConfig.cmake -G ZIP `
-  -DCPACK_COMPONENTS_ALL="client;docs" `
-  -DCPACK_PACKAGE_FILE_NAME=nstu-client-0.1.0
+cmake -DNSTU_BUILD_DIR=build-msvc `
+  -DNSTU_STAGE_DIR=build-msvc/unified-installer-stage `
+  -P packaging/PrepareUnifiedPackage.cmake
 ```
 
-Client package có `install-client-service.ps1` và
-`uninstall-client-service.ps1` làm helper nội bộ cho NSIS. Các script yêu cầu
-quyền Administrator; quy trình được hỗ trợ là chạy installer/uninstaller thay
-vì gọi script trực tiếp. Uninstall helper fail closed khi phát hiện service
-Deep Freeze `DFServ` hoặc `DeepFrz` chưa bị disable.
+Package staging chứa client, server, diagnostics và tài liệu. Các lifecycle
+script yêu cầu Administrator; quy trình hỗ trợ là chạy installer/uninstaller
+hợp nhất thay vì gọi helper trực tiếp. Lần gọi uninstall đầu tiên không thay
+đổi service, process hoặc file cho đến sau restart bắt buộc; quá trình fail
+closed khi service Deep Freeze được nhận diện (`DFServ` hoặc `DeepFrz`) đang
+active.
 
-Mỗi commit push lên `main` sẽ chạy Windows CI, build/test, tạo hai installer và
-phát hành một GitHub pre-release tự động dạng `nightly-<run-number>`. Pull
-Request vẫn được build/test nhưng không tạo release. Các release thủ công như
-`v0.2.0-dev` vẫn được giữ độc lập.
+Mỗi commit push lên `main` sẽ chạy Windows CI, build/test, tạo một unified
+installer và phát hành GitHub pre-release tự động dạng
+`nightly-<run-number>`. Pull Request vẫn được build/test nhưng không tạo
+release. Các release thủ công như `v0.2.0-dev` vẫn được giữ độc lập.
 
-MVP chưa tự động signing, cấp key hoặc cấu hình multicast. Service recovery đã
-được installer cấu hình, nhưng vẫn cần kiểm thử upgrade/reboot trên image thật.
+Nightly CI chưa ký artifact; workflow production có signing nhưng chỉ chạy khi
+có certificate và evidence gate đầy đủ. MVP chưa tự động cấp key hoặc
+cấu hình multicast. Service recovery đã được installer cấu hình, nhưng vẫn
+cần kiểm thử upgrade/reboot trên image thật.
 
 ## Secret, memory và Deep Freeze
 
