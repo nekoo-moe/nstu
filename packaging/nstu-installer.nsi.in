@@ -154,9 +154,11 @@ nstu_no_server_marker:
 
   SetOutPath "$PLUGINSDIR\\NSTU-Diagnostics"
   File "${STAGE}\\diagnostics\\nstu-diagnostics.exe"
+!if @NSTU_MINGW_RUNTIME_FILES_PRESENT@
   File /nonfatal "${STAGE}\\diagnostics\\libgcc_s_seh-1.dll"
   File /nonfatal "${STAGE}\\diagnostics\\libstdc++-6.dll"
   File /nonfatal "${STAGE}\\diagnostics\\libwinpthread-1.dll"
+!endif
   StrCmp $Role "Server" nstu_preflight_server
   StrCmp $Role "Client" 0 nstu_preflight_invalid_role
   nsExec::ExecToStack '"$PLUGINSDIR\\NSTU-Diagnostics\\nstu-diagnostics.exe" --target=client --server-ip="$ServerAddress" --server-port=$ServerPort --installer --auto-close'

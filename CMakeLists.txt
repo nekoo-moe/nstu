@@ -62,7 +62,9 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
     include(GNUInstallDirs)
 
     set(nstu_mingw_runtime_files)
+    set(NSTU_MINGW_RUNTIME_FILES_PRESENT 0)
     if(MINGW)
+        set(NSTU_MINGW_RUNTIME_FILES_PRESENT 1)
         get_filename_component(nstu_compiler_bin_dir
             "${CMAKE_CXX_COMPILER}" DIRECTORY)
         foreach(nstu_runtime_name IN ITEMS
