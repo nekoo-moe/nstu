@@ -97,6 +97,10 @@ jobs:
           cmake --build build --config Release --parallel
           ctest --test-dir build -C Release --output-on-failure
 
+      - name: Trial update state machine
+        shell: pwsh
+        run: ./packaging/test-update-cycle.ps1
+
       - name: Package signed installers
         run: |
           cmake --build build --config Release --target nstu-package --parallel

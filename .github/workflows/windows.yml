@@ -21,6 +21,9 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Trial update state machine
+        shell: pwsh
+        run: ./packaging/test-update-cycle.ps1
       - name: Package unified installer
         run: cmake --build build --config Release --target nstu-package --parallel
       - name: Upload installers

@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) | [Kiểm thử VM](docs/VM_TESTING.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) | [Tự động cập nhật và bảo trì LTSC](docs/AUTO_UPDATE_LTSC.vi.md) | [Kiểm thử VM](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -66,6 +66,8 @@ model và các hạng mục production chưa hoàn thành tại
   quy trình CI.
 - [Production validation](docs/PRODUCTION_VALIDATION.md): checklist kiểm thử
   phần cứng, mạng, Deep Freeze và thời gian dài.
+- [Tự động cập nhật và bảo trì LTSC](docs/AUTO_UPDATE_LTSC.vi.md): chu kỳ cập
+  nhật chín tháng, trust của release, rollout theo đợt và điều kiện rollback.
 - [Kiểm thử vòng đời trên VM](docs/VM_TESTING.md): kiểm tra bằng Sandbox,
   validation qua restart, ranh giới quyền và evidence cần lưu.
 

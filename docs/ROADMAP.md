@@ -72,6 +72,20 @@
       path is snapshot-first; this work is required only before advertising or
       enabling continuous H.264 mode.
 
+## Managed LTSC update work
+
+- [x] Document the nine-month LTSC/Deep Freeze maintenance model and provide a
+      non-destructive hash, staging, health-check, and rollback trial harness.
+- [ ] Implement a signed release manifest and authenticated outbound update
+      check in `nstu-service`, disabled by default behind administrator policy.
+- [ ] Add resumable protected staging, role/version/OS validation, anti-downgrade
+      checks, and reboot-bound package activation.
+- [ ] Add server fleet status, pilot/wave controls, post-reboot health reports,
+      automatic rollback, and audit retention without screen or secret data.
+- [ ] Validate the entire thaw, update, reboot, health-check, rollback, and
+      refreeze sequence against each supported Windows LTSC and Deep Freeze
+      edition before enabling school deployments.
+
 ## Remaining production release gates
 
 - [ ] Run the production workflow with the real code-signing certificate and

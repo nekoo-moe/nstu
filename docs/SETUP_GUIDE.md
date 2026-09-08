@@ -93,3 +93,12 @@ cmake --build build --target nstu-package
 `nstu-package` requires NSIS `makensis.exe`. The generated package is the release
 installer. Use [VM lifecycle testing](VM_TESTING.md) for the destructive service,
 End Task, uninstall, and persistent reboot validation.
+
+The planned nine-month update process is documented in
+[Auto-update and LTSC maintenance](AUTO_UPDATE_LTSC.md). The current MVP does
+not silently replace installed binaries; run the non-destructive trial before
+implementing or enabling a future updater:
+
+```powershell
+pwsh -NoProfile -File packaging/test-update-cycle.ps1
+```

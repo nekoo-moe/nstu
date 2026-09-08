@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [VM testing](docs/VM_TESTING.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md) | [VM testing](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -65,6 +65,8 @@ its threat model and unfinished production work public in
   and CI workflow.
 - [Production validation](docs/PRODUCTION_VALIDATION.md): hardware, network,
   Deep Freeze, and long-duration test checklist.
+- [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md): the planned
+  nine-month update cycle, release trust, staged rollout, and rollback gates.
 - [VM lifecycle testing](docs/VM_TESTING.md): disposable Sandbox checks,
   persistent reboot validation, privilege boundaries, and expected evidence.
 

@@ -218,6 +218,11 @@ hợp nhất thay vì gọi helper trực tiếp. Lần gọi uninstall đầu t
 closed khi service Deep Freeze được nhận diện (`DFServ` hoặc `DeepFrz`) đang
 active.
 
+Kế hoạch tự động cập nhật theo chu kỳ LTSC chín tháng và bộ trial state machine
+được ghi trong [AUTO_UPDATE_LTSC.md](AUTO_UPDATE_LTSC.md). Chạy trial không phá
+hủy bằng `pwsh -NoProfile -File packaging/test-update-cycle.ps1`; trial không
+dừng service, không reboot và không sửa installation hiện tại.
+
 Mỗi commit push lên `main` sẽ chạy Windows CI, build/test, tạo một unified
 installer và phát hành GitHub pre-release tự động dạng
 `nightly-<run-number>`. Pull Request vẫn được build/test nhưng không tạo

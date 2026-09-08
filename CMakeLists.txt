@@ -134,6 +134,7 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-production-deployment.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-system-setup.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-install-role.ps1"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-update-cycle.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/stage-uninstall.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/finalize-uninstall.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/uninstall-server.ps1"

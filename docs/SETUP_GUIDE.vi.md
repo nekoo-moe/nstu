@@ -80,3 +80,11 @@ cmake --build build --target nstu-package
 
 `nstu-package` cần NSIS `makensis.exe`. Dùng [kiểm thử lifecycle trên VM](VM_TESTING.md)
 để kiểm tra service, End Task, uninstall và restart thực tế.
+
+Quy trình cập nhật chín tháng được lập tại [Tự động cập nhật và bảo trì
+LTSC](AUTO_UPDATE_LTSC.vi.md). MVP hiện tại chưa tự động thay binary im lặng;
+hãy chạy trial không phá hủy trước khi implement hoặc bật updater tương lai:
+
+```powershell
+pwsh -NoProfile -File packaging/test-update-cycle.ps1
+```
