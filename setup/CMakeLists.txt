@@ -10,6 +10,9 @@ target_link_libraries(nstu-diagnostics PRIVATE
 )
 if(MSVC)
     target_compile_options(nstu-diagnostics PRIVATE /utf-8)
+    # The RC file carries the application manifest. Suppress MSVC's generated
+    # manifest so it does not emit a second RT_MANIFEST resource at link time.
+    target_link_options(nstu-diagnostics PRIVATE /MANIFEST:NO)
 endif()
 nstu_enable_warnings(nstu-diagnostics)
 if(MINGW)
