@@ -165,7 +165,12 @@ Installer hợp nhất mở đầu bằng hai lựa chọn: `Install for Client`
 trách nhiệm port khác nhau. Installer gọi `nstu-diagnostics` theo từng bước.
 Kỹ thuật viên cũng có thể chạy riêng với `--target=client|server`,
 `--server-ip=...`, `--server-port=...`, `--installer`, `--boot-check`,
-`--auto-close` và `--log=...`.
+`--auto-close`, `--diagnostics-stay-open` và `--report=...`. `--log=...` vẫn là
+alias của `--report=...` để tương thích với boot-check hiện có. Report là JSON
+local chỉ chứa kết quả kiểm tra; không chứa enrollment secret, key, token hoặc
+tài liệu người dùng. Kiểm tra UWF hoàn toàn chỉ đọc: edition không hỗ trợ hoặc
+provider bị thiếu sẽ tạo warning; diagnostics không bật UWF, sửa registry hoặc
+service, hay reboot máy.
 
 Popup `Diagnostics` riêng bên trong `nstu-server.exe` hiển thị adapter/hãng
 DXGI, feature level, khả dụng Desktop Duplication, trạng thái dự phòng WARP

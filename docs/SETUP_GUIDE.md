@@ -26,7 +26,12 @@ encoder before the server files and protected data root are installed.
 technician. It displays checks sequentially. Without `--auto-close`, the window
 stays open for review. With `--auto-close`, only a completely clean run closes
 automatically; warnings and failures remain visible, and failures return a
-non-zero exit code. Use `--log=<path>` to retain the result list.
+non-zero exit code. Use `--report=<path>` to retain a structured JSON result
+list; `--log=<path>` is retained as a compatibility alias. Add
+`--diagnostics-stay-open` when a technician needs to keep a clean run visible.
+UWF checks are read-only and never enable the filter, change registry/service
+state, or reboot the machine. Unsupported editions and unavailable providers
+are reported as warnings so a Pro/Home installation remains audit-only.
 
 ```powershell
 & "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" --target=client --server-ip=192.168.10.10 --server-port=47001 --installer

@@ -168,7 +168,13 @@ or `Install for Server`. There is no supported `Both` installation because the
 roles use different lifecycle and port responsibilities. The installer invokes
 `nstu-diagnostics` sequentially. Technicians can also run it directly with
 `--target=client|server`, `--server-ip=...`, `--server-port=...`, `--installer`,
-`--boot-check`, `--auto-close`, and `--log=...`.
+`--boot-check`, `--auto-close`, `--diagnostics-stay-open`, and `--report=...`.
+`--log=...` remains an alias for `--report=...` for existing boot-check scripts.
+The report is local JSON containing only check results; it does not include
+enrollment secrets, keys, tokens, or user documents. UWF detection is strictly
+read-only: unsupported editions and missing providers produce warnings, and the
+diagnostics helper never enables UWF, changes registry or service state, or
+reboots the machine.
 
 The separate `Diagnostics` popup inside `nstu-server.exe` reports DXGI adapters
 and vendors, feature level, Desktop Duplication support, WARP fallback state,

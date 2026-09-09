@@ -83,9 +83,11 @@ Do not advertise, enable, or make H.264 a prerequisite for classroom use.
 
 - [x] Document a UWF-first architecture, Windows edition gate, threat model,
       persistence boundary, servicing/recovery lifecycle, and staged test plan.
-- [ ] Implement a read-only capability probe for exact Windows SKU/build,
-      optional-feature/provider availability, current/next UWF state, protected
-      volumes, exclusions, overlay configuration, and UWF event health.
+- [x] Implement the first read-only capability probe for exact Windows SKU/build,
+      optional-feature/provider availability, current/next UWF state, Safe Mode,
+      installation, hardware, graphics, time, connectivity, and service health.
+- [ ] Extend the probe with protected-volume, exclusion, overlay-configuration,
+      and UWF event-health checks after the documented WMI coverage is qualified.
 - [ ] Add a separate deployment-administrator authorization role and signed,
       replay-resistant, strictly typed maintenance intents. Existing teacher
       control credentials must not authorize UWF mutation.

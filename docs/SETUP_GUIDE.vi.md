@@ -25,7 +25,12 @@ trước khi cài file server và data root được bảo vệ.
 riêng bởi kỹ thuật viên. Các kiểm tra hiện tuần tự. Nếu không có
 `--auto-close`, cửa sổ giữ nguyên để xem lại. Với `--auto-close`, chỉ run hoàn
 toàn sạch mới tự đóng; warning và lỗi đều giữ cửa sổ, còn lỗi trả về exit code
-khác 0. Dùng `--log=<path>` để lưu kết quả.
+khác 0. Dùng `--report=<path>` để lưu kết quả JSON có cấu trúc;
+`--log=<path>` vẫn được giữ làm alias tương thích. Thêm
+`--diagnostics-stay-open` nếu kỹ thuật viên cần giữ cửa sổ khi toàn bộ kiểm tra
+đạt. Kiểm tra UWF chỉ đọc, không bật filter, sửa registry/service hoặc reboot.
+Edition không hỗ trợ và provider không khả dụng sẽ được báo warning, vì vậy
+Windows Pro/Home vẫn chỉ ở chế độ audit.
 
 ```powershell
 & "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" --target=client --server-ip=192.168.10.10 --server-port=47001 --installer
