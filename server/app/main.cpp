@@ -78,6 +78,13 @@ std::string hresult_text(HRESULT result) {
     return stream.str();
 }
 
+bool is_device_loss_hresult(HRESULT result) noexcept {
+    return result == DXGI_ERROR_DEVICE_REMOVED ||
+           result == DXGI_ERROR_DEVICE_RESET ||
+           result == DXGI_ERROR_DEVICE_HUNG ||
+           result == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+}
+
 void record_diagnostic(const char* severity, const char* source,
                        const std::string& message) {
     SYSTEMTIME time{};
@@ -997,14 +1004,29 @@ SnapshotTexture* snapshot_texture(
     data.SysMemPitch = decoded.stride;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
-    if (FAILED(g_device->CreateTexture2D(&description, &data, &texture)) ||
-        FAILED(g_device->CreateShaderResourceView(texture.Get(), nullptr,
-                                                   &view))) {
+    const HRESULT texture_result =
+        g_device->CreateTexture2D(&description, &data, &texture);
+    const HRESULT view_result = SUCCEEDED(texture_result)
+        ? g_device->CreateShaderResourceView(texture.Get(), nullptr, &view)
+        : E_FAIL;
+    if (FAILED(texture_result) || FAILED(view_result)) {
         cached.generation_gate.mark_failed(client.snapshot_generation);
+        const HRESULT failure = FAILED(texture_result)
+            ? texture_result : view_result;
+        const HRESULT removal_reason = g_device->GetDeviceRemovedReason();
+        if (is_device_loss_hresult(failure) ||
+            is_device_loss_hresult(removal_reason)) {
+            g_graphics_device_lost = true;
+            invalidate_snapshot_textures();
+        }
         record_diagnostic(
             "warning", "Snapshot",
             "Client " + std::to_string(client.id) +
-                " snapshot texture creation failed");
+                " snapshot " +
+                (FAILED(texture_result) ? std::string("texture")
+                                         : std::string("view")) +
+                " creation failed " + hresult_text(failure) +
+                "; device reason " + hresult_text(removal_reason));
         return nullptr;
     }
     cached.width = decoded.width;
@@ -2284,9 +2306,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                 record_diagnostic("error", "DXGI", "Present failed " +
                     hresult_text(present_result) + "; device reason " +
                     hresult_text(removal_reason));
-                if (present_result == DXGI_ERROR_DEVICE_REMOVED ||
-                    present_result == DXGI_ERROR_DEVICE_RESET ||
-                    present_result == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
+                if (is_device_loss_hresult(present_result)) {
                     if (!g_graphics_device_lost) {
                         g_graphics_device_lost = true;
                         invalidate_snapshot_textures();

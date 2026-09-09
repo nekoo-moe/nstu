@@ -45,6 +45,12 @@ int main() {
     generation_gate.mark_succeeded(2);
     assert(generation_gate.succeeded(2));
     assert(!generation_gate.begin(2));
+    // A graphics-resource reset must permit the same published generation to
+    // be uploaded again after its previous shader-resource view is discarded.
+    generation_gate.reset();
+    assert(generation_gate.begin(2));
+    generation_gate.mark_succeeded(2);
+    assert(generation_gate.succeeded(2));
     assert(generation_gate.begin(3));
     generation_gate.reset();
     assert(generation_gate.begin(3));

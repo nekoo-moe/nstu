@@ -5,7 +5,8 @@
 namespace nstu::server {
 
 // Allows exactly one processing attempt per non-zero snapshot generation.
-// Both success and failure remain cached until a newer generation arrives.
+// Both success and failure remain cached until a newer generation arrives or
+// the graphics resource owner explicitly resets the gate.
 class SnapshotGenerationGate {
 public:
     void reset() noexcept {
