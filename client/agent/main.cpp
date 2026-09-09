@@ -10,6 +10,7 @@
 #include <chrono>
 #include <iterator>
 #include <mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -287,10 +288,12 @@ void pipe_control_loop(HWND overlay) {
                     const auto frame = nstu::control::decode_snapshot_frame(
                         message->payload);
                     if (frame) {
-                        nstu::screen::JpegImage jpeg{
-                            frame->width, frame->height, frame->jpeg};
                         nstu::screen::BgraImage decoded;
-                        if (nstu::screen::decode_jpeg(jpeg, decoded, nullptr)) {
+                        const auto bytes = std::span<const std::byte>(
+                            frame->jpeg.data(), frame->jpeg.size());
+                        if (nstu::screen::decode_jpeg(
+                                bytes, frame->width, frame->height, decoded,
+                                nullptr)) {
                             {
                                 std::scoped_lock lock(g_broadcast_mutex);
                                 g_broadcast_image = std::move(decoded);

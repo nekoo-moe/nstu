@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) | [Tự động cập nhật và bảo trì LTSC](docs/AUTO_UPDATE_LTSC.vi.md) | [Kiểm thử VM](docs/VM_TESTING.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) | [Thiết kế khôi phục sau reboot](docs/REBOOT_TO_RESTORE.vi.md) | [Tự động cập nhật và bảo trì LTSC](docs/AUTO_UPDATE_LTSC.vi.md) | [Kiểm thử VM](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -68,6 +68,8 @@ model và các hạng mục production chưa hoàn thành tại
   phần cứng, mạng, Deep Freeze và thời gian dài.
 - [Tự động cập nhật và bảo trì LTSC](docs/AUTO_UPDATE_LTSC.vi.md): chu kỳ cập
   nhật chín tháng, trust của release, rollout theo đợt và điều kiện rollback.
+- [Thiết kế khôi phục sau reboot](docs/REBOOT_TO_RESTORE.vi.md): kế hoạch nghiên
+  cứu quản lý UWF của Microsoft, giới hạn edition, servicing, recovery và test.
 - [Kiểm thử vòng đời trên VM](docs/VM_TESTING.md): kiểm tra bằng Sandbox,
   validation qua restart, ranh giới quyền và evidence cần lưu.
 
@@ -88,6 +90,9 @@ model và các hạng mục production chưa hoàn thành tại
   trong tương lai, không dùng làm đường monitoring mặc định.
 - Hiển thị screen wall responsive của các snapshot mới nhất, cùng telemetry,
   điều khiển và chat tập trung cho một máy.
+- Snapshot được giới hạn ở ảnh JPEG tối đa 480x270 và 60 KiB. Giao diện giáo
+  viên decode mỗi generation một lần, chỉ giữ payload immutable mới nhất và báo
+  frame lỗi thay vì thử lại ở mọi render frame.
 - Chạy Windows Service nhỏ và Win32 tray/chat agent native trên client.
 - Xác thực lệnh điều khiển và video mà không cần JSON, XML, Electron hay driver
   kernel tùy biến.
@@ -227,6 +232,11 @@ Các giá trị này là trần payload của chế độ snapshot định kỳ 
 phải throughput đo trực tiếp trên switch. JPEG thực tế có thể nhỏ hơn, trong khi
 wire overhead làm mỗi lần truyền lớn hơn một chút. Đường continuous H.264 trong
 tương lai cần benchmark rate control và multicast/unicast riêng.
+
+Quyết định cho bản phát hành hiện tại là tiếp tục hoãn monitoring H.264 liên
+tục. Snapshot định kỳ là đường được hỗ trợ trong lớp học; không bật hoặc quảng
+bá H.264 trước khi ma trận kiểm tra switch nhiều client, decoder, recovery và
+bảo mật đạt yêu cầu.
 
 Mười lần khởi chạy trong cùng một phiên Windows đạt trạng thái cửa sổ phản hồi
 với median 191,8 ms và trung bình 215,4 ms. Giá trị thấp nhất là 187,4 ms, cao
@@ -560,6 +570,15 @@ phân phối được hỗ trợ cho các script này; chỉ chép riêng file E
 
 Named pipe và memory-mapped file chỉ giảm I/O tạm thời, không thay thế persistent
 protected storage. Deep Freeze sẽ hủy mọi state nằm ngoài thawed space sau reboot.
+
+Phương án tích hợp để thay thế Deep Freeze của NSTU hiện **chỉ ở giai đoạn
+nghiên cứu**. Thiết kế an toàn dùng Unified Write Filter của Microsoft, không
+dùng kernel driver do NSTU tự viết. Microsoft hỗ trợ UWF trên Enterprise,
+Education và IoT Enterprise, nhưng không hỗ trợ Windows Pro hoặc Home. Bản NSTU
+hiện tại không bật, cấu hình hay điều khiển UWF và không được mô tả như sản phẩm
+thay thế Deep Freeze. Xem [thiết kế khôi phục sau reboot](docs/REBOOT_TO_RESTORE.vi.md)
+để biết mô hình quyền, quy trình maintenance/recovery, phương án Windows Pro và
+các release gate.
 
 ## Lưu ý bảo mật
 

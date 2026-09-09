@@ -4,6 +4,7 @@
 #include "nstu/key_store.hpp"
 #include "nstu/screen_snapshot.hpp"
 #include "nstu/secret_store.hpp"
+#include "nstu/snapshot_generation_gate.hpp"
 #include "nstu/protocol_headers.h"
 
 #include <d3d11.h>
@@ -30,6 +31,7 @@
 #include <deque>
 #include <iomanip>
 #include <sstream>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -47,6 +49,7 @@ Microsoft::WRL::ComPtr<ID3D11RenderTargetView> g_render_target;
 ImFont* g_heading_font = nullptr;
 bool g_dark_mode = false;
 bool g_graphics_debug = false;
+bool g_graphics_device_lost = false;
 
 struct DiagnosticEvent {
     std::string timestamp;
@@ -347,13 +350,23 @@ void show_tray_menu(HWND window) {
 }
 
 struct SnapshotTexture {
-    std::uint64_t generation = 0;
+    nstu::server::SnapshotGenerationGate generation_gate;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
 };
 
 std::unordered_map<std::uint64_t, SnapshotTexture> g_snapshot_textures;
+
+void invalidate_snapshot_textures() noexcept {
+    for (auto& [client_id, texture] : g_snapshot_textures) {
+        (void)client_id;
+        texture.generation_gate.reset();
+        texture.width = 0;
+        texture.height = 0;
+        texture.view.Reset();
+    }
+}
 
 struct RoomCounts {
     std::size_t online = 0;
@@ -378,6 +391,8 @@ void create_render_target() {
 }
 
 bool create_device(HWND window) {
+    g_graphics_device_lost = true;
+    invalidate_snapshot_textures();
     DXGI_SWAP_CHAIN_DESC description{};
     description.BufferCount = 2;
     description.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -455,8 +470,10 @@ bool create_device(HWND window) {
     }
     if (!created) return false;
     create_render_target();
+    if (!g_render_target) return false;
+    g_graphics_device_lost = false;
     refresh_graphics_report();
-    return g_render_target != nullptr;
+    return true;
 }
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
@@ -935,17 +952,35 @@ void draw_status_badge(nstu::server::ClientStatus status,
 
 SnapshotTexture* snapshot_texture(
     const nstu::server::ClientRecord& client) {
-    if (client.snapshot_generation == 0 || client.snapshot_jpeg.empty()) {
+    if (client.snapshot_generation == 0 || !client.snapshot_jpeg ||
+        client.snapshot_jpeg->empty() || g_graphics_device_lost || !g_device) {
         return nullptr;
     }
     auto& cached = g_snapshot_textures[client.id];
-    if (cached.generation == client.snapshot_generation && cached.view) {
+    if (cached.generation_gate.succeeded(client.snapshot_generation) &&
+        cached.view) {
         return &cached;
     }
-    nstu::screen::JpegImage jpeg{
-        client.snapshot_width, client.snapshot_height, client.snapshot_jpeg};
+    if (!cached.generation_gate.begin(client.snapshot_generation)) {
+        return nullptr;
+    }
+    cached.width = 0;
+    cached.height = 0;
+    cached.view.Reset();
     nstu::screen::BgraImage decoded;
-    if (!nstu::screen::decode_jpeg(jpeg, decoded, nullptr)) {
+    const auto bytes = std::span<const std::byte>(
+        client.snapshot_jpeg->data(), client.snapshot_jpeg->size());
+    std::string decode_error;
+    if (!nstu::screen::decode_jpeg(
+            bytes, client.snapshot_width, client.snapshot_height, decoded,
+            &decode_error)) {
+        cached.generation_gate.mark_failed(client.snapshot_generation);
+        record_diagnostic(
+            "warning", "Snapshot",
+            "Client " + std::to_string(client.id) +
+                " snapshot decode failed: " +
+                (decode_error.empty() ? std::string("invalid JPEG")
+                                      : decode_error));
         return nullptr;
     }
     D3D11_TEXTURE2D_DESC description{};
@@ -964,13 +999,18 @@ SnapshotTexture* snapshot_texture(
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
     if (FAILED(g_device->CreateTexture2D(&description, &data, &texture)) ||
         FAILED(g_device->CreateShaderResourceView(texture.Get(), nullptr,
-                                                  &view))) {
+                                                   &view))) {
+        cached.generation_gate.mark_failed(client.snapshot_generation);
+        record_diagnostic(
+            "warning", "Snapshot",
+            "Client " + std::to_string(client.id) +
+                " snapshot texture creation failed");
         return nullptr;
     }
-    cached.generation = client.snapshot_generation;
     cached.width = decoded.width;
     cached.height = decoded.height;
     cached.view = std::move(view);
+    cached.generation_gate.mark_succeeded(client.snapshot_generation);
     return &cached;
 }
 
@@ -2247,6 +2287,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                 if (present_result == DXGI_ERROR_DEVICE_REMOVED ||
                     present_result == DXGI_ERROR_DEVICE_RESET ||
                     present_result == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
+                    if (!g_graphics_device_lost) {
+                        g_graphics_device_lost = true;
+                        invalidate_snapshot_textures();
+                    }
                     dashboard.control_status = tr(
                         dashboard, "Graphics device lost. Open Diagnostics.",
                         "Mất thiết bị đồ họa. Hãy mở Chẩn đoán.");

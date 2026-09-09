@@ -199,6 +199,20 @@ int main() {
     corrupt_snapshot[6] = std::byte{1};
     assert(!nstu::control::decode_snapshot_frame(corrupt_snapshot)
                 .has_value());
+    auto oversized_snapshot = snapshot;
+    oversized_snapshot.width =
+        static_cast<std::uint16_t>(nstu::control::kMaximumSnapshotWidth + 1);
+    assert(nstu::control::encode_snapshot_frame(oversized_snapshot).empty());
+    oversized_snapshot = snapshot;
+    oversized_snapshot.height =
+        static_cast<std::uint16_t>(nstu::control::kMaximumSnapshotHeight + 1);
+    assert(nstu::control::encode_snapshot_frame(oversized_snapshot).empty());
+    auto oversized_wire = snapshot_wire;
+    const auto oversized_width = static_cast<std::uint16_t>(
+        nstu::control::kMaximumSnapshotWidth + 1);
+    oversized_wire[2] = static_cast<std::byte>(oversized_width & 0xffu);
+    oversized_wire[3] = static_cast<std::byte>(oversized_width >> 8u);
+    assert(!nstu::control::decode_snapshot_frame(oversized_wire).has_value());
 
     const nstu::control::OverlayStroke stroke{
         .x0 = 100,

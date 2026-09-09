@@ -47,7 +47,9 @@
 - [x] Live service-agent named-pipe routing and status reporting.
 - [x] Server dashboard actions connected to authenticated client sessions.
 - [x] Bounded authenticated JPEG snapshots from clients to the dashboard, with
-      newest-frame queue replacement, WIC decode, and D3D11 preview textures.
+      newest-frame queue replacement, shared immutable payloads, bounded
+      JPEG-only WIC decode, negative generation caching, and D3D11 preview
+      textures.
 - [x] Authenticated normalized annotation strokes rendered by a transparent
       click-through client overlay, plus clear-overlay control.
 - [x] Bounded teacher-screen snapshot broadcast to authenticated clients, with
@@ -67,10 +69,43 @@
 
 ## Optional continuous-video work
 
+Decision (2026-09-09): keep this work deferred. The production monitoring path
+is periodic JPEG snapshots because independently streaming more than 50 client
+feeds creates avoidable switch, CPU, decoder, and failure-domain pressure.
+Do not advertise, enable, or make H.264 a prerequisite for classroom use.
+
 - [ ] Connect encoded UDP send/receive, authenticated group-key rotation, H.264
       decode, and D3D11 continuous-preview textures. The production monitoring
       path is snapshot-first; this work is required only before advertising or
       enabling continuous H.264 mode.
+
+## Managed reboot-to-restore work
+
+- [x] Document a UWF-first architecture, Windows edition gate, threat model,
+      persistence boundary, servicing/recovery lifecycle, and staged test plan.
+- [ ] Implement a read-only capability probe for exact Windows SKU/build,
+      optional-feature/provider availability, current/next UWF state, protected
+      volumes, exclusions, overlay configuration, and UWF event health.
+- [ ] Add a separate deployment-administrator authorization role and signed,
+      replay-resistant, strictly typed maintenance intents. Existing teacher
+      control credentials must not authorize UWF mutation.
+- [ ] Implement the typed UWF WMI controller behind a lab-only feature flag,
+      with local confirmation for first activation, recovery, and decommission.
+- [ ] Add bounded persistent maintenance transactions, overlay monitoring,
+      update/servicing integration, post-boot verification, quarantine, and an
+      offline recovery runbook without automatic reboot loops.
+- [ ] Test UWF warning/critical events separately from maximum-overlay OS
+      automatic-restart behavior, including power loss, overlay exhaustion, and
+      a guarantee that network or power failure cannot leave servicing silently
+      unprotected.
+- [ ] Complete persistent-VM mutation tests, the exact LTSC image matrix,
+      i5-6400/8 GB physical validation, at least 50 reset cycles, independent
+      security review, and a non-production school pilot before opt-in release.
+
+Windows Pro and Home do not support Microsoft UWF. On those editions this work
+must remain audit-only; the supported fallback is an edition upgrade, a
+separately managed third-party product, or centrally managed reimaging. NSTU
+will not implement a script-based or custom-kernel imitation of UWF.
 
 ## Managed LTSC update work
 

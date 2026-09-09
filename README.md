@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md) | [VM testing](docs/VM_TESTING.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [Reboot-to-restore design](docs/REBOOT_TO_RESTORE.md) | [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md) | [VM testing](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -67,6 +67,8 @@ its threat model and unfinished production work public in
   Deep Freeze, and long-duration test checklist.
 - [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md): the planned
   nine-month update cycle, release trust, staged rollout, and rollback gates.
+- [Reboot-to-restore design](docs/REBOOT_TO_RESTORE.md): the research plan for
+  managing Microsoft's UWF, edition limits, servicing, recovery, and test gates.
 - [VM lifecycle testing](docs/VM_TESTING.md): disposable Sandbox checks,
   persistent reboot validation, privilege boundaries, and expected evidence.
 
@@ -87,6 +89,10 @@ its threat model and unfinished production work public in
   broadcast mode without making it the default monitoring path.
 - Show a responsive wall of the latest client snapshots, plus focused
   telemetry, controls, and chat for one client.
+- Snapshot delivery is bounded to JPEG images up to 480x270 and 60 KiB. The
+  teacher UI decodes each generation once, retains only the newest immutable
+  payload, and reports malformed frames without retrying them every render
+  frame.
 - Run a small Windows service and native Win32 tray/chat agent on each client.
 - Authenticate control and video traffic without JSON, XML, Electron, or a
   custom kernel driver.
@@ -230,6 +236,11 @@ These values are ceilings for the current periodic snapshot mode, not measured
 switch throughput. Actual JPEGs can be smaller, while wire overhead makes each
 transmission slightly larger. The future continuous H.264 path requires its own
 measured rate-control and multicast/unicast benchmark.
+
+The current release decision is to keep continuous H.264 monitoring deferred.
+Periodic snapshots are the supported classroom path; H.264 must not be enabled
+or advertised until the multi-client switch, decoder, recovery, and security
+matrix has passed.
 
 Ten launches in the same Windows session reached a responsive top-level window
 in 191.8 ms median and 215.4 ms average. The minimum was 187.4 ms, the maximum
@@ -578,6 +589,14 @@ is insufficient for enrollment setup.
 Named pipes and memory-mapped files reduce temporary disk activity but do not
 replace persistent protected storage. Deep Freeze will discard unthawed state
 after a reboot.
+
+NSTU's proposed built-in replacement is currently **research only**. The safe
+design uses Microsoft's Unified Write Filter rather than an NSTU kernel driver.
+Microsoft supports UWF on Enterprise, Education, and IoT Enterprise editions,
+but not Windows Pro or Home. Current NSTU builds do not enable, configure, or
+control UWF and must not be represented as a Deep Freeze replacement. See the
+[reboot-to-restore design](docs/REBOOT_TO_RESTORE.md) for the privilege model,
+maintenance/recovery sequence, Windows Pro fallback, and release gates.
 
 ## Security notes
 

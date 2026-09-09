@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -28,5 +29,13 @@ struct BgraImage {
 
 [[nodiscard]] bool decode_jpeg(const JpegImage& image, BgraImage& decoded,
                                std::string* error = nullptr);
+
+// Decodes one authenticated snapshot from caller-owned immutable bytes. Input
+// and metadata dimensions must satisfy the snapshot transport limits, and the
+// metadata dimensions are checked against the decoded JPEG dimensions.
+[[nodiscard]] bool decode_jpeg(
+    std::span<const std::byte> bytes, std::uint16_t expected_width,
+    std::uint16_t expected_height, BgraImage& decoded,
+    std::string* error = nullptr);
 
 } // namespace nstu::screen

@@ -98,12 +98,14 @@ Verify the MAC before applying the sequence guard. Only advance the guard after
 successful verification. Do not execute, log as trusted, or acknowledge an
 unauthenticated command.
 
-Snapshot JPEG payloads are capped at 60 KiB before transport and decoded into a
-bounded maximum image size. The service keeps only the newest pending client
-snapshot, limiting memory growth when the network is slower than capture.
-Authentication prevents undetected modification but does not hide the JPEG
-from an observer on the LAN. The same confidentiality limitation applies to
-teacher-screen snapshot broadcast.
+Snapshot JPEG payloads are capped at 60 KiB before transport, with authenticated
+metadata bounded to 480x270. The server accepts only JPEG containers, verifies
+the decoded dimensions against that metadata, and allocates a bounded pixel
+buffer. The service keeps only the newest pending client snapshot, while the
+server publishes immutable shared JPEG storage and attempts each generation's
+decode/upload once. Authentication prevents undetected modification but does
+not hide the JPEG from an observer on the LAN. The same confidentiality
+limitation applies to teacher-screen snapshot broadcast.
 
 ## UDP video authentication
 

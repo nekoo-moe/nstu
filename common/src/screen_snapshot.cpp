@@ -1,5 +1,7 @@
 #include "nstu/screen_snapshot.hpp"
 
+#include "nstu/control_messages.hpp"
+
 #include <windows.h>
 #include <wincodec.h>
 #include <wrl/client.h>
@@ -7,6 +9,8 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <new>
+#include <utility>
 
 namespace nstu::screen {
 namespace {
@@ -150,16 +154,38 @@ bool encode_bitmap(HBITMAP bitmap, std::uint16_t width, std::uint16_t height,
         set_error(error, "JPEG snapshot buffer is unavailable");
         return false;
     }
-    const SIZE_T byte_count = GlobalSize(memory);
+    STATSTG statistics{};
+    if (FAILED(stream->Stat(&statistics, STATFLAG_NONAME)) ||
+        statistics.cbSize.QuadPart == 0 ||
+        statistics.cbSize.QuadPart >
+            static_cast<ULONGLONG>(std::numeric_limits<std::size_t>::max())) {
+        set_error(error, "JPEG snapshot stream size is unavailable");
+        return false;
+    }
+    const std::size_t byte_count =
+        static_cast<std::size_t>(statistics.cbSize.QuadPart);
+    const SIZE_T allocation_size = GlobalSize(memory);
+    if (allocation_size < byte_count) {
+        set_error(error, "JPEG snapshot stream allocation is truncated");
+        return false;
+    }
     const auto* bytes = static_cast<const std::byte*>(GlobalLock(memory));
     if (bytes == nullptr || byte_count == 0) {
         set_error(error, "JPEG snapshot buffer lock failed");
         return false;
     }
+    std::vector<std::byte> encoded;
+    try {
+        encoded.assign(bytes, bytes + byte_count);
+    } catch (const std::bad_alloc&) {
+        GlobalUnlock(memory);
+        set_error(error, "JPEG snapshot buffer allocation failed");
+        return false;
+    }
+    GlobalUnlock(memory);
     image.width = width;
     image.height = height;
-    image.bytes.assign(bytes, bytes + byte_count);
-    GlobalUnlock(memory);
+    image.bytes = std::move(encoded);
     return true;
 }
 
@@ -214,7 +240,10 @@ bool capture_primary_screen_jpeg(JpegImage& image,
                                  std::string* error) {
     image = {};
     if (maximum_width < 160 || maximum_height < 90 || quality < 20 ||
-        quality > 90 || maximum_bytes < 4096) {
+        quality > 90 || maximum_bytes < 4096 ||
+        maximum_width > control::kMaximumSnapshotWidth ||
+        maximum_height > control::kMaximumSnapshotHeight ||
+        maximum_bytes > control::kMaximumSnapshotJpegBytes) {
         set_error(error, "invalid snapshot capture limits");
         return false;
     }
@@ -241,9 +270,21 @@ bool capture_primary_screen_jpeg(JpegImage& image,
 
 bool decode_jpeg(const JpegImage& image, BgraImage& decoded,
                  std::string* error) {
+    return decode_jpeg(
+        std::span<const std::byte>(image.bytes.data(), image.bytes.size()),
+        image.width, image.height, decoded, error);
+}
+
+bool decode_jpeg(std::span<const std::byte> bytes,
+                 std::uint16_t expected_width,
+                 std::uint16_t expected_height, BgraImage& decoded,
+                 std::string* error) {
     decoded = {};
-    if (image.bytes.empty() ||
-        image.bytes.size() > std::numeric_limits<DWORD>::max()) {
+    if (bytes.empty() ||
+        bytes.size() > control::kMaximumSnapshotJpegBytes ||
+        expected_width == 0 || expected_height == 0 ||
+        expected_width > control::kMaximumSnapshotWidth ||
+        expected_height > control::kMaximumSnapshotHeight) {
         set_error(error, "invalid JPEG snapshot");
         return false;
     }
@@ -255,8 +296,8 @@ bool decode_jpeg(const JpegImage& image, BgraImage& decoded,
     ComPtr<IWICStream> stream;
     if (FAILED(factory->CreateStream(&stream)) ||
         FAILED(stream->InitializeFromMemory(
-            reinterpret_cast<BYTE*>(const_cast<std::byte*>(image.bytes.data())),
-            static_cast<DWORD>(image.bytes.size())))) {
+            reinterpret_cast<BYTE*>(const_cast<std::byte*>(bytes.data())),
+            static_cast<DWORD>(bytes.size())))) {
         set_error(error, "JPEG input stream creation failed");
         return false;
     }
@@ -265,11 +306,16 @@ bool decode_jpeg(const JpegImage& image, BgraImage& decoded,
     ComPtr<IWICFormatConverter> converter;
     UINT width = 0;
     UINT height = 0;
+    GUID container_format{};
     if (FAILED(factory->CreateDecoderFromStream(
-            stream.Get(), nullptr, WICDecodeMetadataCacheOnLoad, &decoder)) ||
+             stream.Get(), nullptr, WICDecodeMetadataCacheOnLoad, &decoder)) ||
+        FAILED(decoder->GetContainerFormat(&container_format)) ||
+        !IsEqualGUID(container_format, GUID_ContainerFormatJpeg) ||
         FAILED(decoder->GetFrame(0, &frame)) ||
         FAILED(frame->GetSize(&width, &height)) || width == 0 || height == 0 ||
-        width > 4096 || height > 4096 ||
+        width > control::kMaximumSnapshotWidth ||
+        height > control::kMaximumSnapshotHeight ||
+        width != expected_width || height != expected_height ||
         FAILED(factory->CreateFormatConverter(&converter)) ||
         FAILED(converter->Initialize(
             frame.Get(), GUID_WICPixelFormat32bppBGRA,
@@ -286,7 +332,13 @@ bool decode_jpeg(const JpegImage& image, BgraImage& decoded,
     decoded.width = width;
     decoded.height = height;
     decoded.stride = width * 4u;
-    decoded.pixels.resize(static_cast<std::size_t>(decoded.stride) * height);
+    try {
+        decoded.pixels.resize(static_cast<std::size_t>(decoded.stride) * height);
+    } catch (const std::bad_alloc&) {
+        decoded = {};
+        set_error(error, "decoded snapshot allocation failed");
+        return false;
+    }
     if (FAILED(converter->CopyPixels(
             nullptr, decoded.stride,
             static_cast<UINT>(decoded.pixels.size()),

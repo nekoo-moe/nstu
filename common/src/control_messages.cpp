@@ -171,6 +171,8 @@ std::optional<std::uint16_t> decode_snapshot_schedule(
 
 std::vector<std::byte> encode_snapshot_frame(const SnapshotFrame& frame) {
     if (frame.width == 0 || frame.height == 0 ||
+        frame.width > kMaximumSnapshotWidth ||
+        frame.height > kMaximumSnapshotHeight ||
         frame.captured_at_unix_milliseconds == 0 || frame.jpeg.empty() ||
         frame.jpeg.size() > kMaximumSnapshotJpegBytes) {
         return {};
@@ -197,7 +199,9 @@ std::optional<SnapshotFrame> decode_snapshot_frame(
     if (!read_le(payload, offset, version) ||
         version != kSnapshotFrameVersion ||
         !read_le(payload, offset, frame.width) || frame.width == 0 ||
+        frame.width > kMaximumSnapshotWidth ||
         !read_le(payload, offset, frame.height) || frame.height == 0 ||
+        frame.height > kMaximumSnapshotHeight ||
         !read_le(payload, offset, reserved) || reserved != 0 ||
         !read_le(payload, offset, frame.captured_at_unix_milliseconds) ||
         frame.captured_at_unix_milliseconds == 0 ||

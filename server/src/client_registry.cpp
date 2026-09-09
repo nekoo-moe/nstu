@@ -1,13 +1,16 @@
 #include "nstu/client_registry.hpp"
 
 #include <algorithm>
+#include <new>
+#include <utility>
 
 namespace nstu::server {
 
 void ClientRegistry::upsert(ClientRecord record) {
     std::scoped_lock lock(mutex_);
     const auto existing = clients_.find(record.id);
-    if (existing != clients_.end() && record.snapshot_jpeg.empty()) {
+    if (existing != clients_.end() &&
+        (!record.snapshot_jpeg || record.snapshot_jpeg->empty())) {
         record.snapshot_width = existing->second.snapshot_width;
         record.snapshot_height = existing->second.snapshot_height;
         record.snapshot_captured_at_unix_milliseconds =
@@ -44,16 +47,34 @@ bool ClientRegistry::touch(std::uint64_t id) {
 
 bool ClientRegistry::update_snapshot(
     std::uint64_t id, const control::SnapshotFrame& frame) {
+    if (frame.width == 0 || frame.height == 0 ||
+        frame.width > control::kMaximumSnapshotWidth ||
+        frame.height > control::kMaximumSnapshotHeight ||
+        frame.captured_at_unix_milliseconds == 0 || frame.jpeg.empty() ||
+        frame.jpeg.size() > control::kMaximumSnapshotJpegBytes) {
+        return false;
+    }
+    std::shared_ptr<const std::vector<std::byte>> jpeg;
+    try {
+        // Allocate before taking the lock so allocation failure leaves the
+        // previously published frame and metadata untouched.
+        jpeg = std::make_shared<const std::vector<std::byte>>(frame.jpeg);
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
     std::scoped_lock lock(mutex_);
     const auto found = clients_.find(id);
-    if (found == clients_.end() || frame.jpeg.empty()) {
+    if (found == clients_.end()) {
         return false;
     }
     found->second.snapshot_width = frame.width;
     found->second.snapshot_height = frame.height;
     found->second.snapshot_captured_at_unix_milliseconds =
         frame.captured_at_unix_milliseconds;
-    found->second.snapshot_jpeg = frame.jpeg;
+    // Publish one immutable allocation.  ClientRegistry::snapshot() is called
+    // from the render loop, so shared ownership avoids copying up to 60 KiB
+    // for every client on every frame.
+    found->second.snapshot_jpeg = std::move(jpeg);
     ++found->second.snapshot_generation;
     found->second.last_seen = std::chrono::steady_clock::now();
     return true;

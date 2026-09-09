@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -38,7 +39,9 @@ struct ClientRecord {
     std::uint16_t snapshot_height = 0;
     std::uint64_t snapshot_captured_at_unix_milliseconds = 0;
     std::uint64_t snapshot_generation = 0;
-    std::vector<std::byte> snapshot_jpeg;
+    // Immutable after publication so registry snapshots can share the JPEG
+    // storage instead of copying it once per UI frame.
+    std::shared_ptr<const std::vector<std::byte>> snapshot_jpeg;
     std::uint8_t bad_loss_windows = 0;
     std::uint8_t good_loss_windows = 0;
     std::chrono::steady_clock::time_point last_seen{};

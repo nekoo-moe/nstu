@@ -64,6 +64,19 @@ are rendered by a transparent, click-through topmost window in the student's
 interactive session. The lock window is explicitly kept above broadcast and
 annotation windows.
 
+The server accepts snapshot metadata no larger than 480x270 and a JPEG payload
+no larger than 60 KiB. WIC verifies that the payload is actually JPEG and that
+its decoded dimensions match the authenticated metadata before pixels are
+allocated. Published JPEG bytes are immutable shared storage, so copying the
+client registry for the render loop does not copy the image payload. The UI
+uploads a generation to a D3D11 shader-resource texture at most once; a failed
+decode or texture upload is negatively cached until a newer generation arrives.
+The cache is explicitly invalidated when the graphics device is lost or
+recreated, so stale shader-resource views cannot block a subsequent device
+initialization. This keeps malformed or unsupported frames from causing a
+per-frame retry loop while preserving a clean cache boundary for a future
+device-recovery path.
+
 ## Optional continuous video path
 
 ```text
