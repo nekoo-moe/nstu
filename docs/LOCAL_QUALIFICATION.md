@@ -1,0 +1,55 @@
+# Local qualification fixture
+
+This record describes the weakest-machine fixture supplied for NSTU readiness
+testing. It is a test target, not a production approval or a supported school
+deployment by itself.
+
+| Field | Reported value | Qualification requirement |
+|---|---|---|
+| CPU | Intel Core i3-7400 | Below the i5-6400 reference; retain as a stress case |
+| Memory | 8 GiB | Meets the minimum capacity boundary |
+| Windows | Windows 10, reported as “Education/Pro” | Determine the exact SKU and build from the diagnostic report; Education and Pro are separate editions |
+| Activation | Unactivated | Record only; activation state does not establish UWF eligibility |
+| Network | Tailscale-reachable test host | Measure the physical adapter's negotiated link locally; do not use the Tailscale address as link-capacity evidence |
+| Graphics | Not yet verified | Record adapter, driver version, D3D11 probe, and WARP fallback |
+
+## Required run
+
+Run the staged `nstu-diagnostics.exe` interactively on the fixture as an
+administrator, using a local report path:
+
+```powershell
+& "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" `
+  --target=client `
+  --report="$env:ProgramData\NSTU\qualification-i3-7400.json" `
+  --diagnostics-stay-open
+```
+
+The report must capture the exact Windows product name, product SKU/build,
+architecture, UWF optional-feature/provider state, Safe Mode state, service and
+installation state, CPU/RAM, physical network link, graphics driver, system
+time, and configured NSTU server reachability. Do not place passwords, tokens,
+Tailscale addresses, screen captures, or enrollment material in the report or
+repository.
+
+## Acceptance boundaries
+
+- 8 GiB RAM meets the minimum memory boundary.
+- The i3-7400 is intentionally below the i5-6400 reference and must be
+  reported as a stress-case CPU result, not silently promoted to “Good”.
+- A negotiated link below 100 Mbps fails the minimum network boundary; 100 Mbps
+  passes the minimum and 1 Gbps is recommended.
+- Windows 10 Education is potentially eligible for UWF after exact-build,
+  feature, provider, storage, driver, and recovery qualification.
+- Windows 10 Pro is audit-only for UWF; no NSTU control may enable or configure
+  reboot-to-restore on Pro.
+- An unactivated image must not be “fixed” by NSTU. Activation and licensing
+  remain an administrator/school responsibility.
+
+## Current remote-access limitation
+
+The supplied test account can reach the host over the private test network, but
+remote WMI and Service Control Manager access return `Access is denied`, and no
+SMB share is exposed. The fixture therefore requires an interactive local/RDP
+run by an operator with the necessary Windows permissions. NSTU diagnostics do
+not weaken remote-UAC, firewall, or account policy to work around this.
