@@ -104,6 +104,10 @@ Do not advertise, enable, or make H.264 a prerequisite for classroom use.
       i5-6400/8 GB physical validation, at least 50 reset cycles, independent
       security review, and a non-production school pilot before opt-in release.
 
+Initial lab target: Windows 10 Education x64 on the i5-6400/8 GB/Intel HD 530
+reference machine with a 100 Mbps negotiated link. This target is capability
+qualification only; it does not authorize UWF mutation or production rollout.
+
 Windows Pro and Home do not support Microsoft UWF. On those editions this work
 must remain audit-only; the supported fallback is an edition upgrade, a
 separately managed third-party product, or centrally managed reimaging. NSTU

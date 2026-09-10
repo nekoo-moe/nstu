@@ -56,6 +56,22 @@ Client-UnifiedWriteFilter và xác nhận UWF WMI provider có sẵn. Phạm vi 
 có thể hẹp hơn ma trận Microsoft cho đến khi từng image cụ thể vượt qua các
 gates kiểm thử của dự án.
 
+### Baseline qualification đầu tiên: Windows 10 Education
+
+Mục tiêu qualification đầu tiên là image Windows 10 Education x64 sạch và đã
+cập nhật đầy đủ trên phần cứng tham chiếu yếu nhất của dự án: Intel Core
+i5-6400, RAM 8 GiB, Intel HD 530 và link thương lượng 100 Mbps. Báo cáo test
+phải ghi lại chính xác build Windows, servicing stack, driver đồ họa, layout
+ổ đĩa, trạng thái optional feature UWF và firmware. "Windows 10 Education" chỉ
+là mục tiêu test, không có nghĩa mọi build Windows 10 Education đều đã được
+qualification. Image Windows 11 Education và Enterprise vẫn phải qualification
+riêng.
+
+Trial đầu tiên chỉ kiểm tra capability. Cần chứng minh diagnostics đọc được
+SKU/build và trạng thái provider UWF mà không thay đổi filter. Chỉ sau khi
+baseline vượt qua test reboot persistent, recovery image, overlay, servicing
+và rollback mới được đánh giá controller UWF trong lab.
+
 Giấy phép Windows là trách nhiệm của trường. MIT License của NSTU không cấp
 quyền sử dụng Windows Enterprise, Education hoặc IoT Enterprise.
 

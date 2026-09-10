@@ -61,6 +61,22 @@ optional-feature state, and confirm that the UWF WMI provider is available.
 NSTU support may be narrower than Microsoft's matrix until each exact image has
 passed the project test gates.
 
+### Initial qualification baseline: Windows 10 Education
+
+The first supported lab qualification target is a clean, fully patched
+Windows 10 Education x64 image on the project's weakest reference hardware:
+Intel Core i5-6400, 8 GiB RAM, Intel HD 530, and a negotiated 100 Mbps link.
+The exact Windows build, servicing stack, graphics driver, storage layout, UWF
+optional-feature state, and firmware configuration must be recorded in the test
+report. "Windows 10 Education" is a test target, not proof that every Windows
+10 Education build is qualified. Windows 11 Education and Enterprise images
+remain separate qualification targets.
+
+The first trial is capability-only. It must prove that diagnostics can read the
+SKU/build and UWF provider state without changing the filter. Only after the
+baseline image passes persistent reboot, recovery-image, overlay, servicing,
+and rollback tests may a lab-only UWF controller be evaluated.
+
 Windows licensing remains the school's responsibility. NSTU's MIT license does
 not grant an Enterprise, Education, or IoT Enterprise Windows license.
 

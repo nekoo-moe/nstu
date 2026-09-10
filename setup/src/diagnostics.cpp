@@ -611,9 +611,12 @@ DiagnosticResult check_internet() {
                       L"Public Internet state is unavailable; it is not required for classroom control.",
                       L"Không đọc được trạng thái Internet công cộng; không bắt buộc cho điều khiển lớp học.");
     }
-    VARIANT_BOOL connected = VARIANT_FALSE;
-    const HRESULT queried = manager->IsConnectedToInternet(&connected);
-    const auto severity = SUCCEEDED(queried) && connected
+    NLM_CONNECTIVITY connectivity = NLM_CONNECTIVITY_DISCONNECTED;
+    const HRESULT queried = manager->GetConnectivity(&connectivity);
+    const bool connected = SUCCEEDED(queried) &&
+        (connectivity & (NLM_CONNECTIVITY_IPV4_INTERNET |
+                         NLM_CONNECTIVITY_IPV6_INTERNET)) != 0;
+    const auto severity = connected
         ? DiagnosticSeverity::pass : DiagnosticSeverity::warning;
     return result("internet", severity, L"Public Internet", L"Internet công cộng",
                   connected ? L"Windows reports an Internet connection."
