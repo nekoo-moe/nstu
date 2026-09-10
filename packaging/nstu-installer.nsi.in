@@ -24,6 +24,7 @@ Var AddressInput
 Var PortLabel
 Var PortInput
 Var AfterRestart
+Var PreflightReport
 
 !define STAGE "@NSTU_UNIFIED_STAGE_DIR@"
 
@@ -38,6 +39,7 @@ Function .onInit
   SetRegView 64
   StrCpy $Role "Client"
   StrCpy $ServerPort "47001"
+  StrCpy $PreflightReport "$TEMP\\NSTU-installer-preflight.json"
   ${GetParameters} $0
   ${GetOptions} $0 "/ROLE=" $1
   ${IfNot} ${Errors}
@@ -161,23 +163,24 @@ nstu_no_server_marker:
 !endif
   StrCmp $Role "Server" nstu_preflight_server
   StrCmp $Role "Client" 0 nstu_preflight_invalid_role
-  nsExec::ExecToStack '"$PLUGINSDIR\\NSTU-Diagnostics\\nstu-diagnostics.exe" --target=client --server-ip="$ServerAddress" --server-port=$ServerPort --installer --auto-close'
+  nsExec::ExecToStack '"$PLUGINSDIR\\NSTU-Diagnostics\\nstu-diagnostics.exe" --target=client --server-ip="$ServerAddress" --server-port=$ServerPort --installer --auto-close --report="$PreflightReport"'
   Pop $0
   Pop $1
   StrCmp $0 "0" nstu_preflight_ok
-  MessageBox MB_ICONSTOP|MB_OK "Client preflight failed. The diagnostics window contains the failed checks.$\r$\n$\r$\n$1"
+  MessageBox MB_ICONSTOP|MB_OK "Client preflight failed. The diagnostics window contains the failed checks.$\r$\n$\r$\nThe report was saved to:$\r$\n$PreflightReport$\r$\n$\r$\n$1"
   Abort
 nstu_preflight_invalid_role:
   MessageBox MB_ICONSTOP|MB_OK "Invalid installer role. Use Client or Server."
   Abort
 nstu_preflight_server:
-  nsExec::ExecToStack '"$PLUGINSDIR\\NSTU-Diagnostics\\nstu-diagnostics.exe" --target=server --installer --auto-close'
+  nsExec::ExecToStack '"$PLUGINSDIR\\NSTU-Diagnostics\\nstu-diagnostics.exe" --target=server --installer --auto-close --report="$PreflightReport"'
   Pop $0
   Pop $1
   StrCmp $0 "0" nstu_preflight_ok
-  MessageBox MB_ICONSTOP|MB_OK "Server preflight failed. The diagnostics window contains the failed checks.$\r$\n$\r$\n$1"
+  MessageBox MB_ICONSTOP|MB_OK "Server preflight failed. The diagnostics window contains the failed checks.$\r$\n$\r$\nThe report was saved to:$\r$\n$PreflightReport$\r$\n$\r$\n$1"
   Abort
 nstu_preflight_ok:
+  Delete "$PreflightReport"
 SectionEnd
 
 Section -Server
