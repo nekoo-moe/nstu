@@ -14,6 +14,14 @@ option(NSTU_BUILD_VIDEO "Build DXGI and Media Foundation components" ON)
 option(NSTU_ENABLE_WERROR "Treat compiler warnings as errors" OFF)
 option(NSTU_ENABLE_PACKAGING "Enable unified Windows NSIS packaging" ON)
 
+# Keep release installers self-contained on clean school images.  The static
+# MSVC runtime avoids requiring a separately deployed Visual C++ Redistributable
+# before the installer diagnostics helper can even start.
+if(MSVC AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        CACHE STRING "MSVC runtime linkage" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

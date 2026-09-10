@@ -309,8 +309,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int show) {
     }
     if (!g_options.report_path.empty()) {
         std::string error;
-        (void)nstu::setup::write_diagnostic_report_json(
+        const bool written = nstu::setup::write_diagnostic_report_json(
             g_options.report_path, g_options.diagnostics, g_results, &error);
+        if (!written) {
+            OutputDebugStringA(("NSTU diagnostics report: " + error + "\n").c_str());
+        }
     }
     return static_cast<int>(message.wParam);
 }

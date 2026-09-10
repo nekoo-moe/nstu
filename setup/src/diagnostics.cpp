@@ -898,6 +898,14 @@ const char* severity_name(DiagnosticSeverity severity) noexcept {
 bool write_diagnostic_report_json(
     const std::filesystem::path& path, const DiagnosticOptions& options,
     const std::vector<DiagnosticResult>& results, std::string* error) {
+    std::error_code directory_error;
+    if (const auto parent = path.parent_path(); !parent.empty()) {
+        std::filesystem::create_directories(parent, directory_error);
+        if (directory_error) {
+            set_error(error, "diagnostic report directory could not be created");
+            return false;
+        }
+    }
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) {
         set_error(error, "diagnostic report could not be opened");
@@ -919,6 +927,7 @@ bool write_diagnostic_report_json(
         output << '\n';
     }
     output << "  ]\n}\n";
+    output.flush();
     if (!output) {
         set_error(error, "diagnostic report write failed");
         return false;
