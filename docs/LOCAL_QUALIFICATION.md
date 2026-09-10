@@ -53,3 +53,23 @@ remote WMI and Service Control Manager access return `Access is denied`, and no
 SMB share is exposed. The fixture therefore requires an interactive local/RDP
 run by an operator with the necessary Windows permissions. NSTU diagnostics do
 not weaken remote-UAC, firewall, or account policy to work around this.
+
+## Interactive operator handoff
+
+When the lab operator provides a temporary externally forwarded RDP endpoint,
+connect interactively with the host and port supplied out-of-band:
+
+```powershell
+mstsc /v:<host>:<port>
+```
+
+Do not place the endpoint, credentials, Tailscale/private addresses, or RDP
+certificates in this repository. Verify the certificate and host identity with
+the lab operator before signing in. After an administrator has signed in on the
+fixture, run the diagnostic command above locally and return only the sanitized
+JSON report. The report is the qualification evidence; TCP reachability alone
+does not establish OS, UWF, graphics, service, or performance readiness.
+
+The current externally forwarded test endpoint has been confirmed reachable on
+its supplied TCP port, but no interactive sign-in or machine mutation was
+performed by NSTU tooling.
