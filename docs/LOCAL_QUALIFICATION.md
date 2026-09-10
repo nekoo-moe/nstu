@@ -15,6 +15,26 @@ deployment by itself.
 
 ## Required run
 
+This fixture is intentionally clean. It has no NSTU binaries, service, project
+checkout, or diagnostics directory before bootstrap. Transfer the approved
+unified installer to the VM using an operator-controlled channel (for example,
+RDP drive redirection or the release page), verify its Authenticode signature,
+and install exactly one role. Do not copy only `nstu-diagnostics.exe`: the
+installer also stages the runtime files and role checks needed for a valid
+qualification run.
+
+The temporary remote-access port (if one is supplied by the lab operator) is
+only for the interactive session. It is not NSTU's control port. During client
+installation, enter the actual server address and NSTU control port (47001 by
+default), or use the server values provided for the lab.
+
+After the installer completes and the required restart has finished, the
+diagnostics helper will be at:
+
+```text
+C:\Program Files\NSTU\diagnostics\nstu-diagnostics.exe
+```
+
 Run the staged `nstu-diagnostics.exe` interactively on the fixture as an
 administrator, using a local report path:
 

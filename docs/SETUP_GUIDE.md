@@ -9,6 +9,20 @@ The first page offers **Install for Client** or **Install for Server** and never
 installs both roles into the same directory. The installer checks for an
 existing opposite role before copying files.
 
+### Clean-machine bootstrap
+
+On a clean qualification machine, `nstu-diagnostics.exe` does not exist until
+the unified installer has been transferred and run. Transfer the approved
+`nstu-<version>-setup.exe` through an operator-controlled channel, verify its
+signature, and select exactly one role. The installer copies the diagnostics
+helper to `C:\Program Files\NSTU\diagnostics\` and, for a client install,
+requires the documented restart before the service is active.
+
+Any temporary RDP or port-forwarding endpoint used to reach the machine is
+separate from NSTU's client/server control port. Enter the actual NSTU server
+address and control port (47001 by default) in the client role page; do not use
+the temporary remote-access port as the NSTU control port.
+
 For a client, enter the server IP address and control port (`47001` by default).
 The installer runs the diagnostics helper before service registration. It then
 registers `nstu-service` as an automatic `LocalSystem` service, stores the
