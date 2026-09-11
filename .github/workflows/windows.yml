@@ -26,6 +26,12 @@ jobs:
         run: ./packaging/test-update-cycle.ps1
       - name: Package unified installer
         run: cmake --build build --config Release --target nstu-package --parallel
+      - name: Check documentation payload
+        shell: pwsh
+        run: |
+          if (Test-Path build\unified-installer-stage\docs\project\assets) {
+            throw 'Repository-only documentation assets must not be packaged.'
+          }
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:

@@ -49,8 +49,10 @@ một lần vẫn thực hiện theo phần dưới.
 
 ## Script và installer
 
-Gói đầy đủ chứa lifecycle script trong `client\` và `docs\deployment\`.
-Standalone EXE không đăng ký service và không phải nguồn cài đặt được hỗ trợ.
+Gói đầy đủ chứa lifecycle script trong `client\` và `docs\deployment\`, cùng
+các tài liệu Markdown nhưng không đóng gói ảnh chỉ dùng cho repository trong
+`docs\assets\` như screenshot và logo đối tác. Standalone EXE không đăng ký
+service và không phải nguồn cài đặt được hỗ trợ.
 Hai vai trò đều được kiểm tra trước khi cài để tránh xung đột.
 
 ## Gỡ cài đặt bắt buộc restart

@@ -82,8 +82,9 @@ below.
 ## Installer and scripts
 
 The complete installer includes lifecycle scripts under `client\` and
-`docs\deployment\`. Standalone EXEs do not register services and are not a
-supported installation source.
+`docs\deployment\`. It includes the Markdown manuals but omits the
+repository-only `docs\assets\` screenshots and partner logos. Standalone EXEs
+do not register services and are not a supported installation source.
 
 Both roles are checked before installation to prevent conflicts. The client
 helper configures the service, data root, recovery policy, and protected ACLs.

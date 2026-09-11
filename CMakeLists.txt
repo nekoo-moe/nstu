@@ -167,9 +167,12 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/uninstall-server.ps1"
         DESTINATION docs/deployment
         COMPONENT docs)
+    # Project-only screenshots and partner logos are used by the online README
+    # and do not belong in the installed application documentation.
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/docs/"
         DESTINATION docs/project
-        COMPONENT docs)
+        COMPONENT docs
+        PATTERN "assets" EXCLUDE)
 
     set(NSTU_UNIFIED_STAGE_DIR "${CMAKE_BINARY_DIR}/unified-installer-stage")
     set(NSTU_UNIFIED_INSTALLER
