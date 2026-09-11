@@ -9,6 +9,13 @@ Tài liệu xác định kế hoạch thận trọng để quản lý tập trun
 Đường monitoring bằng snapshot độc lập với công việc này và vẫn là ưu tiên
 production; thiết kế này không yêu cầu H.264 liên tục cho từng client.
 
+Phạm vi UWF chỉ dành cho client. NSTU phải giữ installation server/teacher bền
+vững vì server có thể chứa exam package, tài liệu bài giảng, trạng thái
+enrollment, audit record và báo cáo diagnostics. Vì vậy diagnostics của server
+không qualification hoặc bật UWF; kết quả sẽ là không áp dụng. Qualification UWF
+và mọi orchestration reboot-to-restore trong tương lai phải chạy trên image
+client riêng.
+
 ## Quyết định
 
 NSTU nên quản lý **Unified Write Filter (UWF)** được Microsoft hỗ trợ thay vì

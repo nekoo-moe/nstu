@@ -315,7 +315,16 @@ DiagnosticResult check_os() {
                   L"Hệ điều hành", detail, detail);
 }
 
-DiagnosticResult check_uwf() {
+DiagnosticResult check_uwf(DiagnosticRole role) {
+    if (role != DiagnosticRole::client) {
+        return result(
+            "uwf", DiagnosticSeverity::not_applicable,
+            L"Reboot-to-restore scope", L"Phạm vi khôi phục sau reboot",
+            L"UWF is client-only. The server keeps persistent exam, lecture, enrollment, and diagnostic data.",
+            L"UWF chỉ áp dụng cho client. Server giữ dữ liệu exam, bài giảng, enrollment và diagnostics một cách bền vững.",
+            L"Run UWF qualification with --target=client on a separate client image.",
+            L"Chạy qualification UWF bằng --target=client trên image client riêng.");
+    }
     UwfProbeSnapshot snapshot;
     snapshot.product_type = os_product_type();
     query_optional_feature(snapshot.feature_known, snapshot.feature_enabled);
@@ -874,7 +883,7 @@ void run_startup_diagnostics(const DiagnosticOptions& options,
         }
     };
     run(checks[0], [] { return check_os(); });
-    run(checks[1], [] { return check_uwf(); });
+    run(checks[1], [&] { return check_uwf(options.role); });
     run(checks[2], [] { return check_safe_mode(); });
     run(checks[3], [&] { return check_installation(options); });
     run(checks[4], [] { return check_registry(); });

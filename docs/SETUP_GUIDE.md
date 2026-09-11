@@ -42,7 +42,10 @@ address entered here is not an enrollment credential and is not yet the
 service's authenticated runtime configuration.
 
 For a server, diagnostics check the display, network link, and hardware H.264
-encoder before the server files and protected data root are installed.
+encoder before the server files and protected data root are installed. UWF is
+reported as not applicable for the server role because server data is
+persistent. Run UWF qualification with `--target=client` on a separate client
+image.
 
 ## Integrated diagnostics
 

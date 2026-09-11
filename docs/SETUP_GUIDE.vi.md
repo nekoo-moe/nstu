@@ -17,7 +17,9 @@ và đặt cờ restart bắt buộc. Service chỉ được kích hoạt sau l�
 runtime có xác thực của service.
 
 Với server, diagnostics kiểm tra display, link mạng và encoder H.264 phần cứng
-trước khi cài file server và data root được bảo vệ.
+trước khi cài file server và data root được bảo vệ. UWF được báo là không áp
+dụng cho role server vì dữ liệu server phải bền vững. Chạy qualification UWF
+bằng `--target=client` trên image client riêng.
 
 ## Diagnostics tích hợp
 

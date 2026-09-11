@@ -52,6 +52,35 @@ time, and configured NSTU server reachability. Do not place passwords, tokens,
 Tailscale addresses, screen captures, or enrollment material in the report or
 repository.
 
+## Role and UWF boundary
+
+Install the server role on a persistent machine. Do not enable UWF on that
+machine because the server may contain exam packages, lecture materials,
+enrollment state, audit records, and diagnostic reports. A server diagnostics
+run reports UWF as `not_applicable`.
+
+Use a separate client image for the reboot-to-restore trial. For the current
+3 GiB development VM, use the internal artifact
+`nstu-<version>-internal-vm-setup.exe`; it permits the undersized CPU/RAM
+warning for development tests. The production artifact retains the 6 GiB
+installation minimum.
+
+After installing the client role, run the client report before any UWF change:
+
+```powershell
+& "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" `
+  --target=client `
+  --report="$env:ProgramData\NSTU\qualification-client-before-uwf.json" `
+  --diagnostics-stay-open
+```
+
+Record the report, create a recovery image or checkpoint, and only then follow
+the reviewed Windows UWF procedure to enable the feature and configure the
+filter. Restart the client, run the same command with a new report path, and
+verify that current and next UWF state agree. Test a disposable file and a
+known excluded/persistent path, then disable UWF and restore the checkpoint
+before repeating the cycle. NSTU does not enable or mutate UWF automatically.
+
 ## Acceptance boundaries
 
 - 6 GiB RAM is the installation minimum; 8 GiB remains the recommended baseline.

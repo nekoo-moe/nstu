@@ -11,6 +11,13 @@ The snapshot-monitoring path is independent of this work and remains the
 production priority; continuous per-client H.264 monitoring is not required by
 this design.
 
+UWF scope is client-only. NSTU must keep the teacher/server installation
+persistent because it may contain exam packages, lecture materials, enrollment
+state, audit records, and diagnostic reports. Server diagnostics therefore do
+not qualify or enable UWF; they report the feature as not applicable. UWF
+qualification and any future reboot-to-restore orchestration run on a separate
+client image.
+
 ## Decision
 
 NSTU should manage Microsoft's supported **Unified Write Filter (UWF)** rather
