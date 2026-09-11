@@ -93,3 +93,27 @@ does not establish OS, UWF, graphics, service, or performance readiness.
 The current externally forwarded test endpoint has been confirmed reachable on
 its supplied TCP port, but no interactive sign-in or machine mutation was
 performed by NSTU tooling.
+
+## Report received from the VM
+
+The first sanitized server-role report does not qualify the advertised
+weakest-machine fixture:
+
+- Windows reports **Windows 10 Pro Education 22H2**, so Microsoft UWF is
+  correctly audit-only for this image.
+- The VM exposes **3 GiB RAM** and **3 physical / 4 logical processors**. This
+  is below the 8 GiB minimum and is not the previously described 8 GiB test
+  configuration.
+- The reported **100000 Mbps Tailscale** link is an overlay/tunnel result and
+  is not physical link evidence. NSTU now excludes tunnel adapters from the
+  physical-link gate; rerun diagnostics with an operational Ethernet or Wi-Fi
+  adapter visible to the VM.
+- D3D11 hardware and WARP were available. Missing H.264 hardware encoding is a
+  warning only because snapshot mode remains the supported baseline.
+- Windows Time was not running. Correct this through the lab image policy and
+  rerun the check; NSTU does not change system time automatically.
+
+This report is evidence for the lab baseline only; it is not a production
+approval. Do not record the VM as an 8 GiB or UWF-capable target until the VM
+memory allocation, physical network attachment, and Windows edition are
+corrected and re-tested.

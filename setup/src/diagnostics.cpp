@@ -8,6 +8,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <ipifcons.h>
 #include <netlistmgr.h>
 #include <versionhelpers.h>
 #include <wbemidl.h>
@@ -382,21 +383,37 @@ DiagnosticResult check_safe_mode() {
                   L"Đã phát hiện Windows khởi động bình thường.");
 }
 
+const NetworkScan* fastest_physical_network(const HardwareScan& hardware) {
+    const auto is_usable = [](const NetworkScan& network) {
+        // Tunnel adapters (including Tailscale) report overlay capacity, not
+        // the negotiated Ethernet/Wi-Fi link used by classroom traffic.
+        return network.operational && !network.tunnel &&
+               network.interface_type != IF_TYPE_SOFTWARE_LOOPBACK;
+    };
+    const NetworkScan* fastest = nullptr;
+    for (const auto& network : hardware.networks) {
+        if (!is_usable(network)) {
+            continue;
+        }
+        if (fastest == nullptr ||
+            std::max(network.transmit_link_speed_mbps,
+                     network.receive_link_speed_mbps) >
+                std::max(fastest->transmit_link_speed_mbps,
+                         fastest->receive_link_speed_mbps)) {
+            fastest = &network;
+        }
+    }
+    return fastest;
+}
+
 DiagnosticResult check_hardware(const HardwareScan& hardware) {
     const auto cpu = classify_processor(hardware.processor.x64,
                                         hardware.processor.physical_cores,
                                         hardware.processor.logical_processors);
     const auto memory = classify_memory_gib(
         hardware.memory.total_physical_bytes / (1024ull * 1024ull * 1024ull));
-    const auto fastest = std::max_element(
-        hardware.networks.begin(), hardware.networks.end(),
-        [](const auto& left, const auto& right) {
-            return std::max(left.transmit_link_speed_mbps,
-                            left.receive_link_speed_mbps) <
-                   std::max(right.transmit_link_speed_mbps,
-                            right.receive_link_speed_mbps);
-        });
-    const std::uint64_t link = fastest == hardware.networks.end()
+    const auto* fastest = fastest_physical_network(hardware);
+    const std::uint64_t link = fastest == nullptr
         ? 0
         : std::max(fastest->transmit_link_speed_mbps,
                    fastest->receive_link_speed_mbps);
@@ -462,22 +479,15 @@ DiagnosticResult check_encoder(DiagnosticRole role) {
 }
 
 DiagnosticResult check_network(const HardwareScan& hardware) {
-    if (hardware.networks.empty()) {
+    const auto* fastest = fastest_physical_network(hardware);
+    if (fastest == nullptr) {
         return result("network", DiagnosticSeverity::failure,
                       L"Network link", L"Kết nối mạng",
-                      L"No operational non-loopback network adapter was found.",
-                      L"Không tìm thấy adapter mạng hoạt động ngoài loopback.",
+                      L"No operational physical Ethernet or Wi-Fi adapter was found; tunnel adapters are not accepted as link-capacity evidence.",
+                      L"Không tìm thấy adapter Ethernet hoặc Wi-Fi vật lý đang hoạt động; adapter tunnel không được dùng làm bằng chứng dung lượng link.",
                       L"Connect an Ethernet or Wi-Fi adapter before installation.",
                       L"Kết nối adapter Ethernet hoặc Wi-Fi trước khi cài đặt.", 6);
     }
-    const auto fastest = std::max_element(
-        hardware.networks.begin(), hardware.networks.end(),
-        [](const auto& left, const auto& right) {
-            return std::max(left.transmit_link_speed_mbps,
-                            left.receive_link_speed_mbps) <
-                   std::max(right.transmit_link_speed_mbps,
-                            right.receive_link_speed_mbps);
-        });
     const auto link = std::max(fastest->transmit_link_speed_mbps,
                                fastest->receive_link_speed_mbps);
     const auto severity = link < 100 ? DiagnosticSeverity::warning
