@@ -105,22 +105,113 @@
 
   const manifest = window.NSTU_EXAM_MANIFEST || DEFAULT_MANIFEST;
   const storageKey = `nstu-exam:${manifest.id}:${manifest.candidate || "candidate"}`;
+  const durableStorageKey = `${storageKey}:durable-v1`;
+  const MAX_DURABLE_EVENTS = 256;
+  const MAX_DURABLE_BYTES = 8 * 1024 * 1024;
+
+  // The native WebView2 host injects this context before navigation. Keeping
+  // the context outside the manifest prevents an exam package from choosing
+  // its own client or session identity.
+  function normalizeHex(value, bytes) {
+    if (typeof value !== "string" || !new RegExp(`^[0-9a-fA-F]{${bytes * 2}}$`).test(value)) {
+      return "";
+    }
+    return value.toLowerCase();
+  }
+
+  function normalizeNonZeroHex(value, bytes) {
+    const normalized = normalizeHex(value, bytes);
+    return normalized && !/^0+$/.test(normalized) ? normalized : "";
+  }
+
+  function normalizeExamContext(value) {
+    const source = value && typeof value === "object" ? value : {};
+    return {
+      packageDigestHex: normalizeNonZeroHex(source.packageDigestHex, 32),
+      clientIdHex: normalizeNonZeroHex(source.clientIdHex, 16),
+      sessionIdHex: normalizeNonZeroHex(source.sessionIdHex, 16),
+      previousEventHashHex: normalizeNonZeroHex(source.previousEventHashHex, 32),
+      candidateId: typeof source.candidateId === "string"
+        ? source.candidateId.slice(0, 128)
+        : "",
+      nextSequence: Number.isSafeInteger(source.nextSequence) && source.nextSequence > 0
+        ? source.nextSequence
+        : 1
+    };
+  }
+
+  let examContext = normalizeExamContext(window.NSTU_EXAM_CONTEXT);
   function readStorage(key, fallback = "") {
     try { return localStorage.getItem(key) ?? fallback; }
     catch (_) { return fallback; }
   }
   function writeStorage(key, value) {
-    try { localStorage.setItem(key, value); }
-    catch (_) { /* Hosts may disable browser storage; server messages still work. */ }
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch (_) {
+      /* Hosts may disable browser storage; server messages still work. */
+      return false;
+    }
   }
+
+  function loadDurableState() {
+    const value = loadJson(durableStorageKey, {});
+    if (!value || typeof value !== "object") {
+      return { nextSequence: examContext.nextSequence, previousEventHashHex: "", pending: [], drafts: {}, finalizeRequested: false };
+    }
+    const pending = Array.isArray(value.pending) ? value.pending.filter((event) =>
+      event && typeof event === "object" && Number.isSafeInteger(event.sequence) &&
+      event.sequence > 0 && typeof event.packageId === "string" &&
+      typeof event.sessionIdHex === "string") : [];
+    const drafts = value.drafts && typeof value.drafts === "object" ? value.drafts : {};
+    const nextSequence = Number.isSafeInteger(value.nextSequence) && value.nextSequence > 0
+      ? value.nextSequence : examContext.nextSequence;
+    return {
+      nextSequence,
+      previousEventHashHex: normalizeNonZeroHex(value.previousEventHashHex, 32),
+      pending: pending.slice(0, MAX_DURABLE_EVENTS),
+      drafts,
+      finalizeRequested: value.finalizeRequested === true
+    };
+  }
+
+  function persistDurableState() {
+    const durable = state.durable;
+    const value = {
+      nextSequence: durable.nextSequence,
+      previousEventHashHex: durable.previousEventHashHex,
+      pending: durable.pending,
+      drafts: durable.drafts,
+      finalizeRequested: durable.finalizeRequested === true
+    };
+    const serialized = JSON.stringify(value);
+    if (serialized.length > MAX_DURABLE_BYTES) {
+      state.syncError = "Answer recovery storage is full.";
+      return false;
+    }
+    if (!writeStorage(durableStorageKey, serialized)) {
+      state.syncError = "Answer recovery storage is unavailable.";
+      return false;
+    }
+    return true;
+  }
+
   const state = {
     language: readStorage(`${storageKey}:language`, "en"),
     index: 0,
     answers: loadJson(`${storageKey}:answers`, {}),
     notes: readStorage(`${storageKey}:notes`),
     remainingSeconds: Number(readStorage(`${storageKey}:remaining`)) || manifest.durationSeconds,
-    submitted: false
+    submitted: false,
+    durable: loadDurableState(),
+    inFlightSequence: 0,
+    retryTimer: 0,
+    eventTimers: Object.create(null),
+    finalizeRequested: false,
+    syncError: ""
   };
+  state.finalizeRequested = state.durable.finalizeRequested;
   if (!I18N[state.language]) state.language = "en";
 
   const el = (id) => document.getElementById(id);
@@ -130,6 +221,295 @@
   function loadJson(key, fallback) {
     try { return JSON.parse(readStorage(key, "null")) || fallback; }
     catch (_) { return fallback; }
+  }
+
+  function hostWebView() {
+    return window.chrome && window.chrome.webview &&
+      typeof window.chrome.webview.postMessage === "function"
+      ? window.chrome.webview : null;
+  }
+
+  function postHostMessage(message) {
+    const webview = hostWebView();
+    if (!webview) return false;
+    try {
+      webview.postMessage(message);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function bridgeReady() {
+    return Boolean(examContext.packageDigestHex && examContext.clientIdHex &&
+      examContext.sessionIdHex && examContext.candidateId);
+  }
+
+  function answerIsEmpty(value) {
+    if (Array.isArray(value)) return value.length === 0;
+    return value === null || value === undefined || String(value).trim() === "";
+  }
+
+  // Answer bytes are UTF-8 text. Complex answer controls are represented as
+  // canonical JSON so the native host can convert them to the wire payload
+  // without guessing at JavaScript types.
+  function answerText(value) {
+    if (Array.isArray(value) || (value && typeof value === "object")) {
+      return JSON.stringify(value);
+    }
+    return value === null || value === undefined ? "" : String(value);
+  }
+
+  function questionById(id) {
+    return manifest.questions.find((item) => item && item.id === id) || null;
+  }
+
+  function questionRevision(item) {
+    const revision = Number(item && (item.questionRevision || item.revision));
+    return Number.isSafeInteger(revision) && revision > 0 ? revision : 1;
+  }
+
+  function setConnectionStatus(value) {
+    const node = el("connection-status");
+    if (node) node.textContent = value;
+  }
+
+  function durableEventForDraft(id, draft) {
+    const item = questionById(id);
+    if (!item || !bridgeReady()) return null;
+    const value = draft ? draft.value : "";
+    const event = {
+      packageId: manifest.id,
+      packageDigestHex: examContext.packageDigestHex,
+      clientIdHex: examContext.clientIdHex,
+      sessionIdHex: examContext.sessionIdHex,
+      candidateId: examContext.candidateId,
+      questionId: item.id,
+      questionRevision: questionRevision(item),
+      sequence: state.durable.nextSequence,
+      clientTimeUnixMilliseconds: Date.now(),
+      kind: answerIsEmpty(value) ? "clear" : "upsert",
+      answer: answerText(value),
+      previousEventHashHex: state.durable.previousEventHashHex || ""
+    };
+    return event;
+  }
+
+  function durableEventSize(event) {
+    try { return JSON.stringify(event).length; }
+    catch (_) { return MAX_DURABLE_BYTES; }
+  }
+
+  function requestExamState() {
+    if (!bridgeReady()) return false;
+    return postHostMessage({
+      type: "exam_state_request",
+      request: {
+        packageId: manifest.id,
+        packageDigestHex: examContext.packageDigestHex,
+        clientIdHex: examContext.clientIdHex,
+        sessionIdHex: examContext.sessionIdHex,
+        candidateId: examContext.candidateId
+      }
+    });
+  }
+
+  function scheduleBridgeRetry() {
+    if (state.retryTimer) return;
+    state.retryTimer = window.setTimeout(() => {
+      state.retryTimer = 0;
+      state.inFlightSequence = 0;
+      flushAnswerBridge();
+    }, 2000);
+  }
+
+  function flushAnswerBridge() {
+    if (!bridgeReady() || !hostWebView()) {
+      setConnectionStatus("Local recovery");
+      return;
+    }
+    const durable = state.durable;
+    if (durable.pending.length > 0) {
+      const event = durable.pending[0];
+      if (state.inFlightSequence === event.sequence) return;
+      if (!postHostMessage({ type: "exam_answer_event", event })) {
+        setConnectionStatus("Recovery queued");
+        scheduleBridgeRetry();
+        return;
+      }
+      state.inFlightSequence = event.sequence;
+      setConnectionStatus("Recovery syncing");
+      return;
+    }
+
+    const draftIds = Object.keys(durable.drafts);
+    if (draftIds.length > 0) {
+      if (durable.nextSequence > 1 && !durable.previousEventHashHex) {
+        setConnectionStatus("Waiting for server recovery state");
+        requestExamState();
+        return;
+      }
+      const id = draftIds[0];
+      const event = durableEventForDraft(id, durable.drafts[id]);
+      if (!event) return;
+      if (durableEventSize(event) > MAX_DURABLE_BYTES ||
+          durable.nextSequence === Number.MAX_SAFE_INTEGER) {
+        state.syncError = "Answer recovery storage cannot accept this answer.";
+        setConnectionStatus(state.syncError);
+        return;
+      }
+      delete durable.drafts[id];
+      durable.pending.push(event);
+      durable.nextSequence += 1;
+      if (durable.pending.length > MAX_DURABLE_EVENTS ||
+          JSON.stringify(durable).length > MAX_DURABLE_BYTES) {
+        // Restore the draft rather than silently dropping an answer.
+        durable.pending.pop();
+        durable.nextSequence -= 1;
+        durable.drafts[id] = { value: event.answer, questionRevision: event.questionRevision };
+        state.syncError = "Answer recovery storage is full.";
+        setConnectionStatus(state.syncError);
+        persistDurableState();
+        return;
+      }
+      persistDurableState();
+      flushAnswerBridge();
+      return;
+    }
+
+    if (durable.finalizeRequested) {
+      const finalEvent = {
+        packageId: manifest.id,
+        packageDigestHex: examContext.packageDigestHex,
+        clientIdHex: examContext.clientIdHex,
+        sessionIdHex: examContext.sessionIdHex,
+        candidateId: examContext.candidateId,
+        questionId: "",
+        questionRevision: 1,
+        sequence: durable.nextSequence,
+        clientTimeUnixMilliseconds: Date.now(),
+        kind: "finalize",
+        answer: "",
+        previousEventHashHex: durable.previousEventHashHex || ""
+      };
+      durable.finalizeRequested = false;
+      durable.pending.push(finalEvent);
+      durable.nextSequence += 1;
+      persistDurableState();
+      flushAnswerBridge();
+      return;
+    }
+    setConnectionStatus("Server recovery ready");
+  }
+
+  function queueAnswerDraft(id, value) {
+    if (!questionById(id)) return;
+    state.durable.drafts[id] = {
+      value: Array.isArray(value) ? value.slice() : value,
+      questionRevision: questionRevision(questionById(id))
+    };
+    persistDurableState();
+    window.clearTimeout(state.eventTimers[id]);
+    state.eventTimers[id] = window.setTimeout(() => {
+      delete state.eventTimers[id];
+      flushAnswerBridge();
+    }, 350);
+  }
+
+  function handleAnswerAck(message) {
+    const ack = message && message.ack && typeof message.ack === "object"
+      ? message.ack : message;
+    if (!ack || !Number.isSafeInteger(ack.sequence) || ack.sequence <= 0) return;
+    const pending = state.durable.pending[0];
+    if (!pending || pending.sequence !== ack.sequence ||
+        (ack.sessionIdHex && ack.sessionIdHex !== pending.sessionIdHex)) return;
+    const statusNames = ["", "accepted", "duplicate", "rejected", "conflict", "gap", "unavailable"];
+    const status = typeof ack.status === "number"
+      ? (statusNames[ack.status] || "")
+      : String(ack.status || "").toLowerCase();
+    if (status === "accepted" || status === "duplicate") {
+      state.durable.pending.shift();
+      const eventHash = normalizeNonZeroHex(ack.eventHashHex, 32);
+      if (eventHash) state.durable.previousEventHashHex = eventHash;
+      state.inFlightSequence = 0;
+      state.syncError = "";
+      persistDurableState();
+      markSaved();
+      flushAnswerBridge();
+      return;
+    }
+    state.inFlightSequence = 0;
+    state.syncError = `Answer recovery ${status || "failed"}.`;
+    setConnectionStatus(state.syncError);
+    if (status === "gap") {
+      requestExamState();
+      scheduleBridgeRetry();
+    }
+  }
+
+  function applyStateResponse(message) {
+    const response = message && message.response && typeof message.response === "object"
+      ? message.response : message;
+    if (!response || (response.sessionIdHex && response.sessionIdHex !== examContext.sessionIdHex) ||
+        (response.packageId && response.packageId !== manifest.id)) return;
+    if (Array.isArray(response.answers)) {
+      const locallyPending = new Set(Object.keys(state.durable.drafts));
+      state.durable.pending.forEach((event) => {
+        if (event && typeof event.questionId === "string" && event.questionId) {
+          locallyPending.add(event.questionId);
+        }
+      });
+      response.answers.forEach((answer) => {
+        if (!answer || typeof answer.questionId !== "string") return;
+        if (locallyPending.has(answer.questionId)) return;
+        if (String(answer.kind || "").toLowerCase() === "clear") {
+          delete state.answers[answer.questionId];
+        } else if (Object.prototype.hasOwnProperty.call(answer, "answer")) {
+          state.answers[answer.questionId] = answer.answer;
+        }
+      });
+      writeStorage(`${storageKey}:answers`, JSON.stringify(state.answers));
+      renderQuestionList();
+      renderQuestion();
+    }
+    const highest = Number(response.highestContiguousSequence);
+    if (state.durable.pending.length === 0 && Number.isSafeInteger(highest) && highest >= 0) {
+      state.durable.nextSequence = Math.max(state.durable.nextSequence, highest + 1);
+      const lastHash = normalizeNonZeroHex(response.lastEventHashHex, 32);
+      if (lastHash) state.durable.previousEventHashHex = lastHash;
+      persistDurableState();
+    }
+    if (response.finalized === true) {
+      state.submitted = true;
+      document.querySelectorAll("button, input, textarea, select").forEach((node) => { node.disabled = true; });
+    }
+    setConnectionStatus("Server recovery ready");
+    flushAnswerBridge();
+  }
+
+  function handleHostMessage(event) {
+    let message = event && event.data;
+    if (typeof message === "string") {
+      try { message = JSON.parse(message); } catch (_) { return; }
+    }
+    if (!message || typeof message.type !== "string") return;
+    if (message.type === "exam_context") {
+      examContext = normalizeExamContext(message.context || message);
+      state.durable.nextSequence = Math.max(state.durable.nextSequence, examContext.nextSequence);
+      if (!state.durable.previousEventHashHex && examContext.previousEventHashHex) {
+        state.durable.previousEventHashHex = examContext.previousEventHashHex;
+      }
+      persistDurableState();
+      requestExamState();
+      flushAnswerBridge();
+    } else if (message.type === "exam_answer_ack") {
+      handleAnswerAck(message);
+    } else if (message.type === "exam_state_response") {
+      applyStateResponse(message);
+    } else if (message.type === "exam_host_ready") {
+      requestExamState();
+      flushAnswerBridge();
+    }
   }
 
   function applyLanguage() {
@@ -275,6 +655,7 @@
   function saveAnswer(id, value) {
     state.answers[id] = value;
     writeStorage(`${storageKey}:answers`, JSON.stringify(state.answers));
+    queueAnswerDraft(id, value);
     markSaved();
     renderQuestionList();
   }
@@ -310,13 +691,19 @@
 
   function submitResponse() {
     state.submitted = true;
+    state.durable.finalizeRequested = true;
+    persistDurableState();
     const response = { examId: manifest.id, candidate: manifest.candidate || "", submittedAt: new Date().toISOString(), answers: state.answers, notes: state.notes };
     window.NSTU_EXAM_RESPONSE = response;
     el("save-status").textContent = text("submitted");
     document.querySelectorAll("button, input, textarea, select").forEach((node) => { node.disabled = true; });
     if (window.chrome && window.chrome.webview) {
-      window.chrome.webview.postMessage({ type: "exam_submit", response });
+      window.chrome.webview.postMessage({
+        type: "exam_submit", response,
+        pendingAnswerEvents: state.durable.pending.length + Object.keys(state.durable.drafts).length
+      });
     }
+    flushAnswerBridge();
   }
 
   function downloadResponse() {
@@ -370,6 +757,23 @@
       if (event.key === "ArrowLeft" && state.index > 0) { state.index--; renderQuestionList(); renderQuestion(); }
       if (event.key === "ArrowRight" && state.index < manifest.questions.length - 1) { state.index++; renderQuestionList(); renderQuestion(); }
     });
+    const webview = hostWebView();
+    if (webview && typeof webview.addEventListener === "function") {
+      webview.addEventListener("message", handleHostMessage);
+      postHostMessage({
+        type: "exam_ready",
+        context: {
+          packageId: manifest.id,
+          packageDigestHex: examContext.packageDigestHex,
+          clientIdHex: examContext.clientIdHex,
+          sessionIdHex: examContext.sessionIdHex,
+          candidateId: examContext.candidateId
+        },
+        pendingAnswerEvents: state.durable.pending.length + Object.keys(state.durable.drafts).length
+      });
+      requestExamState();
+      flushAnswerBridge();
+    }
   }
 
   el("exam-title").textContent = manifest.title || DEFAULT_MANIFEST.title;

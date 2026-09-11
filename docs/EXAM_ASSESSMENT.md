@@ -34,11 +34,66 @@ The WebView2 host should:
    digest before navigation.
 3. Expose the manifest as `window.NSTU_EXAM_MANIFEST` and navigate to the local
    `exam/web/index.html` file.
-4. Handle `window.chrome.webview` messages with `{ type: "exam_submit" }` and
-   persist the response on the server using the authenticated control channel.
+4. Handle the WebView2 answer-recovery messages described below and persist
+   them on the server using the authenticated control channel.
 5. Restore the last accepted answer state after a client reconnects. The
    browser's localStorage is only a crash-recovery cache, not the authoritative
    record.
+
+## Answer recovery bridge
+
+Before navigation, the host should inject an identity-only context. The exam
+manifest must never be allowed to select the client or session identity:
+
+```js
+window.NSTU_EXAM_CONTEXT = {
+  packageDigestHex: "64 hexadecimal characters",
+  clientIdHex: "32 hexadecimal characters",
+  sessionIdHex: "32 hexadecimal characters",
+  candidateId: "candidate-id",
+  previousEventHashHex: "optional 64-character hash",
+  nextSequence: 1
+};
+```
+
+The page emits `exam_ready`, then sends one `exam_answer_event` at a time. Text
+answers are UTF-8 strings; structured controls are canonical JSON strings.
+The event remains in a bounded browser queue until the host sends an
+`exam_answer_ack` with status `accepted` or `duplicate` and the matching
+`eventHashHex`. A rejected or unavailable event is retained for retry and is
+shown as a pending recovery state. On submit, `exam_submit` remains available
+for the host's response-package workflow, and a durable `finalize` event is
+queued after all answer events.
+
+Example page-to-host event:
+
+```json
+{
+  "type": "exam_answer_event",
+  "event": {
+    "packageId": "ielts-sample-01",
+    "packageDigestHex": "...",
+    "clientIdHex": "...",
+    "sessionIdHex": "...",
+    "candidateId": "candidate-01",
+    "questionId": "writing-01",
+    "questionRevision": 1,
+    "sequence": 7,
+    "clientTimeUnixMilliseconds": 1770000000000,
+    "kind": "upsert",
+    "answer": "UTF-8 answer text",
+    "previousEventHashHex": "..."
+  }
+}
+```
+
+The host replies with `{ "type": "exam_answer_ack", "ack": { ... } }`,
+where `status` is `accepted`, `duplicate`, `gap`, `conflict`, `rejected`, or
+`unavailable`. For a reconnect, the host sends `exam_state_response` with the
+accepted answers, `highestContiguousSequence`, and (when available)
+`lastEventHashHex`; the page merges that state and never overwrites newer
+pending events. The native host must validate every identity, revision, size,
+and hash-chain field before converting the message to the packed C++ protocol.
 
 The page supports a PDF reference pane, listening audio, multiple-choice,
 short-answer, essay, reading, timer, autosave, language selection, text-size
