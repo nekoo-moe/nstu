@@ -13,6 +13,31 @@ option(NSTU_BUILD_TESTS "Build unit and integration tests" ON)
 option(NSTU_BUILD_VIDEO "Build DXGI and Media Foundation components" ON)
 option(NSTU_ENABLE_WERROR "Treat compiler warnings as errors" OFF)
 option(NSTU_ENABLE_PACKAGING "Enable unified Windows NSIS packaging" ON)
+option(NSTU_INTERNAL_TEST_BUILD
+    "Build an explicitly labeled installer that permits undersized VM hardware"
+    OFF)
+
+if(NSTU_INTERNAL_TEST_BUILD)
+    set(NSTU_INTERNAL_TEST_BUILD_VALUE 1)
+    set(NSTU_INSTALLER_DISPLAY_NAME "NSTU Internal VM Test")
+    set(NSTU_INSTALLER_FILE_SUFFIX "-internal-vm")
+    set(NSTU_INSTALLER_CHANNEL "InternalVmTest")
+    set(NSTU_INSTALLER_ROLE_SUFFIX " (Internal VM Test)")
+else()
+    set(NSTU_INTERNAL_TEST_BUILD_VALUE 0)
+    set(NSTU_INSTALLER_DISPLAY_NAME "NSTU")
+    set(NSTU_INSTALLER_FILE_SUFFIX "")
+    set(NSTU_INSTALLER_CHANNEL "Release")
+    set(NSTU_INSTALLER_ROLE_SUFFIX "")
+endif()
+
+# Keep release installers self-contained on clean school images.  The static
+# MSVC runtime avoids requiring a separately deployed Visual C++ Redistributable
+# before the installer diagnostics helper can even start.
+if(MSVC AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        CACHE STRING "MSVC runtime linkage" FORCE)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -142,12 +167,16 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/uninstall-server.ps1"
         DESTINATION docs/deployment
         COMPONENT docs)
+    # Project-only screenshots and partner logos are used by the online README
+    # and do not belong in the installed application documentation.
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/docs/"
         DESTINATION docs/project
-        COMPONENT docs)
+        COMPONENT docs
+        PATTERN "assets" EXCLUDE)
 
     set(NSTU_UNIFIED_STAGE_DIR "${CMAKE_BINARY_DIR}/unified-installer-stage")
-    set(NSTU_UNIFIED_INSTALLER "${CMAKE_BINARY_DIR}/nstu-${PROJECT_VERSION}-setup.exe")
+    set(NSTU_UNIFIED_INSTALLER
+        "${CMAKE_BINARY_DIR}/nstu-${PROJECT_VERSION}${NSTU_INSTALLER_FILE_SUFFIX}-setup.exe")
     set(NSTU_PACKAGE_INSTALL_CONFIG "Release" CACHE STRING
         "Configuration staged by the unified installer target")
     configure_file(

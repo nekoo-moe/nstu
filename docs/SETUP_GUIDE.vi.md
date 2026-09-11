@@ -17,7 +17,9 @@ và đặt cờ restart bắt buộc. Service chỉ được kích hoạt sau l�
 runtime có xác thực của service.
 
 Với server, diagnostics kiểm tra display, link mạng và encoder H.264 phần cứng
-trước khi cài file server và data root được bảo vệ.
+trước khi cài file server và data root được bảo vệ. UWF được báo là không áp
+dụng cho role server vì dữ liệu server phải bền vững. Chạy qualification UWF
+bằng `--target=client` trên image client riêng.
 
 ## Diagnostics tích hợp
 
@@ -25,7 +27,12 @@ trước khi cài file server và data root được bảo vệ.
 riêng bởi kỹ thuật viên. Các kiểm tra hiện tuần tự. Nếu không có
 `--auto-close`, cửa sổ giữ nguyên để xem lại. Với `--auto-close`, chỉ run hoàn
 toàn sạch mới tự đóng; warning và lỗi đều giữ cửa sổ, còn lỗi trả về exit code
-khác 0. Dùng `--log=<path>` để lưu kết quả.
+khác 0. Dùng `--report=<path>` để lưu kết quả JSON có cấu trúc;
+`--log=<path>` vẫn được giữ làm alias tương thích. Thêm
+`--diagnostics-stay-open` nếu kỹ thuật viên cần giữ cửa sổ khi toàn bộ kiểm tra
+đạt. Kiểm tra UWF chỉ đọc, không bật filter, sửa registry/service hoặc reboot.
+Edition không hỗ trợ và provider không khả dụng sẽ được báo warning, vì vậy
+Windows Pro/Home vẫn chỉ ở chế độ audit.
 
 ```powershell
 & "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" --target=client --server-ip=192.168.10.10 --server-port=47001 --installer
@@ -44,8 +51,10 @@ một lần vẫn thực hiện theo phần dưới.
 
 ## Script và installer
 
-Gói đầy đủ chứa lifecycle script trong `client\` và `docs\deployment\`.
-Standalone EXE không đăng ký service và không phải nguồn cài đặt được hỗ trợ.
+Gói đầy đủ chứa lifecycle script trong `client\` và `docs\deployment\`, cùng
+các tài liệu Markdown nhưng không đóng gói ảnh chỉ dùng cho repository trong
+`docs\assets\` như screenshot và logo đối tác. Standalone EXE không đăng ký
+service và không phải nguồn cài đặt được hỗ trợ.
 Hai vai trò đều được kiểm tra trước khi cài để tránh xung đột.
 
 ## Gỡ cài đặt bắt buộc restart

@@ -9,6 +9,30 @@ The first page offers **Install for Client** or **Install for Server** and never
 installs both roles into the same directory. The installer checks for an
 existing opposite role before copying files.
 
+### Internal VM test build
+
+Developer CI also publishes a separate `nstu-<version>-internal-vm-setup.exe`
+artifact. It is visibly labeled **Internal VM Test**, records
+`BuildChannel=InternalVmTest`, and permits CPU/RAM capacity warnings so an
+intentionally undersized development VM can exercise installation, UWF
+diagnostics, and reboot behavior. It does not change the production installer;
+the production gate remains 6 GiB RAM, four physical/logical processors, and a
+100 Mbps physical link. Never deploy the internal artifact to a school machine.
+
+### Clean-machine bootstrap
+
+On a clean qualification machine, `nstu-diagnostics.exe` does not exist until
+the unified installer has been transferred and run. Transfer the approved
+`nstu-<version>-setup.exe` through an operator-controlled channel, verify its
+signature, and select exactly one role. The installer copies the diagnostics
+helper to `C:\Program Files\NSTU\diagnostics\` and, for a client install,
+requires the documented restart before the service is active.
+
+Any temporary RDP or port-forwarding endpoint used to reach the machine is
+separate from NSTU's client/server control port. Enter the actual NSTU server
+address and control port (47001 by default) in the client role page; do not use
+the temporary remote-access port as the NSTU control port.
+
 For a client, enter the server IP address and control port (`47001` by default).
 The installer runs the diagnostics helper before service registration. It then
 registers `nstu-service` as an automatic `LocalSystem` service, stores the
@@ -18,15 +42,27 @@ address entered here is not an enrollment credential and is not yet the
 service's authenticated runtime configuration.
 
 For a server, diagnostics check the display, network link, and hardware H.264
-encoder before the server files and protected data root are installed.
+encoder before the server files and protected data root are installed. UWF is
+reported as not applicable for the server role because server data is
+persistent. Run UWF qualification with `--target=client` on a separate client
+image.
 
 ## Integrated diagnostics
 
 `diagnostics\nstu-diagnostics.exe` is used by the installer and can be run by a
 technician. It displays checks sequentially. Without `--auto-close`, the window
 stays open for review. With `--auto-close`, only a completely clean run closes
-automatically; warnings and failures remain visible, and failures return a
-non-zero exit code. Use `--log=<path>` to retain the result list.
+automatically for a technician run; warnings and failures remain visible, and
+failures return a non-zero exit code. The installer passes `--installer
+--auto-close`, which closes the diagnostic window after the checks even when a
+warning or failure is present so the synchronous NSIS preflight cannot hang.
+The installer retains the report at `%TEMP%\NSTU-installer-preflight.json` when
+it aborts. Use `--report=<path>` to retain a structured JSON result list;
+`--log=<path>` is retained as a compatibility alias. Add
+`--diagnostics-stay-open` when a technician needs to keep a clean run visible.
+UWF checks are read-only and never enable the filter, change registry/service
+state, or reboot the machine. Unsupported editions and unavailable providers
+are reported as warnings so a Pro/Home installation remains audit-only.
 
 ```powershell
 & "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" --target=client --server-ip=192.168.10.10 --server-port=47001 --installer
@@ -49,8 +85,9 @@ below.
 ## Installer and scripts
 
 The complete installer includes lifecycle scripts under `client\` and
-`docs\deployment\`. Standalone EXEs do not register services and are not a
-supported installation source.
+`docs\deployment\`. It includes the Markdown manuals but omits the
+repository-only `docs\assets\` screenshots and partner logos. Standalone EXEs
+do not register services and are not a supported installation source.
 
 Both roles are checked before installation to prevent conflicts. The client
 helper configures the service, data root, recovery policy, and protected ACLs.
