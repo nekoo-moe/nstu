@@ -432,8 +432,8 @@ DiagnosticResult check_hardware(const HardwareScan& hardware) {
     return result("hardware",
                   failure ? DiagnosticSeverity::failure : DiagnosticSeverity::pass,
                   L"Hardware readiness", L"Mức đáp ứng phần cứng", detail, detail,
-                  L"Reference baseline: x64 with at least 4 physical/logical cores, 8 GiB RAM, and a 100 Mbps negotiated link. The i5-6400 is a Good reference, not a name-matching requirement.",
-                  L"Mức tham chiếu: x64 với ít nhất 4 core vật lý/logical, RAM 8 GiB và link thương lượng 100 Mbps. i5-6400 là tham chiếu Good, không phải yêu cầu so khớp tên.", failure ? 4 : 0);
+                  L"Install minimum: x64 with at least 4 physical/logical cores, 6 GiB RAM, and a 100 Mbps physical link. 8 GiB RAM and i5-6400-class performance are recommended references; the CPU model name is not required.",
+                  L"Mức tối thiểu để cài: x64 với ít nhất 4 core vật lý/logical, RAM 6 GiB và link vật lý 100 Mbps. Khuyến nghị RAM 8 GiB và hiệu năng tương đương i5-6400; không bắt buộc đúng tên model CPU.", failure ? 4 : 0);
 }
 
 DiagnosticResult check_graphics() {
@@ -796,7 +796,7 @@ UwfState classify_uwf(const UwfProbeSnapshot& snapshot) noexcept {
 }
 
 Readiness classify_memory_gib(std::uint64_t gib) noexcept {
-    return gib >= 8 ? Readiness::good : Readiness::minimum_not_met;
+    return gib >= 6 ? Readiness::good : Readiness::minimum_not_met;
 }
 
 Readiness classify_link_speed_mbps(std::uint64_t mbps) noexcept {

@@ -39,9 +39,9 @@ int main() {
     assert(nstu::setup::classify_uwf(enabled) ==
            nstu::setup::UwfState::enabled);
 
-    assert(nstu::setup::classify_memory_gib(7) ==
+    assert(nstu::setup::classify_memory_gib(5) ==
            nstu::setup::Readiness::minimum_not_met);
-    assert(nstu::setup::classify_memory_gib(8) ==
+    assert(nstu::setup::classify_memory_gib(6) ==
            nstu::setup::Readiness::good);
     assert(nstu::setup::classify_link_speed_mbps(99) ==
            nstu::setup::Readiness::minimum_not_met);

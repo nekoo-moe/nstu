@@ -7,7 +7,7 @@ deployment by itself.
 | Field | Reported value | Qualification requirement |
 |---|---|---|
 | CPU | Intel Core i3-7400 | Below the i5-6400 reference; retain as a stress case |
-| Memory | 8 GiB | Meets the minimum capacity boundary |
+| Memory | 8 GiB | Exceeds the 6 GiB minimum; 8 GiB is recommended |
 | Windows | Windows 10, reported as “Education/Pro” | Determine the exact SKU and build from the diagnostic report; Education and Pro are separate editions |
 | Activation | Unactivated | Record only; activation state does not establish UWF eligibility |
 | Network | Tailscale-reachable test host | Measure the physical adapter's negotiated link locally; do not use the Tailscale address as link-capacity evidence |
@@ -54,7 +54,7 @@ repository.
 
 ## Acceptance boundaries
 
-- 8 GiB RAM meets the minimum memory boundary.
+- 6 GiB RAM is the installation minimum; 8 GiB remains the recommended baseline.
 - The i3-7400 is intentionally below the i5-6400 reference and must be
   reported as a stress-case CPU result, not silently promoted to “Good”.
 - A negotiated link below 100 Mbps fails the minimum network boundary; 100 Mbps
@@ -102,7 +102,7 @@ weakest-machine fixture:
 - Windows reports **Windows 10 Pro Education 22H2**, so Microsoft UWF is
   correctly audit-only for this image.
 - The VM exposes **3 GiB RAM** and **3 physical / 4 logical processors**. This
-  is below the 8 GiB minimum and is not the previously described 8 GiB test
+  is below the 6 GiB minimum and is not the previously described 8 GiB test
   configuration.
 - The reported **100000 Mbps Tailscale** link is an overlay/tunnel result and
   is not physical link evidence. NSTU now excludes tunnel adapters from the

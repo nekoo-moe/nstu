@@ -154,12 +154,16 @@ void replace_started(const nstu::setup::DiagnosticResult& item) {
 void finish() {
     g_complete = true;
     const bool vi = g_options.language == Language::vietnamese;
-    const wchar_t* message = g_failed || g_warning
-        ? (vi ? L"Đã phát hiện cảnh báo hoặc lỗi. Cửa sổ sẽ được giữ lại."
-              : L"Warnings or errors were found. This window will remain open.")
+    std::wstring message = g_failed || g_warning
+        ? (vi ? L"Đã phát hiện cảnh báo hoặc lỗi."
+              : L"Warnings or errors were found.")
         : (vi ? L"Tất cả kiểm tra bắt buộc đã đạt."
               : L"All required checks passed.");
-    SetWindowTextW(g_status, message);
+    if (!g_options.report_path.empty()) {
+        message += vi ? L" Báo cáo: " : L" Report: ";
+        message += g_options.report_path.wstring();
+    }
+    SetWindowTextW(g_status, message.c_str());
     EnableWindow(GetDlgItem(g_window, kCloseId), TRUE);
     // NSIS invokes diagnostics synchronously. In installer mode it must not
     // wait indefinitely for an operator to close a warning/failure window;
@@ -305,6 +309,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int show) {
     }
     ShowWindow(g_window, show == 0 ? SW_SHOWNORMAL : show);
     UpdateWindow(g_window);
+    SetForegroundWindow(g_window);
+    BringWindowToTop(g_window);
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);

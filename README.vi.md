@@ -102,14 +102,15 @@ model và các hạng mục production chưa hoàn thành tại
 
 Các giá trị dưới đây phân biệt ngưỡng cài đặt với cấu hình tham chiếu khuyến
 nghị. Installer không yêu cầu tên model CPU phải khớp chính xác. Ngưỡng hiện
-tại là Windows x64, ít nhất 4 bộ xử lý vật lý/logical, RAM 8 GiB và link mạng
-vật lý 100 Mbps. i5-6400 là cấu hình tham chiếu khuyến nghị để có hiệu năng lớp
-học ổn định, không phải model bắt buộc.
+tại là Windows x64, ít nhất 4 bộ xử lý vật lý/logical, RAM 6 GiB và link mạng
+vật lý 100 Mbps. i5-6400 và RAM 8 GiB là cấu hình tham chiếu khuyến nghị để có
+hiệu năng lớp học ổn định, không phải model hay dung lượng bắt buộc ngoài ngưỡng
+RAM tối thiểu 6 GiB.
 
 | Vai trò | Cấu hình mục tiêu | Mạng |
 | --- | --- | --- |
-| Server | Khuyến nghị tương đương i5-6400; tối thiểu RAM 8 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Gigabit Ethernet có dây |
-| Client | Khuyến nghị tương đương i5-6400; tối thiểu RAM 8 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Ethernet có dây |
+| Server | Khuyến nghị tương đương i5-6400 và RAM 8 GB; tối thiểu RAM 6 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Gigabit Ethernet có dây |
+| Client | Khuyến nghị tương đương i5-6400 và RAM 8 GB; tối thiểu RAM 6 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Ethernet có dây |
 | Router/switch | Hỗ trợ UDP multicast, IGMPv2 hoặc IGMPv3, IGMP snooping và IGMP querier | Một LAN/VLAN được kiểm soát cho lần triển khai đầu |
 
 Với server quản lý từ 50 máy trở lên, RAM 16 GB và SSD là lựa chọn thận trọng
