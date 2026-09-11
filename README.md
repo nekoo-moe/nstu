@@ -100,13 +100,16 @@ its threat model and unfinished production work public in
 
 ## System requirements
 
-The following values are project targets and still require validation on a
-real 50-client lab.
+The following values distinguish the install gate from the recommended
+reference. The installer does not require the CPU model name to match exactly.
+It requires x64 Windows, at least 4 physical/logical processors, 8 GiB RAM,
+and a 100 Mbps physical network link. The i5-6400 is the recommended reference
+for predictable classroom performance, not a mandatory model.
 
 | Role | Baseline target | Network |
 | --- | --- | --- |
-| Server | Intel Core i5-6400, 8 GB RAM, 512 MB free disk, Windows 10/11 x64 | Wired Gigabit Ethernet recommended |
-| Client | Intel Core i5-6400, 8 GB RAM, 512 MB free disk, Windows 10/11 x64 | Wired Ethernet recommended |
+| Server | i5-6400-class recommended; 8 GB RAM minimum, 512 MB free disk, Windows 10/11 x64 | Wired Gigabit Ethernet recommended |
+| Client | i5-6400-class recommended; 8 GB RAM minimum, 512 MB free disk, Windows 10/11 x64 | Wired Ethernet recommended |
 | Router/switch | UDP multicast support, IGMPv2 or IGMPv3, IGMP snooping, and an IGMP querier | One controlled LAN/VLAN for the first deployment |
 
 For a server supervising 50 or more devices, 16 GB RAM and an SSD are prudent

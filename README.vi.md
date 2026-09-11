@@ -100,13 +100,16 @@ model và các hạng mục production chưa hoàn thành tại
 
 ## Cấu hình hệ thống
 
-Đây là mục tiêu cấu hình của dự án, chưa phải kết quả đã được xác nhận bằng soak
-test trên phòng máy 50 client thật.
+Các giá trị dưới đây phân biệt ngưỡng cài đặt với cấu hình tham chiếu khuyến
+nghị. Installer không yêu cầu tên model CPU phải khớp chính xác. Ngưỡng hiện
+tại là Windows x64, ít nhất 4 bộ xử lý vật lý/logical, RAM 8 GiB và link mạng
+vật lý 100 Mbps. i5-6400 là cấu hình tham chiếu khuyến nghị để có hiệu năng lớp
+học ổn định, không phải model bắt buộc.
 
 | Vai trò | Cấu hình mục tiêu | Mạng |
 | --- | --- | --- |
-| Server | Intel Core i5-6400, RAM 8 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Gigabit Ethernet có dây |
-| Client | Intel Core i5-6400, RAM 8 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Ethernet có dây |
+| Server | Khuyến nghị tương đương i5-6400; tối thiểu RAM 8 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Gigabit Ethernet có dây |
+| Client | Khuyến nghị tương đương i5-6400; tối thiểu RAM 8 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Ethernet có dây |
 | Router/switch | Hỗ trợ UDP multicast, IGMPv2 hoặc IGMPv3, IGMP snooping và IGMP querier | Một LAN/VLAN được kiểm soát cho lần triển khai đầu |
 
 Với server quản lý từ 50 máy trở lên, RAM 16 GB và SSD là lựa chọn thận trọng
