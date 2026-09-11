@@ -441,8 +441,8 @@
     state.inFlightSequence = 0;
     state.syncError = `Answer recovery ${status || "failed"}.`;
     setConnectionStatus(state.syncError);
-    if (status === "gap") {
-      requestExamState();
+    if (status === "gap" || status === "unavailable") {
+      if (status === "gap") requestExamState();
       scheduleBridgeRetry();
     }
   }
@@ -697,12 +697,10 @@
     window.NSTU_EXAM_RESPONSE = response;
     el("save-status").textContent = text("submitted");
     document.querySelectorAll("button, input, textarea, select").forEach((node) => { node.disabled = true; });
-    if (window.chrome && window.chrome.webview) {
-      window.chrome.webview.postMessage({
-        type: "exam_submit", response,
-        pendingAnswerEvents: state.durable.pending.length + Object.keys(state.durable.drafts).length
-      });
-    }
+    postHostMessage({
+      type: "exam_submit", response,
+      pendingAnswerEvents: state.durable.pending.length + Object.keys(state.durable.drafts).length
+    });
     flushAnswerBridge();
   }
 
