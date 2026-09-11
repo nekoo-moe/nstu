@@ -161,8 +161,14 @@ void finish() {
               : L"All required checks passed.");
     SetWindowTextW(g_status, message);
     EnableWindow(GetDlgItem(g_window, kCloseId), TRUE);
-    if (!g_failed && !g_warning && g_options.auto_close &&
-        !g_options.stay_open) {
+    // NSIS invokes diagnostics synchronously. In installer mode it must not
+    // wait indefinitely for an operator to close a warning/failure window;
+    // the report is persisted before this timed close and the exit code is
+    // returned to the installer for its decision.
+    const bool installer_close = g_options.diagnostics.installer &&
+                                 g_options.auto_close;
+    const bool clean_close = !g_failed && !g_warning && g_options.auto_close;
+    if ((installer_close || clean_close) && !g_options.stay_open) {
         SetTimer(g_window, kCloseTimer, 1400, nullptr);
     }
 }

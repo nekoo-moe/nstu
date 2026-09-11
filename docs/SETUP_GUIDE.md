@@ -39,9 +39,13 @@ encoder before the server files and protected data root are installed.
 `diagnostics\nstu-diagnostics.exe` is used by the installer and can be run by a
 technician. It displays checks sequentially. Without `--auto-close`, the window
 stays open for review. With `--auto-close`, only a completely clean run closes
-automatically; warnings and failures remain visible, and failures return a
-non-zero exit code. Use `--report=<path>` to retain a structured JSON result
-list; `--log=<path>` is retained as a compatibility alias. Add
+automatically for a technician run; warnings and failures remain visible, and
+failures return a non-zero exit code. The installer passes `--installer
+--auto-close`, which closes the diagnostic window after the checks even when a
+warning or failure is present so the synchronous NSIS preflight cannot hang.
+The installer retains the report at `%TEMP%\NSTU-installer-preflight.json` when
+it aborts. Use `--report=<path>` to retain a structured JSON result list;
+`--log=<path>` is retained as a compatibility alias. Add
 `--diagnostics-stay-open` when a technician needs to keep a clean run visible.
 UWF checks are read-only and never enable the filter, change registry/service
 state, or reboot the machine. Unsupported editions and unavailable providers
