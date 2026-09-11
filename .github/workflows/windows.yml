@@ -16,7 +16,7 @@ jobs:
       - name: Install NSIS
         run: choco install nsis --no-progress --yes --force
       - name: Configure
-        run: cmake -S . -B build -A x64 -DNSTU_ENABLE_WERROR=ON
+        run: cmake -S . -B build -A x64 -DNSTU_ENABLE_WERROR=ON -DNSTU_INTERNAL_TEST_BUILD=OFF
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test
@@ -31,6 +31,38 @@ jobs:
         with:
           name: nstu-installers
           path: build/nstu-*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  internal-vm-build:
+    name: Internal VM test installer
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install NSIS
+        run: choco install nsis --no-progress --yes --force
+      - name: Configure internal build
+        run: >-
+          cmake -S . -B build-internal -A x64
+          -DNSTU_ENABLE_WERROR=ON
+          -DNSTU_INTERNAL_TEST_BUILD=ON
+      - name: Build internal binaries
+        run: cmake --build build-internal --config Release --parallel
+      - name: Test internal binaries
+        run: ctest --test-dir build-internal -C Release --output-on-failure
+      - name: Package internal test installer
+        run: cmake --build build-internal --config Release --target nstu-package --parallel
+      - name: Verify internal label and channel
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem build-internal -Filter '*-internal-vm-setup.exe' -File
+          if ($null -eq $installer) { throw 'Internal installer was not produced.' }
+          if ($installer.Name -notmatch 'internal-vm') { throw 'Internal installer label is missing.' }
+      - name: Upload internal VM installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: nstu-internal-vm-installer
+          path: build-internal/nstu-*-internal-vm-setup.exe
           if-no-files-found: error
           retention-days: 14
 

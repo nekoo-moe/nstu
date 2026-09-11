@@ -4,6 +4,8 @@ add_library(nstu_setup_diagnostics STATIC
     src/driver_scan.cpp
 )
 target_include_directories(nstu_setup_diagnostics PUBLIC include)
+target_compile_definitions(nstu_setup_diagnostics PUBLIC
+    NSTU_INTERNAL_TEST_BUILD=$<BOOL:${NSTU_INTERNAL_TEST_BUILD}>)
 target_link_libraries(nstu_setup_diagnostics PUBLIC
     nstu_common d3d11 dxgi iphlpapi mf mfplat mfuuid netapi32 ole32 shell32
     user32 wbemuuid ws2_32

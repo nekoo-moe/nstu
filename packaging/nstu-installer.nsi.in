@@ -1,6 +1,6 @@
 Unicode true
 RequestExecutionLevel admin
-Name "NSTU"
+Name "@NSTU_INSTALLER_DISPLAY_NAME@"
 OutFile "@NSTU_UNIFIED_INSTALLER@"
 InstallDir "$PROGRAMFILES64\\NSTU"
 InstallDirRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation"
@@ -27,6 +27,7 @@ Var AfterRestart
 Var PreflightReport
 
 !define STAGE "@NSTU_UNIFIED_STAGE_DIR@"
+!define INTERNAL_TEST_BUILD @NSTU_INTERNAL_TEST_BUILD_VALUE@
 
 !insertmacro MUI_PAGE_WELCOME
 Page custom RolePageCreate RolePageLeave
@@ -98,6 +99,10 @@ Function RolePageCreate
   ${NSD_SetText} $PortInput $ServerPort
   ${NSD_CreateLabel} 0 154u 100% 36u "The client preflight checks the server before installation. A Windows restart is required after client installation and before any uninstall changes are made."
   Pop $0
+!if ${INTERNAL_TEST_BUILD}
+  ${NSD_CreateLabel} 0 196u 100% 30u "INTERNAL VM TEST: CPU and RAM capacity failures are warnings. Do not deploy this build to a school or production machine."
+  Pop $0
+!endif
   StrCmp $Role "Server" nstu_role_page_server nstu_role_page_client
 nstu_role_page_server:
   ${NSD_Check} $RoleServer
@@ -205,8 +210,9 @@ Section -Server
   Pop $1
   StrCmp $0 "0" 0 nstu_server_setup_failed
   WriteRegStr HKLM "Software\\NSTU" "InstallRole" "Server"
+  WriteRegStr HKLM "Software\\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "DisplayName" "NSTU Server"
+  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "DisplayName" "NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@"
   WriteUninstaller "$INSTDIR\\Uninstall.exe"
   Goto nstu_server_done
 nstu_server_setup_failed:
@@ -234,10 +240,11 @@ Section -Client
   Pop $1
   StrCmp $0 "0" 0 nstu_client_setup_failed
   WriteRegStr HKLM "Software\\NSTU" "InstallRole" "Client"
+  WriteRegStr HKLM "Software\\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
   WriteRegStr HKLM "Software\\NSTU" "ServerAddress" "$ServerAddress"
   WriteRegDWORD HKLM "Software\\NSTU" "ServerPort" $ServerPort
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "DisplayName" "NSTU Client"
+  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "DisplayName" "NSTU Client@NSTU_INSTALLER_ROLE_SUFFIX@"
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "NSTU Diagnostics" '"$INSTDIR\\diagnostics\\nstu-diagnostics.exe" --target=client --boot-check --auto-close --log="$R0\\NSTU\\boot-check.log"'
   WriteUninstaller "$INSTDIR\\Uninstall.exe"
   SetRebootFlag true

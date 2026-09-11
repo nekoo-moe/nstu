@@ -35,6 +35,12 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
+#if NSTU_INTERNAL_TEST_BUILD
+constexpr bool kInternalTestBuild = true;
+#else
+constexpr bool kInternalTestBuild = false;
+#endif
+
 constexpr std::uint32_t kProductEnterprise = 0x00000004;
 constexpr std::uint32_t kProductEducation = 0x00000079;
 constexpr std::uint32_t kProductEducationN = 0x0000007a;
@@ -418,9 +424,16 @@ DiagnosticResult check_hardware(const HardwareScan& hardware) {
         : std::max(fastest->transmit_link_speed_mbps,
                    fastest->receive_link_speed_mbps);
     const auto network = classify_link_speed_mbps(link);
-    const bool failure = cpu == Readiness::minimum_not_met ||
-                         memory == Readiness::minimum_not_met ||
-                         network == Readiness::minimum_not_met;
+    const bool cpu_failure = cpu == Readiness::minimum_not_met;
+    const bool memory_failure = memory == Readiness::minimum_not_met;
+    const bool network_failure = network == Readiness::minimum_not_met;
+    const bool capacity_failure = cpu_failure || memory_failure;
+    const bool failure = network_failure ||
+                         (capacity_failure && !kInternalTestBuild);
+    const auto severity = failure
+        ? DiagnosticSeverity::failure
+        : (capacity_failure ? DiagnosticSeverity::warning
+                            : DiagnosticSeverity::pass);
     std::wstring detail = hardware.processor.model + L" | " +
                           std::to_wstring(hardware.processor.physical_cores) +
                           L" physical / " +
@@ -429,11 +442,20 @@ DiagnosticResult check_hardware(const HardwareScan& hardware) {
                           std::to_wstring(hardware.memory.total_physical_bytes /
                                           (1024ull * 1024ull * 1024ull)) +
                           L" GiB RAM | " + std::to_wstring(link) + L" Mbps link";
-    return result("hardware",
-                  failure ? DiagnosticSeverity::failure : DiagnosticSeverity::pass,
+    std::wstring remediation =
+        L"Install minimum: x64 with at least 4 physical/logical cores, 6 GiB RAM, and a 100 Mbps physical link. 8 GiB RAM and i5-6400-class performance are recommended references; the CPU model name is not required.";
+    std::wstring remediation_vi =
+        L"Mức tối thiểu để cài: x64 với ít nhất 4 core vật lý/logical, RAM 6 GiB và link vật lý 100 Mbps. Khuyến nghị RAM 8 GiB và hiệu năng tương đương i5-6400; không bắt buộc đúng tên model CPU.";
+    if (capacity_failure && kInternalTestBuild && !network_failure) {
+        remediation =
+            L"INTERNAL VM TEST override: CPU/RAM capacity is below the release minimum, but installation may continue for development testing only.";
+        remediation_vi =
+            L"Ghi đè INTERNAL VM TEST: CPU/RAM thấp hơn mức tối thiểu của bản phát hành nhưng có thể tiếp tục cài chỉ để kiểm thử phát triển.";
+    }
+    return result("hardware", severity,
                   L"Hardware readiness", L"Mức đáp ứng phần cứng", detail, detail,
-                  L"Install minimum: x64 with at least 4 physical/logical cores, 6 GiB RAM, and a 100 Mbps physical link. 8 GiB RAM and i5-6400-class performance are recommended references; the CPU model name is not required.",
-                  L"Mức tối thiểu để cài: x64 với ít nhất 4 core vật lý/logical, RAM 6 GiB và link vật lý 100 Mbps. Khuyến nghị RAM 8 GiB và hiệu năng tương đương i5-6400; không bắt buộc đúng tên model CPU.", failure ? 4 : 0);
+                  std::move(remediation), std::move(remediation_vi),
+                  failure ? 4 : 0);
 }
 
 DiagnosticResult check_graphics() {
@@ -924,6 +946,8 @@ bool write_diagnostic_report_json(
     output << "{\n  \"role\": "
             << (options.role == DiagnosticRole::client ? "\"client\"" :
                                                           "\"server\"")
+            << ",\n  \"build_channel\": "
+            << (kInternalTestBuild ? "\"internal_vm_test\"" : "\"release\"")
             << ",\n  \"server_port\": " << options.server_port
             << ",\n  \"results\": [\n";
     for (std::size_t index = 0; index < results.size(); ++index) {

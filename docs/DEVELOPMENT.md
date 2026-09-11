@@ -123,6 +123,10 @@ Release dùng `windows-release` thay cho `windows-debug`.
 - `NSTU_SERVER_USE_IMGUI=ON|OFF`: bật/tắt server UI Dear ImGui.
 - `NSTU_ENABLE_WERROR=ON|OFF`: coi warning là error.
 - `NSTU_ENABLE_PACKAGING=ON|OFF`: bật/tắt target installer NSIS hợp nhất.
+- `NSTU_INTERNAL_TEST_BUILD=ON|OFF`: tạo installer `*-internal-vm-setup.exe`
+  cho máy ảo phát triển. Build này đánh dấu rõ `Internal VM Test` và chỉ hạ
+  CPU/RAM dưới chuẩn thành warning để kiểm thử luồng cài đặt; mặc định `OFF`
+  và không được dùng để triển khai production.
 
 Ví dụ chỉ build core protocol/test:
 

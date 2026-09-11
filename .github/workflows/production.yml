@@ -87,6 +87,7 @@ jobs:
         run: >-
           cmake -S . -B build -A x64
           -DNSTU_ENABLE_WERROR=ON
+          -DNSTU_INTERNAL_TEST_BUILD=OFF
           -DNSTU_PACKAGE_INSTALL_CONFIG=Release
           -DNSTU_ENABLE_SIGNING=ON
           -DNSTU_SIGNTOOL_EXECUTABLE="${{ steps.signtool.outputs.path }}"

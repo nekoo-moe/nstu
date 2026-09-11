@@ -13,6 +13,23 @@ option(NSTU_BUILD_TESTS "Build unit and integration tests" ON)
 option(NSTU_BUILD_VIDEO "Build DXGI and Media Foundation components" ON)
 option(NSTU_ENABLE_WERROR "Treat compiler warnings as errors" OFF)
 option(NSTU_ENABLE_PACKAGING "Enable unified Windows NSIS packaging" ON)
+option(NSTU_INTERNAL_TEST_BUILD
+    "Build an explicitly labeled installer that permits undersized VM hardware"
+    OFF)
+
+if(NSTU_INTERNAL_TEST_BUILD)
+    set(NSTU_INTERNAL_TEST_BUILD_VALUE 1)
+    set(NSTU_INSTALLER_DISPLAY_NAME "NSTU Internal VM Test")
+    set(NSTU_INSTALLER_FILE_SUFFIX "-internal-vm")
+    set(NSTU_INSTALLER_CHANNEL "InternalVmTest")
+    set(NSTU_INSTALLER_ROLE_SUFFIX " (Internal VM Test)")
+else()
+    set(NSTU_INTERNAL_TEST_BUILD_VALUE 0)
+    set(NSTU_INSTALLER_DISPLAY_NAME "NSTU")
+    set(NSTU_INSTALLER_FILE_SUFFIX "")
+    set(NSTU_INSTALLER_CHANNEL "Release")
+    set(NSTU_INSTALLER_ROLE_SUFFIX "")
+endif()
 
 # Keep release installers self-contained on clean school images.  The static
 # MSVC runtime avoids requiring a separately deployed Visual C++ Redistributable
@@ -155,7 +172,8 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         COMPONENT docs)
 
     set(NSTU_UNIFIED_STAGE_DIR "${CMAKE_BINARY_DIR}/unified-installer-stage")
-    set(NSTU_UNIFIED_INSTALLER "${CMAKE_BINARY_DIR}/nstu-${PROJECT_VERSION}-setup.exe")
+    set(NSTU_UNIFIED_INSTALLER
+        "${CMAKE_BINARY_DIR}/nstu-${PROJECT_VERSION}${NSTU_INSTALLER_FILE_SUFFIX}-setup.exe")
     set(NSTU_PACKAGE_INSTALL_CONFIG "Release" CACHE STRING
         "Configuration staged by the unified installer target")
     configure_file(

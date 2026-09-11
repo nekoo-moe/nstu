@@ -14,6 +14,18 @@
 
 namespace {
 
+#if NSTU_INTERNAL_TEST_BUILD
+constexpr wchar_t kWindowTitle[] = L"NSTU Diagnostics - INTERNAL VM TEST";
+constexpr wchar_t kHeadingEnglish[] =
+    L"NSTU system diagnostics - INTERNAL VM TEST";
+constexpr wchar_t kHeadingVietnamese[] =
+    L"Chẩn đoán hệ thống NSTU - INTERNAL VM TEST";
+#else
+constexpr wchar_t kWindowTitle[] = L"NSTU Diagnostics";
+constexpr wchar_t kHeadingEnglish[] = L"NSTU system diagnostics";
+constexpr wchar_t kHeadingVietnamese[] = L"Chẩn đoán hệ thống NSTU";
+#endif
+
 constexpr wchar_t kWindowClass[] = L"NstuDiagnosticsWindow";
 constexpr UINT kStartedMessage = WM_APP + 1;
 constexpr UINT kResultMessage = WM_APP + 2;
@@ -184,8 +196,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         const bool vi = g_options.language == Language::vietnamese;
         CreateWindowExW(0, L"STATIC",
-                        vi ? L"Chẩn đoán hệ thống NSTU"
-                           : L"NSTU system diagnostics",
+                        vi ? kHeadingVietnamese : kHeadingEnglish,
                         WS_CHILD | WS_VISIBLE, 16, 14, 900, 24, window,
                         nullptr, nullptr, nullptr);
         g_list = CreateWindowExW(
@@ -300,7 +311,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int show) {
         return 1;
     }
     g_window = CreateWindowExW(
-        WS_EX_APPWINDOW, kWindowClass, L"NSTU Diagnostics",
+        WS_EX_APPWINDOW, kWindowClass, kWindowTitle,
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 970, 560, nullptr, nullptr, instance,
         nullptr);

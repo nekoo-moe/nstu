@@ -118,6 +118,11 @@ until the 8 GB target has passed long-duration hardware testing. Intel HD
 Graphics 530 is a baseline hardware-acceleration target, not a guarantee across
 all driver versions.
 
+Developer CI also produces a separately labeled `*-internal-vm-setup.exe` for
+qualification VMs with intentionally undersized RAM or CPU allocations. It is
+for development testing only; the normal installer keeps the 6 GB installation
+minimum and must be used for school deployments.
+
 ## Build And Setup Flags
 
 The Windows presets build either a Debug or Release configuration. Debug keeps

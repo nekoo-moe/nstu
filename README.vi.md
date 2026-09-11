@@ -118,6 +118,11 @@ cho đến khi mục tiêu 8 GB vượt qua kiểm thử phần cứng dài hạ
 530 là baseline cho hardware acceleration, không phải cam kết hoạt động với mọi
 phiên bản driver.
 
+CI dành cho developer cũng tạo artifact riêng có tên `*-internal-vm-setup.exe`
+cho VM qualification được cấp phát RAM hoặc CPU thấp có chủ ý. Artifact này
+chỉ dùng để kiểm thử phát triển; installer bình thường vẫn giữ ngưỡng cài đặt
+RAM 6 GB và phải được dùng khi triển khai tại trường.
+
 ## Cờ build và setup
 
 Preset Windows có cấu hình Debug và Release. Debug giữ symbol và build test;

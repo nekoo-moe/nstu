@@ -9,6 +9,16 @@ The first page offers **Install for Client** or **Install for Server** and never
 installs both roles into the same directory. The installer checks for an
 existing opposite role before copying files.
 
+### Internal VM test build
+
+Developer CI also publishes a separate `nstu-<version>-internal-vm-setup.exe`
+artifact. It is visibly labeled **Internal VM Test**, records
+`BuildChannel=InternalVmTest`, and permits CPU/RAM capacity warnings so an
+intentionally undersized development VM can exercise installation, UWF
+diagnostics, and reboot behavior. It does not change the production installer;
+the production gate remains 6 GiB RAM, four physical/logical processors, and a
+100 Mbps physical link. Never deploy the internal artifact to a school machine.
+
 ### Clean-machine bootstrap
 
 On a clean qualification machine, `nstu-diagnostics.exe` does not exist until
