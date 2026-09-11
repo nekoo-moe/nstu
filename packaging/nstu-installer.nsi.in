@@ -25,6 +25,7 @@ Var PortLabel
 Var PortInput
 Var AfterRestart
 Var PreflightReport
+Var PostInstallReport
 
 !define STAGE "@NSTU_UNIFIED_STAGE_DIR@"
 !define INTERNAL_TEST_BUILD @NSTU_INTERNAL_TEST_BUILD_VALUE@
@@ -41,6 +42,7 @@ Function .onInit
   StrCpy $Role "Client"
   StrCpy $ServerPort "47001"
   StrCpy $PreflightReport "$TEMP\\NSTU-installer-preflight.json"
+  StrCpy $PostInstallReport "$TEMP\\NSTU-client-post-install.json"
   ${GetParameters} $0
   ${GetOptions} $0 "/ROLE=" $1
   ${IfNot} ${Errors}
@@ -246,6 +248,14 @@ Section -Client
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "DisplayName" "NSTU Client@NSTU_INSTALLER_ROLE_SUFFIX@"
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "NSTU Diagnostics" '"$INSTDIR\\diagnostics\\nstu-diagnostics.exe" --target=client --boot-check --auto-close --log="$R0\\NSTU\\boot-check.log"'
+  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\client\\verify-client-connection.ps1" -InstallRoot "$INSTDIR\\client" -ServerAddress "$ServerAddress" -ServerPort $ServerPort -ReportPath "$PostInstallReport"'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" nstu_client_post_install_verified
+  MessageBox MB_ICONSTOP|MB_OK "Client installation was not activated because the post-install server check failed. The report was saved to:$\r$\n$PostInstallReport$\r$\n$\r$\n$1"
+  Abort
+nstu_client_post_install_verified:
+  Delete "$PostInstallReport"
   WriteUninstaller "$INSTDIR\\Uninstall.exe"
   SetRebootFlag true
   Goto nstu_client_done

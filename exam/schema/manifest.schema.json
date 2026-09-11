@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nstu.local/schemas/nstuexam-manifest-v1.json",
+  "title": "NSTU computer-based exam manifest",
+  "type": "object",
+  "required": ["id", "title", "durationSeconds", "questions"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9._-]{1,96}$" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "subject": { "type": "string", "maxLength": 120 },
+    "candidate": { "type": "string", "maxLength": 160 },
+    "durationSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+    "documents": {
+      "type": "array",
+      "items": { "type": "object", "required": ["id", "url"], "properties": {
+        "id": { "type": "string", "maxLength": 96 },
+        "url": { "type": "string", "description": "Local package-relative PDF URL" },
+        "title": { "type": "string", "maxLength": 240 }
+      }, "additionalProperties": false }
+    },
+    "questions": {
+      "type": "array", "minItems": 1, "maxItems": 500,
+      "items": {
+        "type": "object", "required": ["id", "type", "prompt"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-zA-Z0-9._-]{1,96}$" },
+          "type": { "enum": ["multiple_choice", "short_answer", "essay", "listening", "reading"] },
+          "prompt": { "type": "string", "minLength": 1, "maxLength": 8000 },
+          "instruction": { "type": "string", "maxLength": 4000 },
+          "points": { "type": "integer", "minimum": 0, "maximum": 1000 },
+          "options": { "type": "array", "minItems": 2, "maxItems": 12, "items": { "type": "string", "maxLength": 2000 } },
+          "audio": { "type": "string", "description": "Local package-relative audio URL" },
+          "pdf": { "type": "string", "description": "Local package-relative PDF URL" },
+          "passage": { "type": "string", "maxLength": 30000 },
+          "wordLimit": { "type": "integer", "minimum": 1, "maximum": 5000 },
+          "answerPlaceholder": { "type": "string", "maxLength": 240 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

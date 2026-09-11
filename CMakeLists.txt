@@ -138,6 +138,7 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         install(FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/packaging/install-client-service.ps1"
             "${CMAKE_CURRENT_SOURCE_DIR}/packaging/uninstall-client-service.ps1"
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/verify-client-connection.ps1"
             "${CMAKE_CURRENT_SOURCE_DIR}/packaging/configure-data-root.ps1"
             "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-system-setup.ps1"
             DESTINATION client
@@ -173,6 +174,15 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         DESTINATION docs/project
         COMPONENT docs
         PATTERN "assets" EXCLUDE)
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/exam/web/"
+        DESTINATION docs/exam/web
+        COMPONENT docs)
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/exam/schema/"
+        DESTINATION docs/exam/schema
+        COMPONENT docs)
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/exam/examples/"
+        DESTINATION docs/exam/examples
+        COMPONENT docs)
 
     set(NSTU_UNIFIED_STAGE_DIR "${CMAKE_BINARY_DIR}/unified-installer-stage")
     set(NSTU_UNIFIED_INSTALLER

@@ -21,6 +21,20 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Validate installer and exam assets
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path packaging/verify-client-connection.ps1),
+            [ref]$null,
+            [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+          node --check exam/web/app.js
+          Get-Content exam/schema/manifest.schema.json -Raw |
+            ConvertFrom-Json | Out-Null
+          Get-Content exam/examples/ielts-sample.json -Raw |
+            ConvertFrom-Json | Out-Null
       - name: Trial update state machine
         shell: pwsh
         run: ./packaging/test-update-cycle.ps1
@@ -31,6 +45,12 @@ jobs:
         run: |
           if (Test-Path build\unified-installer-stage\docs\project\assets) {
             throw 'Repository-only documentation assets must not be packaged.'
+          }
+          if (-not (Test-Path build\unified-installer-stage\client\verify-client-connection.ps1)) {
+            throw 'Client post-install verifier is missing from the package.'
+          }
+          if (-not (Test-Path build\unified-installer-stage\docs\exam\web\index.html)) {
+            throw 'Computer-based assessment web assets are missing from the package.'
           }
       - name: Upload installers
         uses: actions/upload-artifact@v4

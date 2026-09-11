@@ -36,10 +36,18 @@ the temporary remote-access port as the NSTU control port.
 For a client, enter the server IP address and control port (`47001` by default).
 The installer runs the diagnostics helper before service registration. It then
 registers `nstu-service` as an automatic `LocalSystem` service, stores the
-server address for subsequent logon diagnostics, and sets a mandatory reboot
-flag. The service remains stopped until that restart activates the client. The
-address entered here is not an enrollment credential and is not yet the
-service's authenticated runtime configuration.
+server address for subsequent logon diagnostics, and performs a second,
+bounded TCP connection check against the installed client layout. That check
+must pass before the installer reaches its mandatory reboot. The service
+remains stopped until that restart activates the client. The address entered
+here is not an enrollment credential and is not yet the service's authenticated
+runtime configuration.
+
+Client installation is a thawed-mode operation. NSTU does not enable, disable,
+or replace Microsoft UWF and does not attempt to control third-party Deep
+Freeze. Install while the machine is thawed, then allow the installer to
+restart Windows. This preserves compatibility with existing freeze software;
+the client boot check only observes the resulting state.
 
 For a server, diagnostics check the display, network link, and hardware H.264
 encoder before the server files and protected data root are installed. UWF is

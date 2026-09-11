@@ -12,9 +12,17 @@ bao giờ cài đồng thời hai vai trò trong cùng thư mục. Installer ki�
 Với client, nhập IP server và cổng điều khiển (`47001` mặc định). Installer chạy
 diagnostics trước khi đăng ký service, lưu địa chỉ server cho diagnostics sau
 khi đăng nhập, đăng ký `nstu-service` là service `LocalSystem` tự khởi động
-và đặt cờ restart bắt buộc. Service chỉ được kích hoạt sau lần restart đó.
-Địa chỉ nhập tại đây không phải enrollment credential và chưa phải cấu hình
-runtime có xác thực của service.
+và thực hiện thêm một kiểm tra TCP có timeout giới hạn trên layout client đã
+cài. Kiểm tra này phải thành công trước khi installer đến bước restart bắt
+buộc. Service chỉ được kích hoạt sau lần restart đó. Địa chỉ nhập tại đây không
+phải enrollment credential và chưa phải cấu hình runtime có xác thực của
+service.
+
+Cài client là thao tác trong trạng thái thawed. NSTU không bật, tắt hoặc thay
+thế Microsoft UWF và không cố điều khiển Deep Freeze bên thứ ba. Hãy cài khi
+máy đang thawed rồi cho installer restart Windows. Cách này giữ tương thích
+với phần mềm đóng băng hiện có; boot check của client chỉ quan sát trạng thái
+sau đó.
 
 Với server, diagnostics kiểm tra display, link mạng và encoder H.264 phần cứng
 trước khi cài file server và data root được bảo vệ. UWF được báo là không áp

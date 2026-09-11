@@ -1,0 +1,33 @@
+{
+  "id": "ielts-sample-01",
+  "title": "IELTS sample assessment",
+  "subject": "English language",
+  "durationSeconds": 2700,
+  "documents": [],
+  "questions": [
+    {
+      "id": "listening-01",
+      "type": "listening",
+      "points": 2,
+      "prompt": "Listen to the announcement and choose the item visitors should bring.",
+      "audio": "media/listening-01.mp3",
+      "options": ["A printed map", "A reusable water bottle", "A university ID", "A rain jacket"]
+    },
+    {
+      "id": "reading-01",
+      "type": "reading",
+      "points": 2,
+      "prompt": "Which statement best matches the passage?",
+      "passage": "Short, deliberate breaks help learners return to difficult material with more attention.",
+      "options": ["Breaks should be planned around attention.", "Long breaks always produce better results.", "Difficult material should be avoided.", "Study sessions should never be interrupted."]
+    },
+    {
+      "id": "writing-01",
+      "type": "essay",
+      "points": 8,
+      "prompt": "Discuss whether students learn better alone or in a group.",
+      "wordLimit": 220,
+      "answerPlaceholder": "Write your response here"
+    }
+  ]
+}

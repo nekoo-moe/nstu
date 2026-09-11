@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NSTU Computer-Based Assessment</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="exam-shell" id="exam-shell">
+    <header class="topbar">
+      <div class="identity">
+        <span class="wordmark">NSTU</span>
+        <span class="product-label" data-i18n="computerBasedAssessment">Computer-based assessment</span>
+      </div>
+      <div class="exam-heading">
+        <span class="eyebrow" id="exam-subject">English language</span>
+        <h1 id="exam-title">IELTS sample assessment</h1>
+      </div>
+      <div class="top-actions">
+        <div class="timer" aria-live="polite">
+          <span class="timer-label" data-i18n="timeRemaining">Time remaining</span>
+          <strong id="timer">--:--</strong>
+        </div>
+        <button class="quiet-button" type="button" data-action="settings" data-i18n="settings">Settings</button>
+        <button class="primary-button" type="button" data-action="submit" data-i18n="submit">Submit</button>
+      </div>
+    </header>
+
+    <div class="status-strip">
+      <span id="candidate-label">Candidate: —</span>
+      <span id="save-status" aria-live="polite" data-i18n="ready">Ready</span>
+      <span id="connection-status" data-i18n="localSession">Local session</span>
+    </div>
+
+    <main class="workspace">
+      <aside class="question-rail" aria-label="Question navigation">
+        <div class="rail-heading">
+          <span class="eyebrow" data-i18n="questions">Questions</span>
+          <strong id="question-count">0 / 0</strong>
+        </div>
+        <div class="question-list" id="question-list"></div>
+        <div class="rail-footer">
+          <button class="secondary-button" type="button" data-action="download" data-i18n="downloadResponse">Download response</button>
+        </div>
+      </aside>
+
+      <section class="question-column" aria-live="polite">
+        <div class="question-toolbar">
+          <button class="text-button" type="button" data-action="previous" data-i18n="previous">Previous</button>
+          <span id="question-position">Question 1</span>
+          <button class="text-button" type="button" data-action="next" data-i18n="next">Next</button>
+        </div>
+        <article class="question-surface">
+          <div class="question-meta">
+            <span class="question-type" id="question-type">Multiple choice</span>
+            <span id="question-points">1 point</span>
+          </div>
+          <div id="question-content"></div>
+        </article>
+      </section>
+
+      <aside class="reference-column" aria-label="Reference material">
+        <div class="reference-tabs" role="tablist">
+          <button class="tab-button active" type="button" role="tab" aria-selected="true" data-reference="pdf" data-i18n="pdf">PDF</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-reference="notes" data-i18n="notes">Notes</button>
+        </div>
+        <div class="reference-pane" id="pdf-pane">
+          <div class="empty-state" id="pdf-empty">
+            <strong data-i18n="noPdf">No PDF attached</strong>
+            <span data-i18n="noPdfDetail">The exam package can provide a local PDF reference for this section.</span>
+          </div>
+          <iframe id="pdf-frame" title="Exam PDF reference" hidden></iframe>
+        </div>
+        <div class="reference-pane" id="notes-pane" hidden>
+          <label class="notes-label" for="notes" data-i18n="notes">Notes</label>
+          <textarea id="notes" data-i18n-placeholder="notesPlaceholder" placeholder="Private notes for this session"></textarea>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <dialog id="settings-dialog" class="modal-dialog">
+    <form method="dialog" id="settings-form">
+      <div class="modal-heading">
+        <div>
+          <span class="eyebrow" data-i18n="sessionSettings">Session settings</span>
+          <h2 data-i18n="displayAndLanguage">Display and language</h2>
+        </div>
+        <button class="icon-button" value="cancel" aria-label="Close">×</button>
+      </div>
+      <label class="setting-row">
+        <span data-i18n="language">Language</span>
+        <select id="language-setting">
+          <option value="en">English</option>
+          <option value="vi">Tiếng Việt</option>
+        </select>
+      </label>
+      <label class="setting-row">
+        <span data-i18n="textSize">Text size</span>
+        <select id="text-size-setting">
+          <option value="1">100%</option>
+          <option value="1.1">110%</option>
+          <option value="1.2">120%</option>
+          <option value="1.3">130%</option>
+        </select>
+      </label>
+      <label class="setting-row checkbox-row">
+        <span data-i18n="highContrast">High contrast</span>
+        <input id="contrast-setting" type="checkbox">
+      </label>
+      <label class="setting-row checkbox-row">
+        <span data-i18n="reduceMotion">Reduce motion</span>
+        <input id="motion-setting" type="checkbox">
+      </label>
+      <div class="modal-actions">
+        <button class="primary-button" value="default" data-i18n="done">Done</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="submit-dialog" class="modal-dialog compact-dialog">
+    <form method="dialog" id="submit-form">
+      <span class="eyebrow" data-i18n="submitAssessment">Submit assessment</span>
+      <h2 data-i18n="submitPrompt">Submit your answers now?</h2>
+      <p id="submit-summary"></p>
+      <div class="modal-actions">
+        <button class="secondary-button" value="cancel" data-i18n="keepWorking">Keep working</button>
+        <button class="primary-button" value="submit" data-i18n="submit">Submit</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

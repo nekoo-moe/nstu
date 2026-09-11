@@ -26,6 +26,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <deque>
@@ -276,6 +277,14 @@ enum class Language : int {
     vietnamese,
 };
 
+enum class AnnotationTool : int {
+    pen,
+    ruler,
+    arrow,
+    rectangle,
+    ellipse,
+};
+
 Language g_language = Language::english;
 
 struct DashboardState {
@@ -295,6 +304,7 @@ struct DashboardState {
     bool annotation_enabled = false;
     bool annotation_dragging = false;
     ImVec2 previous_annotation_point{};
+    AnnotationTool annotation_tool = AnnotationTool::pen;
     std::uint32_t annotation_rgba = 0xe5484dffu;
     int annotation_thickness = 4;
     std::chrono::steady_clock::time_point next_host_snapshot{};
@@ -1355,43 +1365,117 @@ void draw_selected_client(
                             mouse.x <= surface.image_max.x &&
                             mouse.y >= surface.image_min.y &&
                             mouse.y <= surface.image_max.y;
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && inside) {
-            if (state.annotation_dragging) {
-                const float delta_x = mouse.x - state.previous_annotation_point.x;
-                const float delta_y = mouse.y - state.previous_annotation_point.y;
-                if (delta_x * delta_x + delta_y * delta_y >= 9.0f) {
-                    const auto normalized = [&](float value, float minimum,
-                                                float maximum) {
-                        const float ratio = std::clamp(
-                            (value - minimum) / (maximum - minimum), 0.0f,
-                            1.0f);
-                        return static_cast<std::uint16_t>(ratio * 65535.0f);
-                    };
-                    const nstu::control::OverlayStroke stroke{
-                        .x0 = normalized(state.previous_annotation_point.x,
-                                         surface.image_min.x,
-                                         surface.image_max.x),
-                        .y0 = normalized(state.previous_annotation_point.y,
-                                         surface.image_min.y,
-                                         surface.image_max.y),
-                        .x1 = normalized(mouse.x, surface.image_min.x,
-                                         surface.image_max.x),
-                        .y1 = normalized(mouse.y, surface.image_min.y,
-                                         surface.image_max.y),
-                        .thickness = static_cast<std::uint16_t>(
-                            state.annotation_thickness),
-                        .rgba = state.annotation_rgba,
-                    };
-                    std::string ignored_error;
-                    (void)control_plane.send_overlay_stroke(
-                        selected_client->id, stroke, &ignored_error);
-                    state.previous_annotation_point = mouse;
+        const auto clamp_to_surface = [&](ImVec2 point) {
+            return ImVec2{
+                std::clamp(point.x, surface.image_min.x, surface.image_max.x),
+                std::clamp(point.y, surface.image_min.y, surface.image_max.y)};
+        };
+        const auto normalized = [&](ImVec2 point) {
+            const float x_ratio = std::clamp(
+                (point.x - surface.image_min.x) /
+                    (surface.image_max.x - surface.image_min.x),
+                0.0f, 1.0f);
+            const float y_ratio = std::clamp(
+                (point.y - surface.image_min.y) /
+                    (surface.image_max.y - surface.image_min.y),
+                0.0f, 1.0f);
+            return ImVec2{x_ratio * 65535.0f, y_ratio * 65535.0f};
+        };
+        const auto send_segment = [&](ImVec2 start, ImVec2 end) {
+            const ImVec2 first = normalized(clamp_to_surface(start));
+            const ImVec2 last = normalized(clamp_to_surface(end));
+            const nstu::control::OverlayStroke stroke{
+                .x0 = static_cast<std::uint16_t>(first.x),
+                .y0 = static_cast<std::uint16_t>(first.y),
+                .x1 = static_cast<std::uint16_t>(last.x),
+                .y1 = static_cast<std::uint16_t>(last.y),
+                .thickness = static_cast<std::uint16_t>(
+                    state.annotation_thickness),
+                .rgba = state.annotation_rgba,
+            };
+            std::string ignored_error;
+            (void)control_plane.send_overlay_stroke(
+                selected_client->id, stroke, &ignored_error);
+        };
+        const auto send_shape = [&](ImVec2 start, ImVec2 end) {
+            const float left = std::min(start.x, end.x);
+            const float right = std::max(start.x, end.x);
+            const float top = std::min(start.y, end.y);
+            const float bottom = std::max(start.y, end.y);
+            switch (state.annotation_tool) {
+            case AnnotationTool::ruler:
+                send_segment(start, end);
+                break;
+            case AnnotationTool::arrow: {
+                send_segment(start, end);
+                const float dx = end.x - start.x;
+                const float dy = end.y - start.y;
+                const float length = std::sqrt(dx * dx + dy * dy);
+                if (length < 2.0f) {
+                    break;
                 }
-            } else {
-                state.annotation_dragging = true;
+                const float ux = dx / length;
+                const float uy = dy / length;
+                const float head = std::min(24.0f, length * 0.35f);
+                const ImVec2 base{end.x - ux * head, end.y - uy * head};
+                const ImVec2 perpendicular{-uy * head * 0.35f,
+                                            ux * head * 0.35f};
+                send_segment(end, {base.x + perpendicular.x,
+                                    base.y + perpendicular.y});
+                send_segment(end, {base.x - perpendicular.x,
+                                    base.y - perpendicular.y});
+                break;
+            }
+            case AnnotationTool::rectangle:
+                send_segment({left, top}, {right, top});
+                send_segment({right, top}, {right, bottom});
+                send_segment({right, bottom}, {left, bottom});
+                send_segment({left, bottom}, {left, top});
+                break;
+            case AnnotationTool::ellipse: {
+                constexpr int segments = 24;
+                const ImVec2 center{(left + right) * 0.5f,
+                                    (top + bottom) * 0.5f};
+                const ImVec2 radius{(right - left) * 0.5f,
+                                    (bottom - top) * 0.5f};
+                ImVec2 previous{center.x + radius.x, center.y};
+                for (int index = 1; index <= segments; ++index) {
+                    const float angle =
+                        (2.0f * 3.14159265358979323846f * index) /
+                        static_cast<float>(segments);
+                    const ImVec2 next{center.x + std::cos(angle) * radius.x,
+                                      center.y + std::sin(angle) * radius.y};
+                    send_segment(previous, next);
+                    previous = next;
+                }
+                break;
+            }
+            case AnnotationTool::pen:
+                break;
+            }
+        };
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && inside) {
+            state.annotation_dragging = true;
+            state.previous_annotation_point = mouse;
+        }
+        if (state.annotation_dragging &&
+            ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+            state.annotation_tool == AnnotationTool::pen && inside) {
+            const float delta_x = mouse.x - state.previous_annotation_point.x;
+            const float delta_y = mouse.y - state.previous_annotation_point.y;
+            if (delta_x * delta_x + delta_y * delta_y >= 9.0f) {
+                send_segment(state.previous_annotation_point, mouse);
                 state.previous_annotation_point = mouse;
             }
-        } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        }
+        if (state.annotation_dragging &&
+            ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            const ImVec2 end = inside ? mouse : state.previous_annotation_point;
+            if (state.annotation_tool != AnnotationTool::pen) {
+                send_shape(state.previous_annotation_point, end);
+            } else if (inside) {
+                send_segment(state.previous_annotation_point, end);
+            }
             state.annotation_dragging = false;
         }
     } else {
@@ -1545,7 +1629,41 @@ void draw_selected_client(
     }
     ImGui::PopStyleColor(3);
     if (state.annotation_enabled) {
-        ImGui::TextUnformatted(tr(state, "Pen", "Bút"));
+        ImGui::TextUnformatted(tr(state, "Overlay tools", "Công cụ lớp phủ"));
+        ImGui::SameLine();
+        const char* tool_items =
+            state.language == Language::vietnamese
+                ? "Bút\0Thước\0Mũi tên\0Hình chữ nhật\0Elip\0"
+                : "Pen\0Ruler\0Arrow\0Rectangle\0Ellipse\0";
+        int tool_index = static_cast<int>(state.annotation_tool);
+        ImGui::SetNextItemWidth(150.0f);
+        if (ImGui::Combo(tr(state, "Tool", "Công cụ"), &tool_index,
+                         tool_items)) {
+            state.annotation_tool = static_cast<AnnotationTool>(
+                std::clamp(tool_index, 0,
+                           static_cast<int>(AnnotationTool::ellipse)));
+            state.annotation_dragging = false;
+        }
+        ImGui::SameLine();
+        float custom_color[4]{
+            ((state.annotation_rgba >> 24u) & 0xffu) / 255.0f,
+            ((state.annotation_rgba >> 16u) & 0xffu) / 255.0f,
+            ((state.annotation_rgba >> 8u) & 0xffu) / 255.0f,
+            (state.annotation_rgba & 0xffu) / 255.0f};
+        if (ImGui::ColorEdit4(tr(state, "Color", "Màu"), custom_color,
+                              ImGuiColorEditFlags_NoInputs |
+                                  ImGuiColorEditFlags_AlphaBar)) {
+            const auto channel = [](float value) {
+                return static_cast<std::uint32_t>(
+                    std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+            };
+            state.annotation_rgba = (channel(custom_color[0]) << 24u) |
+                                    (channel(custom_color[1]) << 16u) |
+                                    (channel(custom_color[2]) << 8u) |
+                                    channel(custom_color[3]);
+        }
+        ImGui::SameLine();
+        ImGui::TextUnformatted(tr(state, "Quick colors", "Màu nhanh"));
         ImGui::SameLine();
         constexpr std::array<std::uint32_t, 4> colors{
             0xe5484dffu, 0xf2c94cffu, 0x2f80edffu, 0x27ae60ffu};
