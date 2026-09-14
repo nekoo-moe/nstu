@@ -19,6 +19,7 @@ add_library(nstu_common STATIC
     src/rate_limiter.cpp
     src/screen_snapshot.cpp
     src/secret_store.cpp
+    src/telemetry.cpp
     src/video_transport.cpp
     src/wfp_allowlist.cpp
 )

@@ -9,6 +9,12 @@ configuration. Periodic JPEG snapshots, teacher-screen snapshots, and overlay
 strokes travel in authenticated TCP command frames. NSTU does not currently
 encrypt screen content.
 
+Security vulnerabilities and reports containing secrets, screen/exam data, or
+identifying information must not be submitted through public GitHub Issues. Use
+a private maintainer channel or GitHub private vulnerability reporting when the
+repository enables it, and withhold sensitive details until a private channel
+is established.
+
 ## Control handshake
 
 Each installed client has a 128-bit client ID and references a provisioned key
@@ -212,6 +218,26 @@ execute WMI, processes, reboots, or UWF changes. Deployment-key provisioning,
 durable replay state across reboot, technician confirmation, isolated helper
 IPC, audit, and independent review remain mandatory before any mutation path
 is enabled.
+
+## Optional diagnostic reporting
+
+NSTU Server's diagnostic reporting is explicit opt-in and disabled by default.
+When enabled, it keeps at most 64 privacy-filtered internal events in process
+memory. Event payloads are not written to disk, sent to an NSTU endpoint, or
+posted to GitHub automatically. The registry stores only the two operator
+choices controlling collection and error prompts.
+
+The public report builder accepts only application-owned configuration fields
+and sanitizes common IP/MAC addresses, client references, paths, email
+addresses, credential assignments, and secret-like tokens. Screen content,
+chat, remote input, exam content/answers, enrollment secrets, private keys,
+machine/user/school names, and unrestricted logs are outside the collection
+contract. Producers must use controlled diagnostic messages; sanitization is a
+defense-in-depth boundary, not authorization to collect arbitrary text.
+
+The operator must review the full report before manually pasting it into the
+public GitHub Issue form. No GitHub token is embedded in NSTU. See
+[TELEMETRY.md](TELEMETRY.md) for the complete data flow and deletion behavior.
 
 ## Remaining blockers
 

@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [Reboot-to-restore design](docs/REBOOT_TO_RESTORE.md) | [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md) | [VM testing](docs/VM_TESTING.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [Optional diagnostics](docs/TELEMETRY.md) | [Reboot-to-restore design](docs/REBOOT_TO_RESTORE.md) | [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md) | [VM testing](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -61,6 +61,8 @@ its threat model and unfinished production work public in
   paths, video pipeline, control channel, and known limitations.
 - [Security](docs/SECURITY.md): authentication, enrollment, secrets, and
   deployment boundaries.
+- [Optional diagnostics](docs/TELEMETRY.md): explicit consent, bounded local
+  collection, privacy filtering, and manual public-report submission.
 - [Computer-based assessment](docs/EXAM_ASSESSMENT.md): the optional native
   WebView2 host, exam package boundaries, authenticated answer recovery, durable
   outbox, and state-export formats.
@@ -92,6 +94,10 @@ its threat model and unfinished production work public in
   broadcast mode without making it the default monitoring path.
 - Show a responsive wall of the latest client snapshots, plus focused
   telemetry, controls, and chat for one client.
+- Optionally retain a bounded, privacy-filtered server diagnostic history in
+  memory and let a technician review it before manually creating a public
+  GitHub Issue. Collection and error prompts are independently controllable;
+  no report is uploaded automatically.
 - Snapshot delivery is bounded to JPEG images up to 480x270 and 60 KiB. The
   teacher UI decodes each generation once, retains only the newest immutable
   payload, and reports malformed frames without retrying them every render
@@ -182,6 +188,14 @@ The separate `Diagnostics` popup inside `nstu-server.exe` reports DXGI adapters
 and vendors, feature level, Desktop Duplication support, WARP fallback state,
 and bounded recent HRESULT events. If graphics initialization fails before the
 server UI can open, a native Windows message box displays the recorded failure.
+
+Optional diagnostic collection is configured under server `Settings`. It is
+disabled by default, stores at most 64 sanitized events in process memory, and
+clears them when disabled or when the server exits. An optional error prompt
+opens a complete report preview. `Copy and open GitHub` does not submit data: it
+copies the reviewed report and opens the public Issue form for a technician to
+paste and submit manually. See [Optional diagnostics](docs/TELEMETRY.md) for the
+field allowlist and privacy boundary.
 
 #### Server graphics diagnostics
 

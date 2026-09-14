@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) | [Thiết kế khôi phục sau reboot](docs/REBOOT_TO_RESTORE.vi.md) | [Tự động cập nhật và bảo trì LTSC](docs/AUTO_UPDATE_LTSC.vi.md) | [Kiểm thử VM](docs/VM_TESTING.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) | [Chẩn đoán tùy chọn](docs/TELEMETRY.vi.md) | [Thiết kế khôi phục sau reboot](docs/REBOOT_TO_RESTORE.vi.md) | [Tự động cập nhật và bảo trì LTSC](docs/AUTO_UPDATE_LTSC.vi.md) | [Kiểm thử VM](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -62,6 +62,8 @@ model và các hạng mục production chưa hoàn thành tại
   video pipeline, control channel và giới hạn hiện tại.
 - [Bảo mật](docs/SECURITY.md): authentication, enrollment, secret và ranh giới
   triển khai.
+- [Chẩn đoán tùy chọn](docs/TELEMETRY.vi.md): consent rõ ràng, thu thập cục bộ
+  có giới hạn, lọc riêng tư và quy trình gửi báo cáo công khai thủ công.
 - [Đánh giá trên máy tính](docs/EXAM_ASSESSMENT.vi.md): native WebView2 tùy chọn,
   ranh giới gói bài thi, phục hồi câu trả lời có xác thực, outbox bền vững và
   định dạng state export.
@@ -93,6 +95,9 @@ model và các hạng mục production chưa hoàn thành tại
   trong tương lai, không dùng làm đường monitoring mặc định.
 - Hiển thị screen wall responsive của các snapshot mới nhất, cùng telemetry,
   điều khiển và chat tập trung cho một máy.
+- Có thể giữ lịch sử chẩn đoán server đã lọc riêng tư và có giới hạn trong RAM,
+  sau đó để kỹ thuật viên xem lại trước khi tự tạo GitHub Issue công khai. Thu
+  thập và popup nhắc lỗi có thể bật/tắt riêng; không có báo cáo nào tự tải lên.
 - Snapshot được giới hạn ở ảnh JPEG tối đa 480x270 và 60 KiB. Giao diện giáo
   viên decode mỗi generation một lần, chỉ giữ payload immutable mới nhất và báo
   frame lỗi thay vì thử lại ở mọi render frame.
@@ -179,6 +184,14 @@ Popup `Diagnostics` riêng bên trong `nstu-server.exe` hiển thị adapter/hã
 DXGI, feature level, khả dụng Desktop Duplication, trạng thái dự phòng WARP
 và các HRESULT gần đây có giới hạn. Nếu khởi tạo đồ họa thất bại
 trước khi server UI mở, Windows hiển thị hộp thoại gốc với lỗi đã ghi.
+
+Thu thập chẩn đoán tùy chọn được cấu hình trong `Cài đặt` của server. Tính năng
+mặc định tắt, chỉ giữ tối đa 64 sự kiện đã lọc trong RAM và xóa chúng khi tắt
+hoặc khi server thoát. Người dùng có thể bật popup khi có lỗi. Nút `Sao chép và
+mở GitHub` không tự gửi dữ liệu: nó chỉ sao chép báo cáo đã xem lại và mở biểu
+mẫu Issue công khai để kỹ thuật viên tự dán rồi gửi. Xem
+[Chẩn đoán tùy chọn](docs/TELEMETRY.vi.md) để biết danh sách trường và ranh giới
+quyền riêng tư.
 
 #### Chẩn đoán đồ họa của server
 

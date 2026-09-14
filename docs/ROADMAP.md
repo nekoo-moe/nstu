@@ -105,6 +105,10 @@
       validation scripts.
 - [x] Reproducible benchmark and multicast-matrix tooling plus a production
       evidence record.
+- [x] Add opt-in server diagnostic collection with a 64-event in-memory bound,
+      local privacy filtering, independent error-prompt control, a complete
+      review/copy UI, and manual-only public GitHub Issue submission. No event
+      payload is persisted or uploaded automatically.
 
 ## Optional continuous-video work
 
@@ -189,6 +193,9 @@ will not implement a script-based or custom-kernel imitation of UWF.
 - [ ] Complete independent protocol review and fuzzing. Where the LAN threat
       model requires screen confidentiality, add authenticated encryption before
       deployment; the current video format authenticates but does not encrypt.
+- [ ] Validate the optional diagnostic sanitizer and consent/deletion UI with
+      school-approved test fixtures before considering any client/fleet
+      reporting. Session 0 clients must not publish diagnostics or infer consent.
 
 ## Context note
 

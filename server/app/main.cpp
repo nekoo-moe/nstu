@@ -5,6 +5,7 @@
 #include "nstu/screen_snapshot.hpp"
 #include "nstu/secret_store.hpp"
 #include "nstu/snapshot_generation_gate.hpp"
+#include "nstu/telemetry.hpp"
 #include "nstu/protocol_headers.h"
 
 #include <d3d11.h>
@@ -24,6 +25,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -37,6 +39,14 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+
+#ifndef NSTU_PROJECT_VERSION
+#define NSTU_PROJECT_VERSION "development"
+#endif
+
+#ifndef NSTU_BUILD_CHANNEL
+#define NSTU_BUILD_CHANNEL "Local"
+#endif
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND window, UINT message, WPARAM wparam, LPARAM lparam);
@@ -71,6 +81,94 @@ struct GraphicsReport {
 
 std::deque<DiagnosticEvent> g_diagnostics;
 GraphicsReport g_graphics_report;
+nstu::telemetry::ConsentPolicy g_telemetry_policy;
+std::deque<nstu::telemetry::Event> g_telemetry_events;
+std::atomic_bool g_telemetry_error_prompt_requested = false;
+std::atomic_bool g_telemetry_error_prompt_armed = false;
+
+constexpr wchar_t kServerSettingsKey[] = L"Software\\NSTU\\Server";
+constexpr wchar_t kTelemetryEnabledValue[] = L"TelemetryEnabled";
+constexpr wchar_t kTelemetryPromptValue[] = L"TelemetryPromptOnError";
+constexpr wchar_t kDiagnosticIssueUrl[] =
+    L"https://github.com/nekoo-moe/nstu/issues/new?template=sanitized-diagnostic.yml";
+
+class RegistryKey final {
+public:
+    RegistryKey() = default;
+    ~RegistryKey() {
+        if (key_ != nullptr) {
+            RegCloseKey(key_);
+        }
+    }
+    RegistryKey(const RegistryKey&) = delete;
+    RegistryKey& operator=(const RegistryKey&) = delete;
+
+    HKEY* put() noexcept { return &key_; }
+    HKEY get() const noexcept { return key_; }
+
+private:
+    HKEY key_ = nullptr;
+};
+
+bool read_server_setting(const wchar_t* name, bool fallback) noexcept {
+    DWORD value = 0;
+    DWORD bytes = sizeof(value);
+    const auto status = RegGetValueW(
+        HKEY_CURRENT_USER, kServerSettingsKey, name, RRF_RT_REG_DWORD,
+        nullptr, &value, &bytes);
+    return status == ERROR_SUCCESS ? value != 0 : fallback;
+}
+
+nstu::telemetry::ConsentPolicy load_telemetry_policy() noexcept {
+    nstu::telemetry::ConsentPolicy policy;
+    policy.collect_in_background =
+        read_server_setting(kTelemetryEnabledValue, false);
+    policy.prompt_on_error = policy.collect_in_background &&
+        read_server_setting(kTelemetryPromptValue, false);
+    return policy;
+}
+
+bool save_telemetry_policy(
+    const nstu::telemetry::ConsentPolicy& policy) noexcept {
+    const DWORD previous_prompt =
+        read_server_setting(kTelemetryPromptValue, false) ? 1u : 0u;
+    RegistryKey key;
+    DWORD disposition = 0;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kServerSettingsKey, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr,
+                        key.put(), &disposition) != ERROR_SUCCESS) {
+        return false;
+    }
+    (void)disposition;
+    const DWORD enabled = policy.collect_in_background ? 1u : 0u;
+    const DWORD prompt = policy.collect_in_background && policy.prompt_on_error
+        ? 1u : 0u;
+    if (RegSetValueExW(key.get(), kTelemetryPromptValue, 0, REG_DWORD,
+                       reinterpret_cast<const BYTE*>(&prompt),
+                       sizeof(prompt)) != ERROR_SUCCESS) {
+        return false;
+    }
+    if (RegSetValueExW(key.get(), kTelemetryEnabledValue, 0, REG_DWORD,
+                       reinterpret_cast<const BYTE*>(&enabled),
+                       sizeof(enabled)) == ERROR_SUCCESS) {
+        return true;
+    }
+    (void)RegSetValueExW(key.get(), kTelemetryPromptValue, 0, REG_DWORD,
+                         reinterpret_cast<const BYTE*>(&previous_prompt),
+                         sizeof(previous_prompt));
+    return false;
+}
+
+nstu::telemetry::Severity telemetry_severity(
+    std::string_view severity) noexcept {
+    if (severity == "error") {
+        return nstu::telemetry::Severity::error;
+    }
+    if (severity == "warning") {
+        return nstu::telemetry::Severity::warning;
+    }
+    return nstu::telemetry::Severity::information;
+}
 
 std::string hresult_text(HRESULT result) {
     std::ostringstream stream;
@@ -98,6 +196,26 @@ void record_diagnostic(const char* severity, const char* source,
     while (g_diagnostics.size() > 128) {
         g_diagnostics.pop_front();
     }
+    if (nstu::telemetry::collection_enabled(g_telemetry_policy)) {
+        nstu::telemetry::append_bounded_event(
+            g_telemetry_events,
+            {telemetry_severity(severity), source, message});
+        if (std::string_view(severity) == "error" &&
+            nstu::telemetry::should_prompt_for_error(g_telemetry_policy) &&
+            g_telemetry_error_prompt_armed.exchange(false)) {
+            g_telemetry_error_prompt_requested.store(true);
+        }
+    }
+}
+
+void record_operation_failure(const char* source, std::string_view operation,
+                              const std::string& error) {
+    std::string message(operation);
+    if (!error.empty()) {
+        message += ": ";
+        message += error;
+    }
+    record_diagnostic("warning", source, message);
 }
 
 std::wstring diagnostics_text() {
@@ -310,6 +428,8 @@ struct DashboardState {
     std::chrono::steady_clock::time_point next_host_snapshot{};
     std::string control_status;
     std::string startup_error;
+    std::string telemetry_report_preview;
+    bool telemetry_report_requested = false;
     std::array<char, 96> client_filter{};
     std::array<char, 512> chat_input{};
 };
@@ -317,6 +437,91 @@ struct DashboardState {
 const char* tr(const DashboardState& state, const char* english,
                const char* vietnamese) {
     return state.language == Language::vietnamese ? vietnamese : english;
+}
+
+bool update_telemetry_policy(
+    DashboardState& state,
+    const nstu::telemetry::ConsentPolicy& requested_policy) {
+    auto policy = requested_policy;
+    if (!policy.collect_in_background) {
+        policy.prompt_on_error = false;
+    }
+    if (!save_telemetry_policy(policy)) {
+        state.control_status = tr(
+            state, "Could not save diagnostic-sharing settings.",
+            "Không thể lưu cài đặt chia sẻ chẩn đoán.");
+        return false;
+    }
+
+    const bool collection_started =
+        !g_telemetry_policy.collect_in_background &&
+        policy.collect_in_background;
+    const bool prompt_started =
+        !nstu::telemetry::should_prompt_for_error(g_telemetry_policy) &&
+        nstu::telemetry::should_prompt_for_error(policy);
+    g_telemetry_policy = policy;
+    if (!policy.collect_in_background) {
+        g_telemetry_events.clear();
+        g_telemetry_error_prompt_requested.store(false);
+        g_telemetry_error_prompt_armed.store(false);
+        state.telemetry_report_preview.clear();
+        state.control_status = tr(
+            state, "Optional diagnostics disabled and collected data cleared.",
+            "Đã tắt chẩn đoán tùy chọn và xóa dữ liệu đã thu thập.");
+    } else if (collection_started) {
+        g_telemetry_error_prompt_armed.store(policy.prompt_on_error);
+        record_diagnostic("info", "Diagnostics",
+                          "Optional local diagnostic collection enabled");
+        state.control_status = tr(
+            state, "Optional local diagnostics enabled.",
+            "Đã bật chẩn đoán cục bộ tùy chọn.");
+    } else {
+        if (!policy.prompt_on_error) {
+            g_telemetry_error_prompt_requested.store(false);
+            g_telemetry_error_prompt_armed.store(false);
+        } else if (prompt_started) {
+            g_telemetry_error_prompt_armed.store(true);
+        }
+        state.control_status = tr(
+            state, "Diagnostic-sharing settings saved.",
+            "Đã lưu cài đặt chia sẻ chẩn đoán.");
+    }
+    return true;
+}
+
+std::string client_count_bucket(std::size_t count) {
+    if (count == 0) return "0";
+    if (count <= 10) return "1-10";
+    if (count <= 25) return "11-25";
+    if (count <= 50) return "26-50";
+    return "51+";
+}
+
+std::string report_value(const std::string& value) {
+    return value.empty() ? "Unknown" : value;
+}
+
+nstu::telemetry::PublicReport make_telemetry_report(
+    const DashboardState& state, std::size_t client_count) {
+    nstu::telemetry::PublicReport report;
+    report.application = "NSTU Server";
+    report.version = NSTU_PROJECT_VERSION;
+    report.build_channel = NSTU_BUILD_CHANNEL;
+    report.fields = {
+        {"Graphics device mode", report_value(g_graphics_report.device_mode)},
+        {"Graphics adapter", report_value(g_graphics_report.selected_adapter)},
+        {"Graphics vendor", report_value(g_graphics_report.selected_vendor)},
+        {"D3D feature level", report_value(g_graphics_report.feature_level)},
+        {"Desktop Duplication",
+         report_value(g_graphics_report.desktop_duplication)},
+        {"Hardware H.264 encoders",
+         report_value(g_graphics_report.h264_encoders)},
+        {"Snapshot interval",
+         std::to_string(state.snapshot_interval_seconds) + " seconds"},
+        {"Known client count", client_count_bucket(client_count)},
+    };
+    report.events = g_telemetry_events;
+    return report;
 }
 
 void show_main_window(HWND window) {
@@ -1512,6 +1717,8 @@ void draw_selected_client(
                      "Đã dừng chụp màn hình.");
         } else {
             state.control_status = error;
+            record_operation_failure("Snapshots", "Snapshot command failed",
+                                     error);
         }
         ImGui::OpenPopup("control-status");
     }
@@ -1530,6 +1737,10 @@ void draw_selected_client(
                 ? tr(state, "Remote control stopped.",
                      "Đã dừng điều khiển từ xa.")
                 : error;
+            if (!ok) {
+                record_operation_failure("RemoteControl",
+                                         "Stop command failed", error);
+            }
             state.remote_control_enabled = false;
             state.remote_control_client_id = 0;
             state.remote_pointer_down = false;
@@ -1540,6 +1751,10 @@ void draw_selected_client(
                 ? tr(state, "Remote control enabled.",
                      "Đã bật điều khiển từ xa.")
                 : error;
+            if (!ok) {
+                record_operation_failure("RemoteControl",
+                                         "Start command failed", error);
+            }
             state.remote_control_enabled = ok;
             state.remote_control_client_id = ok ? selected_client->id : 0;
         }
@@ -1594,11 +1809,15 @@ void draw_selected_client(
     ImGui::SameLine();
     if (ImGui::Button(tr(state, "Clear drawing", "Xóa nét vẽ"))) {
         std::string error;
-        state.control_status =
-            control_plane.clear_overlay(selected_client->id, &error)
-                ? tr(state, "Student overlay cleared.",
-                     "Đã xóa lớp vẽ trên máy học sinh.")
-                : error;
+        const bool cleared =
+            control_plane.clear_overlay(selected_client->id, &error);
+        state.control_status = cleared
+            ? tr(state, "Student overlay cleared.",
+                 "Đã xóa lớp vẽ trên máy học sinh.")
+            : error;
+        if (!cleared) {
+            record_operation_failure("Overlay", "Clear command failed", error);
+        }
         ImGui::OpenPopup("control-status");
     }
     ImGui::SameLine();
@@ -1614,17 +1833,22 @@ void draw_selected_client(
     const bool is_locked =
         selected_client->status == nstu::server::ClientStatus::locked;
     if (ImGui::Button(is_locked
-                          ? tr(state, "Unlock client", "Mở khóa máy")
-                          : tr(state, "Lock client", "Khóa máy"))) {
+                           ? tr(state, "Unlock client", "Mở khóa máy")
+                           : tr(state, "Lock client", "Khóa máy"))) {
         std::string error;
-        state.control_status =
-            control_plane.set_locked(selected_client->id, !is_locked, &error)
-                ? (is_locked
-                       ? tr(state, "Unlock command sent.",
-                            "Đã gửi lệnh mở khóa.")
-                       : tr(state, "Lock command sent.",
-                            "Đã gửi lệnh khóa."))
-                : error;
+        const bool sent =
+            control_plane.set_locked(selected_client->id, !is_locked, &error);
+        state.control_status = sent
+            ? (is_locked
+                   ? tr(state, "Unlock command sent.",
+                        "Đã gửi lệnh mở khóa.")
+                   : tr(state, "Lock command sent.",
+                        "Đã gửi lệnh khóa."))
+            : error;
+        if (!sent) {
+            record_operation_failure("Lock", "Lock-state command failed",
+                                     error);
+        }
         ImGui::OpenPopup("control-status");
     }
     ImGui::PopStyleColor(3);
@@ -1714,6 +1938,7 @@ void draw_selected_client(
                                           "Đã gửi tin nhắn.");
             } else {
                 state.control_status = error;
+                record_operation_failure("Chat", "Chat command failed", error);
             }
             ImGui::OpenPopup("control-status");
         }
@@ -1747,6 +1972,7 @@ void draw_preferences(DashboardState& state) {
                       {settings_width, 28.0f})) {
         ImGui::OpenPopup("settings-popup");
     }
+    ImGui::SetNextWindowSize({390.0f, 0.0f}, ImGuiCond_Appearing);
     if (!ImGui::BeginPopup("settings-popup")) {
         return;
     }
@@ -1788,6 +2014,57 @@ void draw_preferences(DashboardState& state) {
     ImGui::TextWrapped("%s", tr(state,
         "Snapshot commands use this interval for room monitoring and teacher broadcast.",
         "Chu kỳ này được dùng cho snapshot phòng máy và phát màn hình giáo viên."));
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextDisabled("%s", tr(state, "Optional diagnostics",
+                                  "Chẩn đoán tùy chọn"));
+    bool collection_enabled = g_telemetry_policy.collect_in_background;
+    if (ImGui::Checkbox(
+            tr(state, "Collect privacy-filtered diagnostics locally",
+               "Thu thập chẩn đoán đã lọc riêng tư trên máy"),
+            &collection_enabled)) {
+        auto policy = g_telemetry_policy;
+        policy.collect_in_background = collection_enabled;
+        (void)update_telemetry_policy(state, policy);
+    }
+    ImGui::BeginDisabled(!g_telemetry_policy.collect_in_background);
+    bool prompt_on_error = g_telemetry_policy.prompt_on_error;
+    if (ImGui::Checkbox(
+            tr(state, "Prompt when an error report is ready",
+               "Nhắc khi báo cáo lỗi đã sẵn sàng"),
+            &prompt_on_error)) {
+        auto policy = g_telemetry_policy;
+        policy.prompt_on_error = prompt_on_error;
+        (void)update_telemetry_policy(state, policy);
+    }
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("%s", tr(
+        state,
+        "Disabled by default. Events stay in memory and are discarded when NSTU exits. Nothing is uploaded automatically; review the report before posting it to the public GitHub issue tracker.",
+        "Mặc định tắt. Sự kiện chỉ nằm trong bộ nhớ và bị xóa khi NSTU thoát. Không có dữ liệu nào tự động tải lên; hãy xem lại báo cáo trước khi đăng lên GitHub Issues công khai."));
+    if (g_telemetry_policy.collect_in_background) {
+        ImGui::Text("%s: %llu / %llu",
+                    tr(state, "Collected events", "Sự kiện đã thu thập"),
+                    static_cast<unsigned long long>(g_telemetry_events.size()),
+                    static_cast<unsigned long long>(
+                        nstu::telemetry::kMaximumEvents));
+        if (ImGui::Button(tr(state, "Review report", "Xem báo cáo"),
+                          {116.0f, 0.0f})) {
+            state.telemetry_report_requested = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr(state, "Clear data", "Xóa dữ liệu"),
+                          {104.0f, 0.0f})) {
+            g_telemetry_events.clear();
+            g_telemetry_error_prompt_requested.store(false);
+            g_telemetry_error_prompt_armed.store(
+                g_telemetry_policy.prompt_on_error);
+            state.telemetry_report_preview.clear();
+            state.control_status = tr(state, "Collected diagnostics cleared.",
+                                      "Đã xóa dữ liệu chẩn đoán.");
+        }
+    }
     ImGui::EndPopup();
 }
 
@@ -1810,6 +2087,10 @@ void set_room_snapshots(
         } else {
             last_error = std::move(error);
         }
+    }
+    if (sent == 0 && !last_error.empty()) {
+        record_operation_failure("Snapshots", "Room command failed",
+                                 last_error);
     }
     state.control_status = sent == 0
         ? (last_error.empty()
@@ -1852,6 +2133,8 @@ void toggle_teacher_broadcast(DashboardState& state,
                                       "Đã dừng phát màn hình giáo viên.");
         } else {
             state.control_status = error;
+            record_operation_failure("Broadcast", "Stop command failed",
+                                     error);
         }
         return;
     }
@@ -1913,8 +2196,87 @@ void draw_diagnostics_popup(DashboardState& state) {
     if (ImGui::Button(tr(state, "Refresh", "Làm mới"), {90.0f, 0.0f})) {
         refresh_graphics_report();
     }
+    if (g_telemetry_policy.collect_in_background) {
+        ImGui::SameLine();
+        if (ImGui::Button(tr(state, "Review report", "Xem báo cáo"),
+                          {118.0f, 0.0f})) {
+            state.telemetry_report_requested = true;
+            ImGui::CloseCurrentPopup();
+        }
+    }
     ImGui::SameLine();
     if (ImGui::Button(tr(state, "Close", "Đóng"), {90.0f, 0.0f})) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+void draw_telemetry_report_popup(DashboardState& state,
+                                 std::size_t client_count) {
+    if (g_telemetry_error_prompt_requested.exchange(false)) {
+        state.telemetry_report_requested = true;
+    }
+    if (state.telemetry_report_requested) {
+        state.telemetry_report_requested = false;
+        refresh_graphics_report();
+        g_telemetry_error_prompt_requested.store(false);
+        state.telemetry_report_preview = nstu::telemetry::build_public_markdown(
+            make_telemetry_report(state, client_count));
+        ImGui::OpenPopup("sanitized-diagnostic-report");
+    }
+
+    ImGui::SetNextWindowSize({760.0f, 600.0f}, ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("sanitized-diagnostic-report", nullptr,
+                                ImGuiWindowFlags_NoResize)) {
+        return;
+    }
+    ImGui::TextUnformatted(tr(state, "Review diagnostic report",
+                              "Xem lại báo cáo chẩn đoán"));
+    ImGui::Separator();
+    ImGui::TextWrapped("%s", tr(
+        state,
+        "Nothing has been sent. GitHub Issues are public. Review the complete text and remove anything you do not want to disclose before submitting.",
+        "Chưa có dữ liệu nào được gửi. GitHub Issues là công khai. Hãy xem toàn bộ nội dung và xóa mọi thông tin bạn không muốn công bố trước khi gửi."));
+    ImGui::Spacing();
+    if (ImGui::BeginChild("sanitized-report-preview", {0.0f, -48.0f}, true,
+                          ImGuiWindowFlags_HorizontalScrollbar)) {
+        ImGui::TextUnformatted(state.telemetry_report_preview.c_str());
+    }
+    ImGui::EndChild();
+
+    if (ImGui::Button(tr(state, "Copy report", "Sao chép báo cáo"),
+                      {126.0f, 0.0f})) {
+        ImGui::SetClipboardText(state.telemetry_report_preview.c_str());
+        state.control_status = tr(state, "Sanitized report copied.",
+                                  "Đã sao chép báo cáo đã lọc.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Copy and open GitHub",
+                               "Sao chép và mở GitHub"),
+                      {178.0f, 0.0f})) {
+        ImGui::SetClipboardText(state.telemetry_report_preview.c_str());
+        const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(
+            nullptr, L"open", kDiagnosticIssueUrl, nullptr, nullptr,
+            SW_SHOWNORMAL));
+        state.control_status = result > 32
+            ? tr(state, "Report copied; GitHub issue form opened.",
+                 "Đã sao chép báo cáo và mở biểu mẫu GitHub Issue.")
+            : tr(state, "Report copied, but GitHub could not be opened.",
+                 "Đã sao chép báo cáo nhưng không thể mở GitHub.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Clear", "Xóa"), {82.0f, 0.0f})) {
+        g_telemetry_events.clear();
+        g_telemetry_error_prompt_requested.store(false);
+        g_telemetry_error_prompt_armed.store(
+            g_telemetry_policy.prompt_on_error);
+        state.telemetry_report_preview = nstu::telemetry::build_public_markdown(
+            make_telemetry_report(state, client_count));
+        state.control_status = tr(state, "Collected diagnostics cleared.",
+                                  "Đã xóa dữ liệu chẩn đoán.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Close", "Đóng"), {82.0f, 0.0f})) {
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -2218,6 +2580,7 @@ void draw_dashboard_shell(
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
     draw_menu_strip(state, !clients.empty());
+    draw_telemetry_report_popup(state, clients.size());
     draw_ribbon(clients, selected_client, state, control_plane);
     draw_workspace_toolbar(clients, state);
 
@@ -2246,6 +2609,11 @@ void draw_dashboard_shell(
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
+    g_telemetry_policy = load_telemetry_policy();
+    g_telemetry_events.clear();
+    g_telemetry_error_prompt_requested.store(false);
+    g_telemetry_error_prompt_armed.store(
+        nstu::telemetry::should_prompt_for_error(g_telemetry_policy));
     const wchar_t* command_line = GetCommandLineW();
     const std::wstring_view arguments =
         command_line == nullptr ? std::wstring_view{} : command_line;
@@ -2321,11 +2689,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             dashboard.startup_error = control_error.empty()
                 ? "control listener failed to start"
                 : std::move(control_error);
+            record_diagnostic("error", "ControlPlane",
+                              dashboard.startup_error);
         }
     } else {
         dashboard.startup_error = deployment_error.empty()
             ? "protected data directory is unavailable"
             : std::move(deployment_error);
+        record_diagnostic("error", "Deployment", dashboard.startup_error);
     }
     bool running = true;
     while (running) {
@@ -2339,6 +2710,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         }
         if (!running) {
             break;
+        }
+        if (g_telemetry_error_prompt_requested.load()) {
+            show_main_window(window);
         }
         if (!IsWindowVisible(window)) {
             Sleep(50);
@@ -2374,9 +2748,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                     .jpeg = std::move(jpeg.bytes),
                 };
                 if (!control_plane.broadcast_host_snapshot(frame, &error)) {
+                    record_operation_failure(
+                        "Broadcast", "Teacher snapshot dispatch failed", error);
                     dashboard.control_status = std::move(error);
                 }
             } else {
+                record_operation_failure(
+                    "Broadcast", "Teacher snapshot capture failed", error);
                 dashboard.control_status = std::move(error);
             }
             dashboard.next_host_snapshot = now + std::chrono::seconds(

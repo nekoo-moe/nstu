@@ -34,8 +34,11 @@ if(NSTU_SERVER_USE_IMGUI)
     )
 
     add_executable(nstu-server WIN32 app/main.cpp)
+    target_compile_definitions(nstu-server PRIVATE
+        NSTU_PROJECT_VERSION="${PROJECT_VERSION}"
+        NSTU_BUILD_CHANNEL="${NSTU_INSTALLER_CHANNEL}")
     target_link_libraries(nstu-server PRIVATE nstu_server_state nstu_imgui
-        d3d11 dxgi mfplat mfuuid)
+        d3d11 dxgi mfplat mfuuid shell32)
     if(MSVC)
         target_compile_options(nstu-server PRIVATE /utf-8)
     endif()

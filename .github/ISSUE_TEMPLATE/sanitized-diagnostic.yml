@@ -1,0 +1,33 @@
+name: Sanitized diagnostic report
+description: Share an NSTU-generated report after reviewing it for public disclosure
+title: "[Diagnostics] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GitHub Issues are public. NSTU never submits this form automatically.
+
+        Paste only the report you reviewed in the NSTU Server diagnostic popup. Remove any information you do not want to disclose. Never add IP or MAC addresses, machine/user/school names, file paths, secrets, screenshots, chat, exam questions, or answers.
+  - type: textarea
+    id: report
+    attributes:
+      label: Reviewed diagnostic report
+      description: Paste the privacy-filtered Markdown copied by NSTU Server.
+      placeholder: "# NSTU privacy-filtered diagnostic report"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Describe the operator action that caused the problem without identifying a school, user, or computer.
+      placeholder: "1. Opened NSTU Server\n2. Selected ...\n3. Observed ..."
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Public disclosure confirmation
+      options:
+        - label: I reviewed this report and removed identifying, secret, screen, chat, and exam content.
+          required: true
+        - label: I understand that submitting this issue publishes its contents publicly.
+          required: true
