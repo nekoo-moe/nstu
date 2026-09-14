@@ -108,14 +108,19 @@ real 50-client lab.
 
 | Role | Baseline target | Network |
 | --- | --- | --- |
-| Server | Intel Core i5-6400, 6 GiB RAM minimum, 8 GiB recommended, 512 MiB free disk, Windows 10/11 x64 | Wired Gigabit Ethernet recommended |
-| Client | Intel Core i5-6400, 6 GiB RAM minimum, 8 GiB recommended, 512 MiB free disk, Windows 10/11 x64 | Wired Ethernet recommended |
+| Server | Windows 10/11 x64, 6 GiB RAM minimum, 8 GiB recommended, 512 MiB free disk; i5-6400-class CPU is a performance reference only | Wired Gigabit Ethernet recommended |
+| Client | Windows 10/11 x64, 6 GiB RAM minimum, 8 GiB recommended, 512 MiB free disk; i5-6400-class CPU is a performance reference only | Wired Ethernet recommended |
 | Router/switch | Standard Ethernet switching/routing for authenticated TCP snapshots; IGMP snooping and an IGMP querier are optional future-video requirements | One controlled LAN/VLAN for the first deployment |
 
 For a server supervising 50 or more devices, 16 GiB RAM and an SSD are prudent
 until the 8 GiB recommended baseline has passed long-duration hardware testing. Intel HD
 Graphics 530 is a baseline hardware-acceleration target, not a guarantee across
 all driver versions.
+
+Diagnostics report the CPU model, architecture, and physical/logical core
+counts for technicians, but processor identity and topology never block the
+installer. Validate CPU suitability with the actual NSTU workload because VM
+topology, firmware, and Windows reporting can differ from the processor name.
 
 ## Build And Setup Flags
 

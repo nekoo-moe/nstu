@@ -108,14 +108,19 @@ test trên phòng máy 50 client thật.
 
 | Vai trò | Cấu hình mục tiêu | Mạng |
 | --- | --- | --- |
-| Server | Intel Core i5-6400, RAM tối thiểu 6 GiB, khuyến nghị 8 GiB, trống 512 MiB, Windows 10/11 x64 | Khuyến nghị Gigabit Ethernet có dây |
-| Client | Intel Core i5-6400, RAM tối thiểu 6 GiB, khuyến nghị 8 GiB, trống 512 MiB, Windows 10/11 x64 | Khuyến nghị Ethernet có dây |
+| Server | Windows 10/11 x64, RAM tối thiểu 6 GiB, khuyến nghị 8 GiB, trống 512 MiB; CPU tương đương i5-6400 chỉ là mốc tham chiếu hiệu năng | Khuyến nghị Gigabit Ethernet có dây |
+| Client | Windows 10/11 x64, RAM tối thiểu 6 GiB, khuyến nghị 8 GiB, trống 512 MiB; CPU tương đương i5-6400 chỉ là mốc tham chiếu hiệu năng | Khuyến nghị Ethernet có dây |
 | Router/switch | Switching/routing Ethernet thông thường cho snapshot TCP đã xác thực; IGMP snooping và IGMP querier chỉ là yêu cầu tùy chọn cho video tương lai | Một LAN/VLAN được kiểm soát cho lần triển khai đầu |
 
 Với server quản lý từ 50 máy trở lên, RAM 16 GiB và SSD là lựa chọn thận trọng
 cho đến khi baseline khuyến nghị 8 GiB vượt qua kiểm thử phần cứng dài hạn. Intel HD Graphics
 530 là baseline cho hardware acceleration, không phải cam kết hoạt động với mọi
 phiên bản driver.
+
+Diagnostics vẫn báo model CPU, kiến trúc và số core vật lý/logical cho kỹ thuật
+viên, nhưng danh tính và topology của CPU không bao giờ chặn installer. Hãy xác
+nhận CPU bằng workload NSTU thực tế vì topology VM, firmware và thông tin do
+Windows báo có thể không khớp với tên bộ xử lý.
 
 ## Cờ build và setup
 

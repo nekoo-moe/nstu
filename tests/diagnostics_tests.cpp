@@ -154,9 +154,11 @@ int main() {
     assert(nstu::setup::classify_link_speed_mbps(1000) ==
            nstu::setup::Readiness::good);
     assert(nstu::setup::classify_processor(false, 8, 8) ==
-           nstu::setup::Readiness::minimum_not_met);
+           nstu::setup::Readiness::unrated);
     assert(nstu::setup::classify_processor(true, 4, 4) ==
-           nstu::setup::Readiness::good);
+           nstu::setup::Readiness::unrated);
+    assert(nstu::setup::classify_processor(true, 0, 0) ==
+           nstu::setup::Readiness::unrated);
 
     nstu::setup::ClientRuntimeSnapshot runtime;
     assert(nstu::setup::classify_client_runtime(runtime) ==
@@ -186,7 +188,7 @@ int main() {
     assert(nstu::setup::classify_client_runtime(runtime) ==
            nstu::setup::ClientRuntimeState::ready);
     assert(nstu::setup::classify_processor(true, 2, 4) ==
-           nstu::setup::Readiness::minimum_not_met);
+           nstu::setup::Readiness::unrated);
 
     nstu::setup::UwfEventHealthSummary event_unavailable{};
     assert(nstu::setup::classify_uwf_event_health(event_unavailable) ==

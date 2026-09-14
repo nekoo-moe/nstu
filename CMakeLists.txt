@@ -18,7 +18,7 @@ option(NSTU_ENABLE_WEBVIEW2_HOST
 set(NSTU_WEBVIEW2_SDK_DIR "" CACHE PATH
     "Root of the Microsoft.Web.WebView2 SDK package")
 option(NSTU_INTERNAL_TEST_BUILD
-    "Build an explicitly labeled installer that permits undersized VM hardware"
+    "Build an explicitly labeled installer that permits undersized VM RAM"
     OFF)
 
 if(NSTU_INTERNAL_TEST_BUILD)

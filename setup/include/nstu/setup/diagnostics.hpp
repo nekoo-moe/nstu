@@ -189,6 +189,8 @@ inline constexpr std::uint32_t kDiagnosticInstallerIssueCloseDelayMs = 6000;
 [[nodiscard]] Readiness classify_memory_gib(std::uint64_t gib) noexcept;
 [[nodiscard]] Readiness classify_link_speed_mbps(
     std::uint64_t mbps) noexcept;
+// Processor fields are reported for technicians but intentionally unrated;
+// installation readiness is established by RAM, network, and runtime tests.
 [[nodiscard]] Readiness classify_processor(bool x64, std::uint32_t physical,
                                            std::uint32_t logical) noexcept;
 [[nodiscard]] ClientRuntimeState classify_client_runtime(

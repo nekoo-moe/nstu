@@ -6,7 +6,7 @@ deployment by itself.
 
 | Field | Reported value | Qualification requirement |
 |---|---|---|
-| CPU | Intel Core i3-7400 | Below the i5-6400 reference; retain as a stress case |
+| CPU | Intel Core i5-7400 | Record for workload comparison; CPU identity does not gate installation |
 | Memory | 8 GiB | Exceeds the 6 GiB minimum; 8 GiB is recommended |
 | Windows | Windows 10, reported as “Education/Pro” | Determine the exact SKU and build from the diagnostic report; Education and Pro are separate editions |
 | Activation | Unactivated | Record only; activation state does not establish UWF eligibility |
@@ -41,7 +41,7 @@ administrator, using a local report path:
 ```powershell
 & "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" `
   --target=client `
-  --report="$env:ProgramData\NSTU\qualification-i3-7400.json" `
+  --report="$env:ProgramData\NSTU\qualification-i5-7400.json" `
   --diagnostics-stay-open
 ```
 
@@ -61,9 +61,9 @@ run reports UWF as `not_applicable`.
 
 Use a separate client image for the reboot-to-restore trial. For the current
 3 GiB development VM, use the internal artifact
-`nstu-<version>-internal-vm-setup.exe`; it permits the undersized CPU/RAM
-warning for development tests. The production artifact retains the 6 GiB
-installation minimum.
+`nstu-<version>-internal-vm-setup.exe`; it permits the undersized RAM warning
+for development tests. CPU details are informational in every build. The
+production artifact retains the 6 GiB installation minimum.
 
 After installing the client role, run the client report before any UWF change:
 
@@ -84,8 +84,9 @@ before repeating the cycle. NSTU does not enable or mutate UWF automatically.
 ## Acceptance boundaries
 
 - 6 GiB RAM is the installation minimum; 8 GiB remains the recommended baseline.
-- The i3-7400 is intentionally below the i5-6400 reference and must be
-  reported as a stress-case CPU result, not silently promoted to “Good”.
+- The i5-7400 is recorded as a workload comparison result, but CPU identity
+  and core topology do not gate the installer. Qualify processor performance
+  with a real NSTU workload.
 - A negotiated link below 100 Mbps fails the minimum network boundary; 100 Mbps
   passes the minimum and 1 Gbps is recommended.
 - Windows 10 Education is potentially eligible for UWF after exact-build,
@@ -130,9 +131,9 @@ weakest-machine fixture:
 
 - Windows reports **Windows 10 Pro Education 22H2**, so Microsoft UWF is
   correctly audit-only for this image.
-- The VM exposes **3 GiB RAM** and **3 physical / 4 logical processors**. This
-  is below the 6 GiB minimum and is not the previously described 8 GiB test
-  configuration.
+- The VM exposes **3 GiB RAM** and **3 physical / 4 logical processors**. The
+  memory is below the 6 GiB minimum and is not the previously described 8 GiB
+  test configuration; the reported processor topology is informational only.
 - The reported **100000 Mbps Tailscale** link is an overlay/tunnel result and
   is not physical link evidence. NSTU now excludes tunnel adapters from the
   physical-link gate; rerun diagnostics with an operational Ethernet or Wi-Fi

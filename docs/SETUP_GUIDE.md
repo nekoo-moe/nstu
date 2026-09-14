@@ -13,11 +13,12 @@ existing opposite role before copying files.
 
 Developer CI also publishes a separate `nstu-<version>-internal-vm-setup.exe`
 artifact. It is visibly labeled **Internal VM Test**, records
-`BuildChannel=InternalVmTest`, and permits CPU/RAM capacity warnings so an
+`BuildChannel=InternalVmTest`, and permits RAM capacity warnings so an
 intentionally undersized development VM can exercise installation, UWF
 diagnostics, and reboot behavior. It does not change the production installer;
-the production gate remains 6 GiB RAM, four physical/logical processors, and a
-100 Mbps physical link. Never deploy the internal artifact to a school machine.
+the production gate remains 6 GiB RAM and a 100 Mbps physical link. CPU model,
+architecture, and core counts are recorded for information but do not block
+installation. Never deploy the internal artifact to a school machine.
 
 ### Clean-machine bootstrap
 

@@ -13,11 +13,12 @@ bao giờ cài đồng thời hai vai trò trong cùng thư mục. Installer ki�
 
 CI dành cho developer cũng phát hành artifact riêng
 `nstu-<version>-internal-vm-setup.exe`. Artifact được gắn nhãn **Internal VM
-Test**, ghi `BuildChannel=InternalVmTest` và cho phép cảnh báo CPU/RAM thấp để
+Test**, ghi `BuildChannel=InternalVmTest` và cho phép cảnh báo RAM thấp để
 kiểm thử cài đặt, diagnostics UWF và hành vi restart trên VM thiếu cấu hình.
 Artifact này không thay đổi installer production: bản production vẫn yêu cầu
-tối thiểu RAM 6 GiB, ít nhất 4 core vật lý và 4 core logical, cùng link vật lý
-100 Mbps. Không dùng artifact nội bộ trong trường học.
+tối thiểu RAM 6 GiB cùng link vật lý 100 Mbps. Model, kiến trúc và số core CPU
+được ghi lại để tham khảo nhưng không chặn cài đặt. Không dùng artifact nội bộ
+trong trường học.
 
 ### Bootstrap trên máy sạch
 

@@ -102,7 +102,7 @@ Function RolePageCreate
   ${NSD_CreateLabel} 0 154u 100% 36u "The client preflight checks the server before installation. A Windows restart is required after client installation and before any uninstall changes are made."
   Pop $0
 !if ${INTERNAL_TEST_BUILD}
-  ${NSD_CreateLabel} 0 196u 100% 30u "INTERNAL VM TEST: CPU and RAM capacity failures are warnings. Do not deploy this build to a school or production machine."
+  ${NSD_CreateLabel} 0 196u 100% 30u "INTERNAL VM TEST: RAM capacity failures are warnings. CPU details are informational in every build. Do not deploy this build to a school or production machine."
   Pop $0
 !endif
   StrCmp $Role "Server" nstu_role_page_server nstu_role_page_client

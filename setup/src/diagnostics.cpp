@@ -1237,9 +1237,9 @@ const NetworkScan* fastest_physical_network(const HardwareScan& hardware) {
 }
 
 DiagnosticResult check_hardware(const HardwareScan& hardware) {
-    const auto cpu = classify_processor(hardware.processor.x64,
-                                        hardware.processor.physical_cores,
-                                        hardware.processor.logical_processors);
+    const auto cpu_readiness = classify_processor(
+        hardware.processor.x64, hardware.processor.physical_cores,
+        hardware.processor.logical_processors);
     const auto memory = classify_memory_gib(
         hardware.memory.total_physical_bytes / (1024ull * 1024ull * 1024ull));
     const auto* fastest = fastest_physical_network(hardware);
@@ -1248,33 +1248,37 @@ DiagnosticResult check_hardware(const HardwareScan& hardware) {
         : std::max(fastest->transmit_link_speed_mbps,
                    fastest->receive_link_speed_mbps);
     const auto network = classify_link_speed_mbps(link);
-    const bool cpu_failure = cpu == Readiness::minimum_not_met;
     const bool memory_failure = memory == Readiness::minimum_not_met;
     const bool network_failure = network == Readiness::minimum_not_met;
-    const bool capacity_failure = cpu_failure || memory_failure;
+    const bool capacity_failure = memory_failure;
     const bool failure = network_failure ||
                          (capacity_failure && !kInternalTestBuild);
     const auto severity = failure
         ? DiagnosticSeverity::failure
         : (capacity_failure ? DiagnosticSeverity::warning
                             : DiagnosticSeverity::pass);
-    std::wstring detail = hardware.processor.model + L" | " +
+    std::wstring detail = hardware.processor.model + L" (" +
+                          hardware.processor.architecture + L") | " +
                           std::to_wstring(hardware.processor.physical_cores) +
                           L" physical / " +
                           std::to_wstring(hardware.processor.logical_processors) +
                           L" logical cores | " +
                           std::to_wstring(hardware.memory.total_physical_bytes /
                                           (1024ull * 1024ull * 1024ull)) +
-                          L" GiB RAM | " + std::to_wstring(link) + L" Mbps link";
+                          L" GiB RAM | " + std::to_wstring(link) +
+                          L" Mbps link | " +
+                          (cpu_readiness == Readiness::unrated
+                               ? L"CPU information only"
+                               : L"CPU assessment available");
     std::wstring remediation =
-        L"Install minimum: x64 with at least 4 physical/logical cores, 6 GiB RAM, and a 100 Mbps physical link. 8 GiB RAM and i5-6400-class performance are recommended references; the CPU model name is not required.";
+        L"Install minimum: 6 GiB RAM and a 100 Mbps physical link. Processor model and core counts are informational and never block installation; validate CPU performance with an NSTU workload test. Windows x64 remains required by the installer.";
     std::wstring remediation_vi =
-        L"Mức tối thiểu để cài: x64 với ít nhất 4 core vật lý/logical, RAM 6 GiB và link vật lý 100 Mbps. Khuyến nghị RAM 8 GiB và hiệu năng tương đương i5-6400; không bắt buộc đúng tên model CPU.";
+        L"Mức tối thiểu để cài: RAM 6 GiB và link vật lý 100 Mbps. Model CPU và số core chỉ mang tính thông tin, không bao giờ chặn cài đặt; hãy kiểm tra hiệu năng CPU bằng workload NSTU. Installer vẫn yêu cầu Windows x64.";
     if (capacity_failure && kInternalTestBuild && !network_failure) {
         remediation =
-            L"INTERNAL VM TEST override: CPU/RAM capacity is below the release minimum, but installation may continue for development testing only.";
+            L"INTERNAL VM TEST override: RAM capacity is below the release minimum, but installation may continue for development testing only.";
         remediation_vi =
-            L"Ghi đè INTERNAL VM TEST: CPU/RAM thấp hơn mức tối thiểu của bản phát hành nhưng có thể tiếp tục cài chỉ để kiểm thử phát triển.";
+            L"Ghi đè INTERNAL VM TEST: RAM thấp hơn mức tối thiểu của bản phát hành nhưng có thể tiếp tục cài chỉ để kiểm thử phát triển.";
     }
     return result("hardware", severity,
                   L"Hardware readiness", L"Mức đáp ứng phần cứng", detail, detail,
@@ -1832,12 +1836,11 @@ Readiness classify_link_speed_mbps(std::uint64_t mbps) noexcept {
     return mbps >= 1000 ? Readiness::good : Readiness::recommended_not_met;
 }
 
-Readiness classify_processor(bool x64, std::uint32_t physical,
-                             std::uint32_t logical) noexcept {
-    if (!x64 || physical < 4 || logical < 4) {
-        return Readiness::minimum_not_met;
-    }
-    return Readiness::good;
+Readiness classify_processor(bool, std::uint32_t,
+                             std::uint32_t) noexcept {
+    // VM topology and firmware reporting are unreliable performance gates.
+    // Keep processor data in the report and qualify it with real workloads.
+    return Readiness::unrated;
 }
 
 ClientRuntimeState classify_client_runtime(
