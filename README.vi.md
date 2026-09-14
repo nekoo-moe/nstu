@@ -1,4 +1,4 @@
-<img width="1700" height="1000" alt="nstu" src="https://github.com/user-attachments/assets/16236a59-5fd7-4a58-8985-482ba0f31a06" />
+<img width="1280" height="640" alt="photo_2026-09-11_19-20-47" src="https://github.com/user-attachments/assets/4b6c679a-a19a-47ec-9c8e-20b851e3ffe2" />
 
 ---
 
