@@ -537,3 +537,6 @@ try {
         Write-Host "Artifacts retained at $root"
     }
 }
+
+# PowerShell 7 otherwise propagates the last expected failing child process.
+exit 0
