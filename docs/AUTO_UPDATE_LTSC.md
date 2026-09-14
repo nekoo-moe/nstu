@@ -209,6 +209,20 @@ successful staging, health-check rollback, and cleanup. It does **not** stop a
 service, reboot Windows, contact an update server, modify Program Files, or
 change Deep Freeze. Real LTSC and Deep Freeze validation remains a release gate.
 
+Exam package deployment has an additional offline staging trial:
+
+~~~powershell
+pwsh -NoProfile -File packaging/test-exam-package-staging.ps1
+~~~
+
+The trial creates disposable ZIP archives and verifies bounded extraction,
+path/reparse/duplicate/collision rejection, archive and content digest pins,
+publisher-signature failure handling, idempotent content-addressed publication,
+and cleanup after a failed verification. It does not install a service, reboot
+Windows, download a package, or mutate a school's data root. The production
+certificate, chain/revocation policy, and WebView2 image matrix remain
+outstanding.
+
 ### Trial record: 2026-09-08
 
 The initial repository trial passed under PowerShell 7 and Windows PowerShell
@@ -220,8 +234,9 @@ maintenance cycle.
 
 ## Current status
 
-The current MVP has the signed-package and reboot-safe installer foundations,
-but does not yet ship a background auto-update client or a server-side release
-manifest service. The next implementation phase should add the update state
-machine behind an administrator-controlled feature flag, then run the trial
-harness and a disposable VM test before enabling it for any school.
+The current MVP has a deployment-owned, offline exam-package staging helper and
+the signed-package/reboot-safe installer foundations, but does not yet ship a
+background auto-update client or a server-side release manifest service. The
+next implementation phase should add the update state machine behind an
+administrator-controlled feature flag, then run the trial harness and a
+disposable VM test before enabling it for any school.

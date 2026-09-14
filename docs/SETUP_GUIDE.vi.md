@@ -9,6 +9,29 @@ tiên cho phép chọn **Install for Client** hoặc **Install for Server** và 
 bao giờ cài đồng thời hai vai trò trong cùng thư mục. Installer kiểm tra vai trò
 đối diện trước khi chép file.
 
+### Bản thử VM nội bộ
+
+CI dành cho developer cũng phát hành artifact riêng
+`nstu-<version>-internal-vm-setup.exe`. Artifact được gắn nhãn **Internal VM
+Test**, ghi `BuildChannel=InternalVmTest` và cho phép cảnh báo CPU/RAM thấp để
+kiểm thử cài đặt, diagnostics UWF và hành vi restart trên VM thiếu cấu hình.
+Artifact này không thay đổi installer production: bản production vẫn yêu cầu
+tối thiểu RAM 6 GiB, ít nhất 4 core vật lý và 4 core logical, cùng link vật lý
+100 Mbps. Không dùng artifact nội bộ trong trường học.
+
+### Bootstrap trên máy sạch
+
+Trên máy qualification sạch, `nstu-diagnostics.exe` chưa tồn tại trước khi
+installer hợp nhất được chuyển vào và chạy. Hãy chuyển
+`nstu-<version>-setup.exe` qua kênh do operator kiểm soát, kiểm tra chữ ký rồi
+chọn đúng một role. Installer chép diagnostics vào
+`C:\Program Files\NSTU\diagnostics\`; với client, Windows phải restart theo
+quy trình trước khi service hoạt động.
+
+Endpoint RDP hoặc port-forward tạm thời dùng để truy cập máy không phải cổng
+control của NSTU. Ở trang cài client, nhập đúng địa chỉ server NSTU và cổng
+control (`47001` mặc định), không nhập cổng remote-access tạm thời.
+
 Với client, nhập IP server và cổng điều khiển (`47001` mặc định). Installer chạy
 diagnostics trước khi đăng ký service, lưu địa chỉ server cho diagnostics sau
 khi đăng nhập, đăng ký `nstu-service` là service `LocalSystem` tự khởi động
@@ -35,12 +58,28 @@ bằng `--target=client` trên image client riêng.
 riêng bởi kỹ thuật viên. Các kiểm tra hiện tuần tự. Nếu không có
 `--auto-close`, cửa sổ giữ nguyên để xem lại. Với `--auto-close`, chỉ run hoàn
 toàn sạch mới tự đóng; warning và lỗi đều giữ cửa sổ, còn lỗi trả về exit code
-khác 0. Dùng `--report=<path>` để lưu kết quả JSON có cấu trúc;
-`--log=<path>` vẫn được giữ làm alias tương thích. Thêm
-`--diagnostics-stay-open` nếu kỹ thuật viên cần giữ cửa sổ khi toàn bộ kiểm tra
-đạt. Kiểm tra UWF chỉ đọc, không bật filter, sửa registry/service hoặc reboot.
+khác 0. Installer truyền `--installer --auto-close`; run có issue giữ cửa sổ
+trong sáu giây rồi tự đóng để preflight NSIS chạy đồng bộ không bị treo. Report
+được ghi trước khi thoát và exit code lỗi vẫn được giữ, nên NSIS có thể dừng cài
+đặt an toàn. Nhánh installer sạch đóng sau một khoảng trễ ngắn. Dùng
+`--diagnostics-stay-open` nếu kỹ thuật viên cần giữ cửa sổ của run sạch; không
+kết hợp cờ này với preflight installer đồng bộ. Khi dừng cài đặt, installer giữ
+report tại `%TEMP%\NSTU-installer-preflight.json`. Dùng `--report=<path>` để lưu
+kết quả JSON có cấu trúc; `--log=<path>` vẫn được giữ làm alias tương thích.
+Kiểm tra UWF chỉ đọc, không bật filter, sửa registry/service hoặc reboot.
 Edition không hỗ trợ và provider không khả dụng sẽ được báo warning, vì vậy
-Windows Pro/Home vẫn chỉ ở chế độ audit.
+Windows Pro/Home vẫn chỉ ở chế độ audit. Nếu edition được hỗ trợ nhưng truy
+vấn optional feature không hoàn tất, kết quả sẽ là `probe unavailable` thay vì
+`feature missing`; hãy chạy lại diagnostics với quyền cục bộ cần thiết và
+không bật UWF dựa trên kết quả chưa xác định.
+
+Trên image client được hỗ trợ, probe chỉ đọc còn báo trạng thái protected volume
+hiện tại/kế tiếp, số lượng exclusion mà không lưu tên path, loại/kích thước tối
+đa/mức sử dụng/threshold overlay và sức khỏe event UWF trong bảy ngày gần nhất.
+Công việc WMI có timeout giới hạn: các lần đọc exclusion dùng chung budget hai
+giây; mỗi event query có budget hai giây và giới hạn 256 event. Kết quả đọc một
+phần hoặc chạm giới hạn được báo warning, không được coi là phê duyệt. Các
+diagnostics này không triển khai mutation UWF nào.
 
 ```powershell
 & "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" --target=client --server-ip=192.168.10.10 --server-port=47001 --installer
@@ -64,6 +103,23 @@ các tài liệu Markdown nhưng không đóng gói ảnh chỉ dùng cho reposi
 `docs\assets\` như screenshot và logo đối tác. Standalone EXE không đăng ký
 service và không phải nguồn cài đặt được hỗ trợ.
 Hai vai trò đều được kiểm tra trước khi cài để tránh xung đột.
+Helper client cấu hình service, data root, recovery policy và ACL bảo vệ.
+Helper server kiểm tra role và data root được bảo vệ.
+
+Payload deployment cũng có `stage-exam-package.ps1`. Chạy script từ
+PowerShell elevated trên client sau khi chép archive `.nstuexam` và metadata
+release đã được phê duyệt. Phải cung cấp cả archive SHA-256 và unpacked content
+SHA-256; package production phải có detached publisher signature
+`manifest.p7s` cùng thumbprint certificate được phê duyệt. Truyền `-PublishRoot`
+là đường dẫn tuyệt đối bên dưới data root bền vững đã cấu hình cho client
+(mặc định khi cài là `%ProgramData%\NSTU\exams\packages`); helper không tự dò
+root hoặc tải/copy archive từ server. `-RequireAuthenticode` là policy bổ sung
+tùy chọn cho các file `.exe` và `.dll` trong package, tách biệt với detached
+manifest signature bắt buộc. Chỉ dùng helper để staging trên client, không dùng
+server data root. Helper không bật UWF hoặc thay đổi Deep Freeze. Package phải
+có `exam/web/index.html`; xem [định dạng package bài thi](EXAM_ASSESSMENT.vi.md).
+`-AllowUnsigned` và
+`-AllowNonElevatedTest` chỉ dành cho disposable developer test.
 
 ## Gỡ cài đặt bắt buộc restart
 

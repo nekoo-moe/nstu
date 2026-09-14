@@ -1,8 +1,12 @@
 # Thiết kế khôi phục trạng thái sau khi khởi động lại của NSTU
 
-Trạng thái: **chỉ là kiến trúc và kế hoạch an toàn. NSTU hiện chưa cung cấp
-khôi phục sau reboot và chưa thể thay thế Deep Freeze.** Installer và runtime
-hiện tại chưa bật code thay đổi write filter, bảo vệ volume hoặc UWF.
+Trạng thái: **kiến trúc và kế hoạch an toàn, cùng diagnostics UWF chỉ đọc đã
+được triển khai. NSTU hiện chưa cung cấp khôi phục sau reboot và chưa thể thay
+thế Deep Freeze.** Probe phía client có thể đọc trạng thái UWF hiện tại/kế tiếp,
+volume được bảo vệ, số lượng exclusion, cấu hình/mức sử dụng overlay và sức khỏe
+event gần đây, nhưng chưa có code bật, tắt, cấu hình write filter, bảo vệ volume
+hoặc mutation UWF. Target server coi UWF là không áp dụng và vẫn dùng storage
+persistent.
 
 Đây là tài liệu nguồn chuẩn trong repository cho trang GitHub Wiki tương lai.
 Tài liệu xác định kế hoạch thận trọng để quản lý tập trung máy phòng học.
@@ -22,6 +26,11 @@ Với overlay không persistent, restart Windows sẽ xóa các lần ghi bị c
 đưa volume được bảo vệ về trạng thái đã commit trước đó. NSTU chỉ nên phụ
 trách policy, diagnostics, điều phối có xác thực, monitoring và hướng dẫn
 recovery; Windows chịu trách nhiệm về filtering ở kernel.
+
+Mô tả rollback này có một giới hạn ở giai đoạn startup: Microsoft lưu ý một số
+hoạt động NTFS journal có thể xảy ra trước khi UWF bắt đầu bảo vệ volume. Phần
+implementation và acceptance test phải đo khoảng thời gian boot sớm này, không
+được hứa rollback tuyệt đối cho các lần ghi xảy ra trước khi filter hoạt động.
 
 Lựa chọn này giảm đáng kể attack surface ở kernel và tránh để NSTU phải tự xử
 lý tính nhất quán khi crash giữa NTFS, BitLocker, paging, hibernation,
@@ -109,25 +118,42 @@ recovery đã biết là tốt.
 
 ## Ranh giới quyền và ủy quyền
 
-Cấu hình UWF cần quyền cao. Nó phải nằm trong process LocalSystem
-nstu-service, sau một module typed nhỏ; không được chạy trong nstu-agent.exe
-hoặc giao diện tương tác của giáo viên.
+Cấu hình UWF cần quyền cao, nhưng `nstu-service` là network-facing không được
+trở thành control surface từ xa cho storage policy. Service có thể cung cấp
+capability và overlay health dạng read-only. Mutation UWF trong tương lai nên
+chạy ở `nstu-restore-helper.exe` riêng (hoặc LocalSystem service được cô lập
+tương đương), không có listening socket, có allowlist WMI tối thiểu và identity
+executable riêng. Helper chỉ nhận intent typed chặt qua IPC nội bộ có ACL; không
+được nhận command line, process path tùy ý hoặc raw WMI query do network service
+đưa vào.
 
-Các component phía service được đề xuất:
+Helper chạy trong Session 0 nên không thể hiện hộp thoại consent tương tác.
+Kỹ thuật viên phải xác nhận qua một interactive broker có quyền cao trong
+session của kỹ thuật viên hoặc trên Windows secure desktop. Confirmation phải
+gắn với intent ID, target device, policy revision và nonce ngắn hạn; helper
+kiểm tra binding đó trước khi đổi UWF. Cửa sổ trong Session 0, simulated click
+hoặc generic process-execution endpoint không phải là giải pháp chấp nhận được.
+Ranh giới này vẫn cần giữ nếu sau này kết quả chỉ đọc được đưa qua
+`nstu-service`; probe đã triển khai hiện chạy trong diagnostics helper độc lập.
+Teacher UI hoặc credential giáo viên thông thường không được mutation UWF.
+
+Các component restore được đề xuất (chia giữa service chỉ đọc, helper cô lập
+và broker tương tác):
 
 | Component | Trách nhiệm |
 | --- | --- |
-| RestoreCapabilityProbe | Đọc SKU/build, optional feature, current/next UWF, protected volume, exclusion, overlay và sức khỏe event UWF |
-| RestorePolicyValidator | Kiểm tra policy bất biến, có version, theo luật an toàn cục bộ |
-| UwfController | Gọi UWF WMI provider qua allowlist operation cố định |
+| RestoreCapabilityProbe | Đã triển khai trong diagnostics helper độc lập: đọc SKU/build, optional feature, current/next UWF, protected volume, số lượng exclusion, cấu hình/mức sử dụng overlay và sức khỏe event UWF; service chỉ đọc trong tương lai được phép dùng path này |
+| RestorePolicyValidator | Kiểm tra policy bất biến, có version, theo luật an toàn cục bộ trước khi gửi helper |
+| UwfController | Chỉ chạy trong helper cô lập và gọi UWF WMI provider qua allowlist operation cố định |
+| RestoreBroker | Thu local technician confirmation trong interactive session hoặc secure desktop và phát intent typed có nonce |
 | OverlayMonitor | Đọc consumption và event warning/critical, không đổi cấu hình |
-| MaintenanceCoordinator | Lưu transaction reboot/servicing có giới hạn và chạy kiểm tra sau boot |
+| MaintenanceCoordinator | Lưu transaction reboot/servicing có giới hạn và chạy kiểm tra sau boot mà không cấp mutation tùy ý cho network service |
 | RestoreAudit | Ghi ai yêu cầu, state nào đổi, kết quả đã kiểm tra; không ghi secret/screen data |
 
 Implementation nên dùng UWF WMI provider được tài liệu hóa làm API chính.
 uwfmgr.exe get-config có thể hữu ích cho kỹ thuật viên chẩn đoán độc lập,
-nhưng service không được tạo command line từ network input hoặc mở generic
-process-execution endpoint.
+nhưng service và helper đều không được tạo command line từ network input hoặc
+mở generic process-execution endpoint.
 
 Teacher control authentication hiện tại không đủ để cấp quyền cho storage
 policy. Trước khi cho phép mutation từ xa, NSTU cần role và credential riêng
@@ -135,6 +161,21 @@ cho deployment administrator. Mỗi request mutation phải là operation typed 
 chẽ, có intent ID duy nhất, target device, current state kỳ vọng, policy
 revision mong muốn, thời hạn, maintenance window và replay protection. Client
 phải tự kiểm tra lại mọi điều kiện trước khi đổi state.
+
+Lớp contract độc lập hiện đã được triển khai trong
+`common/include/nstu/maintenance_intent.hpp` và
+`common/src/maintenance_intent.cpp`. Contract dùng encoding little-endian cố
+định và canonical, deployment-key ID cùng domain HMAC-SHA-256 đầy đủ riêng,
+binding chính xác với target/current state, thời hạn tối đa 15 phút, policy
+revision không lùi, variant operation cố định và replay cache có giới hạn, từ
+chối khi đầy. Authorization thành công trả về capability nội bộ opaque chứa
+bản sao intent đã xác minh, vì vậy controller tương lai không cần nhận raw
+structure chưa ký. Thao tác áp dụng policy chỉ mang digest của policy bất biến
+đã review; format không thể mang command line, executable path, raw WMI query
+hay exclusion path tùy ý. Cache hiện chỉ tồn tại trong process và không thay
+thế maintenance transaction bền vững cần có trước khi reboot hoặc thực thi
+intent. Chưa có control-channel command, đường provision key, helper IPC,
+mutation UWF hay restart action nào sử dụng contract này.
 
 Các operation sau tối thiểu phải cần deployment-administrator:
 
@@ -167,6 +208,14 @@ Dữ liệu NSTU được phép tồn tại qua reboot chỉ gồm:
 - trạng thái transaction update/maintenance có giới hạn;
 - audit và health record có giới hạn;
 - network configuration được duyệt rõ ràng để enrollment ổn định.
+
+Client có thêm một ngoại lệ persistence rất hẹp:
+`exam-answer-outbox.bin` là hàng đợi retry có giới hạn, được bảo vệ bằng DPAPI
+phạm vi máy, chỉ chứa các event câu trả lời chưa nhận được xác nhận bền vững từ
+server. Đây không phải thư mục bài làm chung; server journal vẫn là nguồn dữ
+liệu chính thức và entry đã được ACK sẽ bị xóa. Ngoại lệ này chỉ áp dụng cho
+client; server không dùng UWF hay reboot-to-restore và giữ gói bài thi, journal
+chính thức cùng các bản export trên storage persistent.
 
 Thư mục executable NSTU, DLL, script, plugin/search path, startup entry và mọi
 thư mục có thể thực thi code không được cho học sinh ghi và không được exclude
@@ -245,22 +294,26 @@ Protection phải opt-in và tách khỏi cài NSTU thông thường.
 1. Inventory SKU/build, firmware mode, Secure Boot, disk layout, BitLocker,
    nơi giữ recovery key, free space, file system, Storage Spaces, page-file,
    security product, network profile và tất cả local account.
-2. Từ chối edition không hỗ trợ, Storage Spaces, UWF feature/WMI provider
+2. Nếu SKU được hỗ trợ nhưng truy vấn optional feature không xác định được,
+   phải báo **probe unavailable**, không coi đó là bằng chứng feature bị thiếu.
+   Chạy lại probe chỉ đọc với quyền cục bộ cần thiết trước khi quyết định
+   maintenance; probe không được bật UWF hoặc đổi state Windows.
+3. Từ chối edition không hỗ trợ, Storage Spaces, UWF feature/WMI provider
    không có, thiếu recovery material, file system lỗi hoặc image chưa qua test
    backup/restore.
-3. Tạo và kiểm tra image tốt trước khi bật protection. UWF không phải backup và
+4. Tạo và kiểm tra image tốt trước khi bật protection. UWF không phải backup và
    không sửa được baseline đã hỏng.
-4. Chỉ bật optional feature của Windows, restart, rồi xác nhận feature/WMI
+5. Chỉ bật optional feature của Windows, restart, rồi xác nhận feature/WMI
    provider khỏe.
-5. Khi filter đang tắt, áp dụng policy protected-volume, exclusion, overlay,
+6. Khi filter đang tắt, áp dụng policy protected-volume, exclusion, overlay,
    threshold và persistence đã review. Hiển thị side effect của UWF và yêu cầu
    local administrator xác nhận.
-6. Enable protection cho next session và restart bằng đường Windows/UWF đã
+7. Enable protection cho next session và restart bằng đường Windows/UWF đã
    được phê duyệt.
-7. Sau boot, kiểm tra current/next filter, volume identity, exclusion, overlay,
+8. Sau boot, kiểm tra current/next filter, volume identity, exclusion, overlay,
    threshold, Fast Startup, service account, agent session, enrollment, server
    handshake, snapshot, chat và audit persistence.
-8. Chạy sentinel test: tạo file thử vô hại trên protected volume, restart,
+9. Chạy sentinel test: tạo file thử vô hại trên protected volume, restart,
    chứng minh file biến mất, đồng thời chứng minh persistent state được duyệt
    vẫn còn. Chưa bật fleet control trước khi test này đạt.
 
@@ -323,8 +376,8 @@ servicing mode chạy thành công.
 
 ## Decommission và gỡ cài đặt
 
-NSTU không được xóa service quản lý rồi để máy ở trạng thái protected nhưng
-không ai quản lý.
+NSTU không được xóa các component quản lý (gồm service và helper restore trong
+tương lai) rồi để máy ở trạng thái protected nhưng không ai quản lý.
 
 1. Cần deployment-administrator authorization, kỹ thuật viên xác nhận tại máy
    và recovery key sẵn sàng.
@@ -337,11 +390,12 @@ không ai quản lý.
 5. Gỡ Windows UWF feature là hành động riêng cần xác nhận; không tự gỡ Windows
    component chỉ vì NSTU bị gỡ.
 
-Nếu service hỏng khi protection đang bật, recovery phải dùng quy trình Windows/
-UWF chính thức từ local recovery đáng tin cậy, known-good system image hoặc
-recovery media, cùng một cách đã kiểm thử để disable hoặc unconfigure UWF khi
-NSTU không khởi động được. NSTU phải phát hành quy trình đó và offline
-diagnostics package đã ký trước khi tính năng rời pilot.
+Nếu network service hoặc restore helper hỏng khi protection đang bật, recovery
+phải dùng quy trình Windows/UWF chính thức từ local recovery đáng tin cậy,
+known-good system image hoặc recovery media, cùng một cách đã kiểm thử để
+disable hoặc unconfigure UWF khi NSTU không khởi động được. NSTU phải phát
+hành quy trình đó và offline diagnostics package đã ký trước khi tính năng rời
+pilot.
 
 ## Hành vi khi lỗi
 
@@ -372,10 +426,18 @@ disposable. Không chạy mutation test sớm trên image production của trư�
 
 ### Gate 1: capability probe chỉ đọc
 
-- Unit test dùng WMI adapter giả và không thể đổi host.
-- Probe phân biệt đúng supported, unsupported, feature-missing và current/next
-  state không nhất quán.
-- Server UI đánh dấu tính năng experimental và read-only.
+Diagnostics độc lập hiện đã hoàn tất phần cục bộ chỉ đọc của gate này. Phần
+hiển thị fleet trên server vẫn là công việc tương lai.
+
+- Unit test kiểm tra parsing kết quả WMI và phân loại trạng thái UWF mà không
+  thay đổi host.
+- Probe phân biệt đúng supported, unsupported, trạng thái không xác định
+  (`probe unavailable`), feature-missing và current/next state không nhất quán.
+- Probe báo protected volume hiện tại/kế tiếp, số lượng exclusion nhưng không
+  ghi tên path, cấu hình/mức sử dụng/threshold overlay và sức khỏe event gần
+  đây. Timeout, kết quả đọc một phần và event query bị cắt ở giới hạn đều tạo
+  warning rõ ràng, không phê duyệt từ dữ liệu thiếu.
+- Server UI trong tương lai phải đánh dấu tính năng experimental và read-only.
 
 ### Gate 2: thử mutation trên VM persistent
 
@@ -413,8 +475,11 @@ disposable. Không chạy mutation test sớm trên image production của trư�
 ## Các giai đoạn bàn giao
 
 1. **Hoàn tất nghiên cứu:** tài liệu này và ma trận nguồn chính thức.
-2. **Telemetry read-only:** capability, current/next state, overlay health và
-   event log; production build chưa biên dịch mutation method.
+2. **Diagnostics cục bộ chỉ đọc đã triển khai:** capability, trạng thái filter
+   và protected volume hiện tại/kế tiếp, số lượng exclusion, cấu hình/sức khỏe
+   overlay và event log có giới hạn. Production build chưa biên dịch mutation
+   method; target server vẫn persistent và UWF không áp dụng ở đó. Fleet
+   telemetry và server UI vẫn là công việc tương lai.
 3. **Controller local cho lab:** WMI operation typed trong build flag lab-only,
    xác nhận tại máy và test VM persistent.
 4. **Servicing coordinator:** signed transaction state, tích hợp update,

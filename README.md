@@ -61,6 +61,9 @@ its threat model and unfinished production work public in
   paths, video pipeline, control channel, and known limitations.
 - [Security](docs/SECURITY.md): authentication, enrollment, secrets, and
   deployment boundaries.
+- [Computer-based assessment](docs/EXAM_ASSESSMENT.md): the optional native
+  WebView2 host, exam package boundaries, authenticated answer recovery, durable
+  outbox, and state-export formats.
 - [Development guide](docs/DEVELOPMENT.md): build options, tests, packaging,
   and CI workflow.
 - [Production validation](docs/PRODUCTION_VALIDATION.md): hardware, network,
@@ -105,12 +108,12 @@ real 50-client lab.
 
 | Role | Baseline target | Network |
 | --- | --- | --- |
-| Server | Intel Core i5-6400, 8 GB RAM, 512 MB free disk, Windows 10/11 x64 | Wired Gigabit Ethernet recommended |
-| Client | Intel Core i5-6400, 8 GB RAM, 512 MB free disk, Windows 10/11 x64 | Wired Ethernet recommended |
-| Router/switch | UDP multicast support, IGMPv2 or IGMPv3, IGMP snooping, and an IGMP querier | One controlled LAN/VLAN for the first deployment |
+| Server | Intel Core i5-6400, 6 GiB RAM minimum, 8 GiB recommended, 512 MiB free disk, Windows 10/11 x64 | Wired Gigabit Ethernet recommended |
+| Client | Intel Core i5-6400, 6 GiB RAM minimum, 8 GiB recommended, 512 MiB free disk, Windows 10/11 x64 | Wired Ethernet recommended |
+| Router/switch | Standard Ethernet switching/routing for authenticated TCP snapshots; IGMP snooping and an IGMP querier are optional future-video requirements | One controlled LAN/VLAN for the first deployment |
 
-For a server supervising 50 or more devices, 16 GB RAM and an SSD are prudent
-until the 8 GB target has passed long-duration hardware testing. Intel HD
+For a server supervising 50 or more devices, 16 GiB RAM and an SSD are prudent
+until the 8 GiB recommended baseline has passed long-duration hardware testing. Intel HD
 Graphics 530 is a baseline hardware-acceleration target, not a guarantee across
 all driver versions.
 
@@ -343,7 +346,7 @@ Teacher PC (NSTU Server)
           |
      Gigabit Ethernet
           |
-Managed switch / router with IGMP snooping + one IGMP querier
+Ethernet switch / router (TCP snapshots; IGMP optional for future H.264)
      |            |             |
  Client 01     Client 02      Client 50+
 ```
@@ -352,22 +355,26 @@ Before a production deployment:
 
 1. Put the server and clients on the same trusted VLAN or subnet for the first
    rollout.
-2. Enable IGMP snooping on managed switches and ensure exactly one router or
-   Layer-3 switch acts as the IGMP querier for that VLAN.
+2. Use a managed switch or router where practical. IGMP snooping and one IGMP
+   querier are required only for a future continuous H.264/multicast trial;
+   the supported snapshot path uses ordinary authenticated TCP connections.
 3. Do not expose NSTU control or video traffic directly to the internet.
 4. Prefer wired Ethernet. If Wi-Fi is used for testing, disable access-point
-   client isolation and confirm multicast is not rate-limited to legacy data
-   rates.
-5. Avoid unmanaged switches for a large room. Without IGMP snooping, multicast
-   may be flooded to every port. If multicast is blocked, the planned unicast
-   fallback increases server and switch bandwidth with every client.
-6. Keep Windows Firewall enabled. TCP `47001` is the default authenticated
-   control port and UDP `47000` is reserved for the video transport. Limit rules
-   to the classroom VLAN and the required executable; do not create broad
-   internet-facing rules.
+   client isolation and confirm the switch/AP can sustain the expected TCP
+   snapshot traffic.
+5. For snapshot-only deployment, an ordinary switch is sufficient if it meets
+   the measured client count and uplink capacity. Do not enable multicast just
+   to make discovery work. If the optional H.264 trial is enabled later,
+   validate IGMP snooping, querier, flooding, and unicast fallback separately.
+6. Keep Windows Firewall enabled. TCP `47001` is the required authenticated
+   control and snapshot port. UDP `47000` is reserved for the optional future
+   continuous-video transport and should remain closed unless that feature is
+   explicitly enabled. Limit rules to the classroom VLAN and required
+   executable; do not create broad internet-facing rules.
 
-Cross-VLAN multicast requires intentionally configured multicast routing. It
-should not be enabled merely to make discovery work.
+Cross-VLAN multicast is outside the supported snapshot deployment. If a future
+continuous-video trial needs it, configure multicast routing intentionally and
+validate it as a separate network change.
 
 ## Install the current test build
 
@@ -556,16 +563,46 @@ Install client
   -> provision a unique client identity and protected enrollment credential
   -> authenticate to the server over TCP
   -> register the device and receive room policy
-  -> receive an authenticated video-group configuration
-  -> join multicast, measure loss, and use bounded unicast fallback if needed
+  -> receive an authenticated snapshot schedule and room policy
+  -> capture bounded JPEG snapshots over the authenticated TCP connection
 ```
+
+The optional continuous H.264 path is not part of this enrollment flow. It may
+later add authenticated group membership and multicast/unicast transport after
+the dedicated switch, decoder, and loss-recovery validation gates pass.
 
 Connection preambles only reject obviously invalid peers quickly. Device
 identity is accepted only after the cryptographic handshake succeeds. The
 installer is the supported distribution for these scripts; copying only an EXE
 is insufficient for enrollment setup.
 
+### Staging an exam package
+
+Exam archives are staged on the client only by the administrator-owned helper
+shipped under
+`C:\Program Files\NSTU\docs\deployment\stage-exam-package.ps1`. The
+server remains the persistent owner of the original package and answer journal.
+The helper requires both the release archive SHA-256 and the unpacked content
+SHA-256, rejects unsafe ZIP entries and zip bombs, and publishes a
+content-addressed directory below the persistent client data root:
+
+~~~powershell
+$stager = "$env:ProgramFiles\NSTU\docs\deployment\stage-exam-package.ps1"
+& $stager -ArchivePath "D:\SecureTransfer\exam.nstuexam" -PublishRoot "$env:ProgramData\NSTU\exams\packages" -ExpectedArchiveSha256 "<archive-sha256>" -ExpectedContentSha256 "<content-sha256>" -TrustedPublisherThumbprint "<publisher-thumbprint>"
+~~~
+
+Production packages must contain a detached CMS/PKCS#7 `manifest.p7s`
+entry signed by the configured publisher. `-AllowUnsigned` and
+`-AllowNonElevatedTest` are internal-test switches only. The helper
+does not download packages or modify the server, UWF, or Deep Freeze state.
+
 ## Deep Freeze deployments
+
+UWF/reboot-to-restore trials and third-party Deep Freeze protection apply only
+to client machines. Never place the teacher server under UWF or Deep Freeze:
+exam packages, `exams/answer-journal.bin`, enrollment state, audit records, and
+diagnostic data must remain on persistent storage. The client's DPAPI-protected
+answer outbox is only a retry buffer; the server journal is authoritative.
 
 - Install binaries in the normal protected Windows location.
 - Reserve a thawed, ACL-restricted location for enrolled identity, protected

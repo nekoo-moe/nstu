@@ -62,15 +62,30 @@ technician. It displays checks sequentially. Without `--auto-close`, the window
 stays open for review. With `--auto-close`, only a completely clean run closes
 automatically for a technician run; warnings and failures remain visible, and
 failures return a non-zero exit code. The installer passes `--installer
---auto-close`, which closes the diagnostic window after the checks even when a
-warning or failure is present so the synchronous NSIS preflight cannot hang.
+--auto-close`; an issue run remains visible for six seconds, then closes so the
+synchronous NSIS preflight cannot hang. Its report is written before exit and
+the failure exit code is preserved, allowing NSIS to abort safely. The clean
+installer path closes after a short delay. Add `--diagnostics-stay-open` when a
+technician needs to keep a clean run visible; do not combine it with a
+synchronous installer preflight.
 The installer retains the report at `%TEMP%\NSTU-installer-preflight.json` when
 it aborts. Use `--report=<path>` to retain a structured JSON result list;
-`--log=<path>` is retained as a compatibility alias. Add
-`--diagnostics-stay-open` when a technician needs to keep a clean run visible.
+`--log=<path>` is retained as a compatibility alias.
 UWF checks are read-only and never enable the filter, change registry/service
 state, or reboot the machine. Unsupported editions and unavailable providers
 are reported as warnings so a Pro/Home installation remains audit-only.
+When a supported edition is detected but the optional-feature query itself
+cannot be completed, the result is reported as `probe unavailable` rather than
+`feature missing`; retry the diagnostic with the required local permissions and
+do not enable UWF based on an indeterminate result.
+
+On a supported client image, the read-only probe also reports current and next
+protected-volume state, exclusion counts without storing path names, overlay
+type/maximum size/consumption/thresholds, and UWF event health for the previous
+seven days. WMI work is timeout-bounded: exclusion reads share a two-second
+budget, and each event query has a two-second budget and a 256-event cap.
+Partial reads or a reached cap are reported as warnings rather than treated as
+approval. These diagnostics do not implement any UWF mutation.
 
 ```powershell
 & "$env:ProgramFiles\NSTU\diagnostics\nstu-diagnostics.exe" --target=client --server-ip=192.168.10.10 --server-port=47001 --installer
@@ -100,6 +115,22 @@ do not register services and are not a supported installation source.
 Both roles are checked before installation to prevent conflicts. The client
 helper configures the service, data root, recovery policy, and protected ACLs.
 The server helper validates the role and protected data root.
+
+The deployment payload also includes `stage-exam-package.ps1`. Run it from an
+elevated PowerShell session on the client after copying the approved
+`.nstuexam` archive and release metadata. Supply both the archive SHA-256 and
+the unpacked content SHA-256; production packages must include the detached
+`manifest.p7s` publisher signature and its approved certificate thumbprint.
+Pass an explicit absolute `-PublishRoot` under the configured persistent client
+data root (the installer default is `%ProgramData%\NSTU\exams\packages`); the
+helper does not discover a root or download/copy an archive from the server.
+`-RequireAuthenticode` is an optional additional policy gate for `.exe` and
+`.dll` files in a package; it is separate from the required detached manifest
+signature. Use the helper only for client staging, outside the server data
+root. It does not enable UWF or change Deep Freeze. Packages must contain
+`exam/web/index.html`; see the [exam package format](EXAM_ASSESSMENT.md).
+`-AllowUnsigned` and `-AllowNonElevatedTest` are limited to
+disposable developer tests.
 
 ## Uninstall requires a restart
 

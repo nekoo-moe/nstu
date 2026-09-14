@@ -12,11 +12,29 @@ nstu_enable_warnings(nstu_protocol_tests)
 nstu_enable_test_assertions(nstu_protocol_tests)
 add_test(NAME nstu.protocol COMMAND nstu_protocol_tests)
 
+add_executable(nstu_answer_journal_tests answer_journal_tests.cpp)
+target_link_libraries(nstu_answer_journal_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_answer_journal_tests)
+nstu_enable_test_assertions(nstu_answer_journal_tests)
+add_test(NAME nstu.answer_journal COMMAND nstu_answer_journal_tests)
+
 add_executable(nstu_protocol_headers_tests protocol_headers_tests.cpp)
 target_link_libraries(nstu_protocol_headers_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_protocol_headers_tests)
 nstu_enable_test_assertions(nstu_protocol_headers_tests)
 add_test(NAME nstu.protocol_headers COMMAND nstu_protocol_headers_tests)
+
+add_executable(nstu_exam_sync_tests exam_sync_tests.cpp)
+target_link_libraries(nstu_exam_sync_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_exam_sync_tests)
+nstu_enable_test_assertions(nstu_exam_sync_tests)
+add_test(NAME nstu.exam_sync COMMAND nstu_exam_sync_tests)
+
+add_executable(nstu_exam_control_tests exam_control_tests.cpp)
+target_link_libraries(nstu_exam_control_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_exam_control_tests)
+nstu_enable_test_assertions(nstu_exam_control_tests)
+add_test(NAME nstu.exam_control COMMAND nstu_exam_control_tests)
 
 add_executable(nstu_packet_loss_tests packet_loss_tests.cpp)
 target_link_libraries(nstu_packet_loss_tests PRIVATE nstu_common)
@@ -29,6 +47,12 @@ target_link_libraries(nstu_auth_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_auth_tests)
 nstu_enable_test_assertions(nstu_auth_tests)
 add_test(NAME nstu.auth COMMAND nstu_auth_tests)
+
+add_executable(nstu_maintenance_intent_tests maintenance_intent_tests.cpp)
+target_link_libraries(nstu_maintenance_intent_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_maintenance_intent_tests)
+nstu_enable_test_assertions(nstu_maintenance_intent_tests)
+add_test(NAME nstu.maintenance_intent COMMAND nstu_maintenance_intent_tests)
 
 add_executable(nstu_key_store_tests key_store_tests.cpp)
 target_link_libraries(nstu_key_store_tests PRIVATE nstu_common)
@@ -79,6 +103,12 @@ if(WIN32)
         nstu_enable_warnings(nstu_diagnostics_tests)
         nstu_enable_test_assertions(nstu_diagnostics_tests)
         add_test(NAME nstu.diagnostics COMMAND nstu_diagnostics_tests)
+
+        add_executable(nstu_diagnostics_startup_tests diagnostics_startup_tests.cpp)
+        target_link_libraries(nstu_diagnostics_startup_tests PRIVATE nstu_setup_diagnostics)
+        nstu_enable_warnings(nstu_diagnostics_startup_tests)
+        nstu_enable_test_assertions(nstu_diagnostics_startup_tests)
+        add_test(NAME nstu.diagnostics_startup COMMAND nstu_diagnostics_startup_tests)
     endif()
 endif()
 
@@ -101,6 +131,15 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_control_plane_tests)
     add_test(NAME nstu.control_plane COMMAND nstu_control_plane_tests)
 
+    add_executable(nstu_control_plane_exam_auth_tests
+        control_plane_exam_auth_tests.cpp)
+    target_link_libraries(nstu_control_plane_exam_auth_tests PRIVATE
+        nstu_server_state)
+    nstu_enable_warnings(nstu_control_plane_exam_auth_tests)
+    nstu_enable_test_assertions(nstu_control_plane_exam_auth_tests)
+    add_test(NAME nstu.control_plane_exam_auth
+        COMMAND nstu_control_plane_exam_auth_tests)
+
     add_executable(nstu_enrollment_transport_tests
         enrollment_transport_tests.cpp)
     target_link_libraries(nstu_enrollment_transport_tests PRIVATE
@@ -112,6 +151,20 @@ if(TARGET nstu_server_state)
 endif()
 
 if(TARGET nstu_client_platform)
+    add_executable(nstu_exam_bridge_tests exam_bridge_tests.cpp)
+    target_link_libraries(nstu_exam_bridge_tests PRIVATE nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_bridge_tests)
+    nstu_enable_test_assertions(nstu_exam_bridge_tests)
+    add_test(NAME nstu.exam_bridge COMMAND nstu_exam_bridge_tests)
+
+    add_executable(nstu_exam_host_protocol_tests
+        exam_host_protocol_tests.cpp)
+    target_link_libraries(nstu_exam_host_protocol_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_host_protocol_tests)
+    nstu_enable_test_assertions(nstu_exam_host_protocol_tests)
+    add_test(NAME nstu.exam_host_protocol COMMAND nstu_exam_host_protocol_tests)
+
     add_executable(nstu_client_ipc_tests client_ipc_tests.cpp)
     target_link_libraries(nstu_client_ipc_tests PRIVATE nstu_client_platform)
     nstu_enable_warnings(nstu_client_ipc_tests)

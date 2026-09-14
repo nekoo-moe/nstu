@@ -1,9 +1,12 @@
 # NSTU Reboot-to-Restore Design
 
-Status: **architecture and safety plan only. NSTU does not currently provide
-reboot-to-restore and cannot yet replace Deep Freeze.** No write-filter,
-volume-protection, or UWF mutation code is enabled in the current installer or
-runtime.
+Status: **architecture and safety plan with implemented read-only UWF
+diagnostics. NSTU does not currently provide reboot-to-restore and cannot yet
+replace Deep Freeze.** The client probe can inspect current and next UWF state,
+protected volumes, exclusion counts, overlay configuration/consumption, and
+recent event health, but no write-filter, volume-protection, or UWF mutation
+code is enabled. The server target treats UWF as not applicable and remains
+persistent.
 
 This document is the canonical repository source for a future GitHub Wiki page.
 It defines a conservative implementation plan for centrally managed lab PCs.
@@ -25,6 +28,12 @@ returns the protected volume to its previously committed state. NSTU's
 responsibility would be policy, diagnostics, authenticated orchestration,
 monitoring, and recovery guidance. Windows remains responsible for the
 kernel-mode filtering.
+
+This rollback description has a startup qualification: Microsoft notes that
+some NTFS journal activity can occur before UWF begins protecting the volume.
+The implementation and acceptance tests must measure that early-boot window
+and must not promise an absolute rollback guarantee for writes made before the
+filter is active.
 
 This choice materially reduces kernel attack surface and avoids making NSTU
 responsible for crash consistency across NTFS, BitLocker, paging, hibernation,
@@ -114,25 +123,43 @@ credentials, firewall policy, and a known-good recovery image.
 
 ## Privilege and authorization boundaries
 
-UWF configuration is privileged. It belongs in the existing LocalSystem
-`nstu-service` process, behind a small typed module; it must never run in
-`nstu-agent.exe` or the interactive teacher UI.
+UWF configuration is privileged, but the network-facing `nstu-service` must not
+become a remote storage-policy control surface. The service may expose
+read-only capability and overlay health. Future UWF mutation should run in a
+dedicated `nstu-restore-helper.exe` (or an equivalent isolated LocalSystem
+service) with no listening socket, a minimal WMI operation allowlist, and a
+separate executable identity. The helper must accept only strictly typed
+intents over ACL-protected local IPC; it must not accept a command line,
+arbitrary process path, or raw WMI query supplied by the network service.
 
-Proposed service-side components:
+The helper runs in Session 0 and therefore cannot display an interactive
+consent dialog. Local technician confirmation must be collected by a separate
+elevated interactive broker in the technician's session or on the Windows
+secure desktop. The confirmation is bound to the intent ID, target device,
+policy revision, and a short-lived nonce; the helper verifies that binding
+before changing UWF state. A Session 0 window, simulated click, or generic
+process-execution endpoint is not an acceptable substitute. This isolation
+remains required if read-only results are later exposed through `nstu-service`;
+the implemented probe currently runs in the standalone diagnostics helper. No
+teacher UI or ordinary teacher credential may mutate UWF.
+
+Proposed restore components (split between the read-only service, isolated
+helper, and interactive broker):
 
 | Component | Responsibility |
 | --- | --- |
-| `RestoreCapabilityProbe` | Read SKU/build, optional-feature state, current/next UWF state, protected volumes, exclusions, overlay configuration, and UWF event health |
-| `RestorePolicyValidator` | Validate an immutable, versioned policy against local safety rules |
-| `UwfController` | Call the documented UWF WMI provider through a fixed operation allowlist |
+| `RestoreCapabilityProbe` | Implemented in the standalone diagnostics helper: read SKU/build, optional-feature state, current/next UWF state, protected volumes, exclusion counts, overlay configuration/consumption, and UWF event health; a future read-only service path is allowed |
+| `RestorePolicyValidator` | Validate an immutable, versioned policy against local safety rules before it reaches the helper |
+| `UwfController` | Run only in the isolated helper and call the documented UWF WMI provider through a fixed operation allowlist |
+| `RestoreBroker` | Collect local technician confirmation in an interactive session or secure desktop and issue a nonce-bound typed intent |
 | `OverlayMonitor` | Read consumption and warning/critical events without changing configuration |
-| `MaintenanceCoordinator` | Persist a bounded reboot/servicing transaction and run post-boot checks |
+| `MaintenanceCoordinator` | Persist a bounded reboot/servicing transaction and run post-boot checks without granting the network service arbitrary mutation |
 | `RestoreAudit` | Record who requested an operation, what state changed, and the verified result, without secrets or screen data |
 
 The implementation should use the documented UWF WMI provider as the primary
 API. `uwfmgr.exe get-config` may be useful to technicians for independent
-diagnosis, but the service must not build a command line from network input or
-expose a generic process-execution endpoint.
+diagnosis, but neither the service nor the helper may build a command line from
+network input or expose a generic process-execution endpoint.
 
 Existing teacher control authentication is not sufficient authorization for
 storage policy. Before remote mutation is enabled, NSTU needs a separate
@@ -140,6 +167,22 @@ deployment-administrator role and credential. Each mutation request must be a
 strictly typed operation carrying a unique intent ID, target device, expected
 current state, desired policy revision, expiry time, maintenance window, and
 replay protection. The client revalidates every precondition locally.
+
+The standalone contract layer is now implemented in
+`common/include/nstu/maintenance_intent.hpp` and
+`common/src/maintenance_intent.cpp`. It uses a fixed little-endian canonical
+encoding, a deployment-key ID and a dedicated full HMAC-SHA-256 domain, exact
+target/current-state binding, a maximum 15-minute validity window, monotonic
+policy revisions, fixed operation variants, and a bounded replay cache that
+fails closed when full. Successful authorization returns an opaque in-process
+capability containing a copy of the verified intent, so a future controller
+does not need to accept a raw unsigned structure. Policy application carries
+only the digest of an immutable reviewed policy; the format cannot carry a
+command line, executable path, raw WMI query, or arbitrary exclusion path. The
+cache is process-local and is not a substitute for the durable maintenance
+transaction required before rebooting or executing an intent. No
+control-channel command, key provisioning path, helper IPC, UWF mutation, or
+restart action uses this contract yet.
 
 At minimum, these operations require deployment-administrator authorization:
 
@@ -173,6 +216,14 @@ Permitted persistent NSTU data is limited to:
 - bounded update/maintenance transaction state;
 - bounded audit and health records;
 - explicitly approved network configuration needed for stable enrollment.
+
+The client has one additional, narrowly scoped persistence exception:
+`exam-answer-outbox.bin` is a bounded, machine-DPAPI-protected retry buffer for
+answer events that have not yet received a durable server acknowledgement. It
+is not a general student-work directory, the server journal remains
+authoritative, and acknowledged entries are removed. The exception applies to
+the client only; the server never uses UWF or reboot-to-restore and keeps exam
+packages, the authoritative journal, and exports on its persistent storage.
 
 The NSTU executable directory, DLLs, scripts, plugin/search paths, startup
 entries, and any directory from which code can execute must not be writable by
@@ -254,23 +305,27 @@ Protection must be opt-in and separate from ordinary NSTU installation.
    BitLocker state, recovery-key custody, free space, file system, Storage
    Spaces use, page-file location, security products, network profile, and all
    local accounts.
-2. Reject unsupported editions, Storage Spaces, an unavailable UWF feature/WMI
+2. Treat a supported SKU with an indeterminate optional-feature query as
+   **probe unavailable**, not as evidence that the feature is missing. Retry the
+   read-only probe with the required local permissions before any maintenance
+   decision; the probe must not enable UWF or change Windows state.
+3. Reject unsupported editions, Storage Spaces, an unavailable UWF feature/WMI
    provider, missing recovery material, an unhealthy file system, or an image
    that has not passed backup and restore testing.
-3. Build and verify a known-good image before protection. UWF is not a backup
+4. Build and verify a known-good image before protection. UWF is not a backup
    and cannot repair a bad baseline.
-4. Enable only the Windows optional feature, then restart and verify that the
+5. Enable only the Windows optional feature, then restart and verify that the
    feature and WMI provider are healthy.
-5. While the filter is disabled, apply the reviewed protected-volume,
+6. While the filter is disabled, apply the reviewed protected-volume,
    exclusion, overlay, threshold, and persistence policy. Display all UWF side
    effects and require local administrator confirmation.
-6. Enable protection for the next session and restart through an approved
+7. Enable protection for the next session and restart through an approved
    Windows/UWF restart path.
-7. After boot, verify current and next filter state, protected volume identity,
+8. After boot, verify current and next filter state, protected volume identity,
    exclusions, overlay mode, thresholds, Fast Startup state, service account,
    agent session, enrollment, server handshake, snapshots, chat, and audit
    persistence.
-8. Perform a sentinel test: create a harmless test file on the protected
+9. Perform a sentinel test: create a harmless test file on the protected
    volume, restart, prove it disappeared, and prove approved persistent state
    survived. Do not enable fleet controls until this passes.
 
@@ -337,8 +392,8 @@ Windows servicing mode completed correctly.
 
 ## Decommission and uninstall
 
-NSTU must not remove the management service and leave a machine in an unknown,
-unmanaged protected state.
+NSTU must not remove its management components (including any future restore
+helper) and leave a machine in an unknown, unmanaged protected state.
 
 1. Require deployment-administrator authorization plus local technician
    confirmation and recovery-key availability.
@@ -351,11 +406,12 @@ unmanaged protected state.
 5. Removing the UWF Windows feature is a separate explicit action; do not remove
    a Windows component merely because NSTU is removed.
 
-If the service is damaged while protection is active, recovery uses documented
-Windows/UWF administration from a trusted local recovery procedure, a
-known-good system image or recovery media, and a tested way to disable or
-unconfigure UWF when NSTU cannot start. NSTU must publish that procedure and a
-signed offline diagnostics package before the feature can leave pilot status.
+If the network service or restore helper is damaged while protection is active,
+recovery uses documented Windows/UWF administration from a trusted local
+recovery procedure, a known-good system image or recovery media, and a tested
+way to disable or unconfigure UWF when NSTU cannot start. NSTU must publish
+that procedure and a signed offline diagnostics package before the feature can
+leave pilot status.
 
 ## Failure behavior
 
@@ -387,10 +443,18 @@ production image.
 
 ### Gate 1: read-only capability probe
 
-- Unit tests use a fake WMI adapter and cannot change the host.
-- Probe correctly distinguishes supported, unsupported, feature-missing, and
-  inconsistent current/next states.
-- Server UI labels the function experimental and read-only.
+The standalone diagnostics implementation now covers the local read-only part
+of this gate. Server fleet presentation remains future work.
+
+- Unit tests cover WMI result parsing and UWF state classification without
+  changing the host.
+- Probe correctly distinguishes supported, unsupported, indeterminate
+  (`probe unavailable`), feature-missing, and inconsistent current/next states.
+- Probe reports current/next protected volumes, exclusion counts without path
+  names, overlay configuration/consumption/thresholds, and recent event health.
+  Timeouts, partial reads, and bounded event-query truncation produce explicit
+  warnings instead of approval from incomplete data.
+- A future server UI must label the function experimental and read-only.
 
 ### Gate 2: persistent VM mutation trial
 
@@ -429,8 +493,11 @@ production image.
 ## Delivery phases
 
 1. **Research complete:** this design and official-source matrix.
-2. **Read-only telemetry:** capability, current/next state, overlay health, and
-   event-log reporting; no mutation methods compiled into production builds.
+2. **Read-only local diagnostics implemented:** capability, current/next filter
+   and protected-volume state, exclusion counts, overlay configuration/health,
+   and bounded event-log reporting. No mutation methods are compiled into
+   production builds; the server target remains persistent and UWF is not
+   applicable there. Fleet telemetry and server UI remain future work.
 3. **Local lab controller:** typed WMI operations behind a lab-only build flag,
    local confirmation, and persistent-VM tests.
 4. **Servicing coordinator:** signed transaction state, update integration,

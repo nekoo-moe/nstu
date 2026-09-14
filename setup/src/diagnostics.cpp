@@ -4,16 +4,19 @@
 #include "nstu/protocol.hpp"
 #include "nstu/setup/driver_scan.hpp"
 #include "nstu/setup/hardware_scan.hpp"
+#include "wmi_read.hpp"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <ipifcons.h>
 #include <netlistmgr.h>
+#include <tlhelp32.h>
 #include <versionhelpers.h>
 #include <wbemidl.h>
 #include <winsvc.h>
 #include <wrl/client.h>
+#include <winevt.h>
 
 #include <algorithm>
 #include <array>
@@ -24,6 +27,7 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -176,6 +180,8 @@ private:
     BSTR value_ = nullptr;
 };
 
+using WmiFirstResult = detail::WmiReadResult;
+
 class WmiSession {
 public:
     bool connect(const wchar_t* namespace_name) {
@@ -188,7 +194,8 @@ public:
         Bstr ns(namespace_name);
         if (ns.get() == nullptr ||
             FAILED(locator->ConnectServer(ns.get(), nullptr, nullptr, nullptr,
-                                           0, nullptr, nullptr, &services_))) {
+                                           WBEM_FLAG_CONNECT_USE_MAX_WAIT,
+                                           nullptr, nullptr, &services_))) {
             return false;
         }
         return SUCCEEDED(CoSetProxyBlanket(
@@ -197,7 +204,38 @@ public:
             EOAC_NONE));
     }
 
+    WmiFirstResult first_result(
+        const wchar_t* query, ComPtr<IWbemClassObject>& object) const {
+        object.Reset();
+        if (!services_) {
+            return WmiFirstResult::error;
+        }
+        Bstr language(L"WQL");
+        Bstr text(query);
+        ComPtr<IEnumWbemClassObject> enumerator;
+        if (language.get() == nullptr || text.get() == nullptr ||
+            FAILED(services_->ExecQuery(language.get(), text.get(),
+                                         WBEM_FLAG_FORWARD_ONLY |
+                                             WBEM_FLAG_RETURN_IMMEDIATELY,
+                                         nullptr, &enumerator))) {
+            return WmiFirstResult::error;
+        }
+        ULONG returned = 0;
+        const HRESULT status =
+            enumerator->Next(2000, 1, object.GetAddressOf(), &returned);
+        const auto read = detail::classify_wmi_read(status, returned,
+                                                    object != nullptr);
+        if (read != WmiFirstResult::object) object.Reset();
+        return read;
+    }
+
     bool first(const wchar_t* query, ComPtr<IWbemClassObject>& object) const {
+        return first_result(query, object) == WmiFirstResult::object;
+    }
+
+    bool all(const wchar_t* query,
+             std::vector<ComPtr<IWbemClassObject>>& objects) const {
+        objects.clear();
         if (!services_) {
             return false;
         }
@@ -211,9 +249,39 @@ public:
                                          nullptr, &enumerator))) {
             return false;
         }
-        ULONG returned = 0;
-        return SUCCEEDED(enumerator->Next(2000, 1, &object, &returned)) &&
-               returned == 1;
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(2);
+        while (objects.size() < 256 &&
+               std::chrono::steady_clock::now() < deadline) {
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::milliseconds>(deadline -
+                                           std::chrono::steady_clock::now())
+                                       .count();
+            if (remaining <= 0) {
+                objects.clear();
+                return false;
+            }
+            ComPtr<IWbemClassObject> object;
+            ULONG returned = 0;
+            const HRESULT status = enumerator->Next(
+                static_cast<ULONG>(std::min<std::int64_t>(remaining, 2000)),
+                1, object.GetAddressOf(), &returned);
+            const auto read = detail::classify_wmi_read(status, returned,
+                                                       object != nullptr);
+            if (read == WmiFirstResult::error) {
+                objects.clear();
+                return false;
+            }
+            if (read == WmiFirstResult::empty) return true;
+            objects.push_back(std::move(object));
+            if (status == WBEM_S_FALSE) return true;
+        }
+        objects.clear();
+        return false;
+    }
+
+    [[nodiscard]] IWbemServices* services() const noexcept {
+        return services_.Get();
     }
 
 private:
@@ -256,21 +324,84 @@ bool variant_bool(IWbemClassObject* object, const wchar_t* name, bool& value) {
     return ok;
 }
 
+bool variant_string(IWbemClassObject* object, const wchar_t* name,
+                    std::wstring& value) {
+    detail::WmiVariant owned;
+    auto& variant = owned.value;
+    Bstr property(name);
+    const HRESULT status = object->Get(property.get(), 0, &variant, nullptr,
+                                       nullptr);
+    bool ok = false;
+    if (SUCCEEDED(status) && variant.vt == VT_BSTR && variant.bstrVal != nullptr) {
+        value.assign(variant.bstrVal, SysStringLen(variant.bstrVal));
+        ok = true;
+    }
+    return ok;
+}
+
+bool variant_int64(IWbemClassObject* object, const wchar_t* name,
+                   std::int64_t& value) {
+    VARIANT variant;
+    VariantInit(&variant);
+    Bstr property(name);
+    const HRESULT status = object->Get(property.get(), 0, &variant, nullptr,
+                                       nullptr);
+    bool ok = false;
+    if (SUCCEEDED(status)) {
+        switch (variant.vt) {
+        case VT_I4:
+            value = variant.lVal;
+            ok = true;
+            break;
+        case VT_UI4:
+            value = variant.ulVal;
+            ok = true;
+            break;
+        case VT_I8:
+            value = variant.llVal;
+            ok = true;
+            break;
+        case VT_UI8:
+            if (variant.ullVal <=
+                static_cast<ULONGLONG>(std::numeric_limits<std::int64_t>::max())) {
+                value = static_cast<std::int64_t>(variant.ullVal);
+                ok = true;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    VariantClear(&variant);
+    return ok;
+}
+
+bool object_path(IWbemClassObject* object, std::wstring& path) {
+    return variant_string(object, L"__PATH", path) && !path.empty();
+}
+
 bool query_optional_feature(bool& known, bool& enabled) {
+    known = false;
+    enabled = false;
     WmiSession session;
     if (!session.connect(L"ROOT\\cimv2")) {
         return false;
     }
     ComPtr<IWbemClassObject> object;
-    if (!session.first(
-            L"SELECT InstallState FROM Win32_OptionalFeature WHERE Name='Client-UnifiedWriteFilter'",
-            object)) {
+    const auto query = session.first_result(
+        L"SELECT InstallState FROM Win32_OptionalFeature WHERE Name='Client-UnifiedWriteFilter'",
+        object);
+    if (query == WmiFirstResult::empty) {
         known = true;
         enabled = false;
         return true;
     }
+    if (query != WmiFirstResult::object) {
+        return false;
+    }
     std::uint32_t state = 0;
-    if (!variant_uint32(object.Get(), L"InstallState", state)) {
+    if (!variant_uint32(object.Get(), L"InstallState", state) ||
+        state < 1 || state > 3) {
         return false;
     }
     known = true;
@@ -299,6 +430,331 @@ bool query_uwf_filter(UwfProbeSnapshot& snapshot) {
     snapshot.current_enabled = current;
     snapshot.next_enabled = next;
     return true;
+}
+
+bool call_get_exclusions(WmiSession& session, IWbemClassObject* volume,
+                         std::uint32_t& count, DWORD timeout_ms) {
+    count = 0;
+    std::wstring path;
+    if (!object_path(volume, path) || session.services() == nullptr) {
+        return false;
+    }
+    Bstr object_path_bstr(path.c_str());
+    Bstr method(L"GetExclusions");
+    ComPtr<IWbemClassObject> output;
+    ComPtr<IWbemCallResult> pending;
+    if (object_path_bstr.get() == nullptr || method.get() == nullptr ||
+        FAILED(session.services()->ExecMethod(
+            object_path_bstr.get(), method.get(), WBEM_FLAG_RETURN_IMMEDIATELY,
+            nullptr, nullptr, output.GetAddressOf(), &pending)) ||
+        (!output && !pending)) {
+        return false;
+    }
+    // ExecMethod may complete synchronously and return output parameters
+    // without an IWbemCallResult.  If it is genuinely pending, wait once
+    // within the same bounded timeout used by the other WMI calls.
+    if (!output &&
+        pending->GetResultObject(timeout_ms, output.GetAddressOf()) !=
+            WBEM_S_NO_ERROR) {
+        return false;
+    }
+    if (!output) return false;
+    std::uint32_t returned_status = 0;
+    if (!variant_uint32(output.Get(), L"ReturnValue", returned_status) ||
+        returned_status != 0) return false;
+    detail::WmiVariant exclusions;
+    Bstr property(L"ExcludedFiles");
+    const HRESULT status = output->Get(property.get(), 0, &exclusions.value,
+                                       nullptr, nullptr);
+    if (FAILED(status)) return false;
+    const auto parsed = detail::exclusion_count(exclusions.value);
+    if (!parsed) return false;
+    count = *parsed;
+    return true;
+}
+
+bool query_uwf_volumes(UwfVolumeSummary& summary) {
+    summary = {};
+    // Value-initialization clears the public default member initializer. Keep
+    // the accumulator optimistic and make it sticky only when a record cannot
+    // be decoded below.
+    summary.records_complete = true;
+    WmiSession session;
+    if (!session.connect(L"ROOT\\standardcimv2\\embedded")) {
+        return false;
+    }
+    std::vector<ComPtr<IWbemClassObject>> objects;
+    if (!session.all(
+            L"SELECT CurrentSession, DriveLetter, VolumeName, Protected FROM UWF_Volume",
+            objects)) {
+        return false;
+    }
+    summary.query_known = true;
+    summary.entries.reserve(objects.size());
+    for (const auto& object : objects) {
+        if (!object) {
+            summary.records_complete = false;
+            continue;
+        }
+        UwfVolumeEntry entry;
+        entry.session_known =
+            variant_bool(object.Get(), L"CurrentSession", entry.current_session);
+        entry.protected_known =
+            variant_bool(object.Get(), L"Protected", entry.protected_state);
+        summary.records_complete =
+            summary.records_complete && entry.session_known &&
+            entry.protected_known;
+        // DriveLetter is NULL for a volume without a mounted letter.  A
+        // missing string is therefore not itself a query failure.
+        variant_string(object.Get(), L"DriveLetter", entry.drive_letter);
+        variant_string(object.Get(), L"VolumeName", entry.volume_name);
+        summary.entries.push_back(std::move(entry));
+    }
+    return true;
+}
+
+bool query_uwf_exclusions(UwfExclusionSummary& summary) {
+    summary = {};
+    WmiSession session;
+    if (!session.connect(L"ROOT\\standardcimv2\\embedded")) {
+        return false;
+    }
+    std::vector<ComPtr<IWbemClassObject>> objects;
+    if (!session.all(
+            L"SELECT * FROM UWF_Volume",
+            objects)) {
+        return false;
+    }
+    summary.query_known = true;
+    summary.current_known = summary.next_known = true;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    for (const auto& object : objects) {
+        if (!object) {
+            detail::accumulate_exclusions(summary, std::nullopt, std::nullopt);
+            continue;
+        }
+        const auto remaining_ms = std::chrono::duration_cast<
+            std::chrono::milliseconds>(deadline -
+                                       std::chrono::steady_clock::now())
+                                        .count();
+        if (remaining_ms <= 0) {
+            summary.current_known = summary.next_known = false;
+            break;
+        }
+        bool current = false;
+        if (!variant_bool(object.Get(), L"CurrentSession", current)) {
+            // Keep the successful query visible, but mark the affected
+            // session as indeterminate rather than guessing its state.
+            detail::accumulate_exclusions(summary, std::nullopt, std::nullopt);
+            continue;
+        }
+        std::uint32_t count = 0;
+        if (!call_get_exclusions(
+                session, object.Get(), count,
+                static_cast<DWORD>(std::min<std::int64_t>(remaining_ms, 2000)))) {
+            detail::accumulate_exclusions(summary, current, std::nullopt);
+            continue;
+        }
+        detail::accumulate_exclusions(summary, current, count);
+    }
+    summary.current_known = summary.current_known && summary.current_volume_count != 0;
+    summary.next_known = summary.next_known && summary.next_volume_count != 0;
+    return true;
+}
+
+bool query_uwf_overlay(UwfOverlaySummary& summary) {
+    summary = {};
+    WmiSession session;
+    if (!session.connect(L"ROOT\\standardcimv2\\embedded")) {
+        return false;
+    }
+
+    std::vector<ComPtr<IWbemClassObject>> config_objects;
+    const bool config_query = session.all(
+        L"SELECT CurrentSession, Type, MaximumSize FROM UWF_OverlayConfig",
+        config_objects);
+    summary.config_known = config_query;
+    if (config_query) {
+        for (const auto& object : config_objects) {
+            if (!object) {
+                summary.config_known = false;
+                break;
+            }
+            bool current = false;
+            std::uint32_t type = 0;
+            std::int64_t maximum = -1;
+            if (!variant_bool(object.Get(), L"CurrentSession", current) ||
+                !variant_uint32(object.Get(), L"Type", type) ||
+                !variant_int64(object.Get(), L"MaximumSize", maximum)) {
+                summary.config_known = false;
+                break;
+            }
+            if (current ? summary.current_config_known : summary.next_config_known) {
+                summary.config_known = false;
+                break;
+            }
+            if (current) {
+                summary.current_config_known = true;
+                summary.current_type = type;
+                summary.current_maximum_size_mb = maximum;
+            } else {
+                summary.next_config_known = true;
+                summary.next_type = type;
+                summary.next_maximum_size_mb = maximum;
+            }
+        }
+    }
+
+    ComPtr<IWbemClassObject> overlay;
+    const bool overlay_query =
+        session.first(L"SELECT OverlayConsumption, WarningOverlayThreshold, "
+                      L"CriticalOverlayThreshold FROM UWF_Overlay",
+                      overlay);
+    if (overlay_query && overlay) {
+        std::uint32_t consumption = 0;
+        std::uint32_t warning = 0;
+        std::uint32_t critical = 0;
+        if (variant_uint32(overlay.Get(), L"OverlayConsumption", consumption) &&
+            variant_uint32(overlay.Get(), L"WarningOverlayThreshold", warning) &&
+            variant_uint32(overlay.Get(), L"CriticalOverlayThreshold", critical)) {
+            summary.consumption_known = true;
+            summary.consumption_mb = consumption;
+            summary.warning_threshold_mb = warning;
+            summary.critical_threshold_mb = critical;
+        }
+    }
+    summary.query_known = summary.config_known || summary.consumption_known;
+    return summary.query_known;
+}
+
+class EvtHandle {
+public:
+    EvtHandle() = default;
+    explicit EvtHandle(EVT_HANDLE handle) : handle_(handle) {}
+    ~EvtHandle() {
+        if (handle_ != nullptr) {
+            EvtClose(handle_);
+        }
+    }
+    EvtHandle(const EvtHandle&) = delete;
+    EvtHandle& operator=(const EvtHandle&) = delete;
+    EvtHandle(EvtHandle&& other) noexcept
+        : handle_(std::exchange(other.handle_, nullptr)) {}
+    EvtHandle& operator=(EvtHandle&& other) noexcept {
+        if (this != &other) {
+            if (handle_ != nullptr) {
+                EvtClose(handle_);
+            }
+            handle_ = std::exchange(other.handle_, nullptr);
+        }
+        return *this;
+    }
+    [[nodiscard]] EVT_HANDLE get() const noexcept { return handle_; }
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return handle_ != nullptr;
+    }
+
+private:
+    EVT_HANDLE handle_ = nullptr;
+};
+
+bool query_event_count(const wchar_t* channel, const wchar_t* query,
+                       std::uint32_t& count, bool& truncated) {
+    constexpr std::uint32_t kMaximumEvents = 256;
+    constexpr DWORD kQueryTimeoutMs = 2000;
+    count = 0;
+    EvtHandle result_set(EvtQuery(nullptr, channel, query,
+                                  EvtQueryChannelPath |
+                                      EvtQueryReverseDirection));
+    if (!result_set) {
+        return false;
+    }
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (count < kMaximumEvents) {
+        const auto remaining_ms = std::chrono::duration_cast<
+            std::chrono::milliseconds>(deadline -
+                                       std::chrono::steady_clock::now())
+                                       .count();
+        if (remaining_ms <= 0) return false;
+        std::array<EVT_HANDLE, 16> events{};
+        DWORD returned = 0;
+        if (!EvtNext(result_set.get(), static_cast<DWORD>(events.size()),
+                     events.data(), static_cast<DWORD>(std::min<std::int64_t>(
+                         remaining_ms, kQueryTimeoutMs)),
+                     0, &returned)) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_NO_MORE_ITEMS) {
+                return true;
+            }
+            return false;
+        }
+        for (DWORD index = 0; index < returned; ++index) {
+            if (events[index] != nullptr) {
+                EvtClose(events[index]);
+            }
+        }
+        const auto capacity_remaining = kMaximumEvents - count;
+        count += std::min<std::uint32_t>(capacity_remaining, returned);
+        if (returned == 0) {
+            return true;
+        }
+    }
+    truncated = true;
+    return true;
+}
+
+bool query_uwf_event_health(UwfEventHealthSummary& summary) {
+    summary = {};
+    constexpr wchar_t kRecentSystemWarning[] =
+        L"*[System[Provider[@Name='uwfvol'] and EventID=1 and "
+        L"TimeCreated[timediff(@SystemTime) <= 604800000]]]";
+    constexpr wchar_t kRecentSystemCritical[] =
+        L"*[System[Provider[@Name='uwfvol'] and EventID=2 and "
+        L"TimeCreated[timediff(@SystemTime) <= 604800000]]]";
+    constexpr wchar_t kRecentSystemInformational[] =
+        L"*[System[Provider[@Name='uwfvol'] and EventID=3 and "
+        L"TimeCreated[timediff(@SystemTime) <= 604800000]]]";
+    constexpr wchar_t kRecentAdminWarning[] =
+        L"*[System[(Level=3) and "
+        L"TimeCreated[timediff(@SystemTime) <= 604800000]]]";
+    constexpr wchar_t kRecentAdminError[] =
+        L"*[System[(Level=1 or Level=2) and "
+        L"TimeCreated[timediff(@SystemTime) <= 604800000]]]";
+    constexpr wchar_t kRecentOperational[] =
+        L"*[System[TimeCreated[timediff(@SystemTime) <= 604800000]]]";
+
+    bool system_ok =
+        query_event_count(L"System", kRecentSystemWarning,
+                          summary.warning_events, summary.truncated);
+    bool query_ok =
+        query_event_count(L"System", kRecentSystemCritical,
+                          summary.critical_events, summary.truncated);
+    system_ok = system_ok && query_ok;
+    query_ok = query_event_count(L"System", kRecentSystemInformational,
+                                 summary.informational_events,
+                                 summary.truncated);
+    system_ok = system_ok && query_ok;
+    summary.system_channel_known = system_ok;
+
+    bool admin_ok = query_event_count(
+        L"Microsoft-Windows-UnifiedWriteFilter/Admin", kRecentAdminWarning,
+        summary.admin_warning_events, summary.truncated);
+    query_ok = query_event_count(
+        L"Microsoft-Windows-UnifiedWriteFilter/Admin", kRecentAdminError,
+        summary.admin_error_events, summary.truncated);
+    admin_ok = admin_ok && query_ok;
+    summary.admin_channel_known = admin_ok;
+
+    summary.operational_channel_known = query_event_count(
+        L"Microsoft-Windows-UnifiedWriteFilter/Operational", kRecentOperational,
+        summary.operational_events,
+        summary.truncated);
+    summary.query_known = summary.system_channel_known ||
+                          summary.admin_channel_known ||
+                          summary.operational_channel_known;
+    return summary.query_known;
 }
 
 DiagnosticResult check_os() {
@@ -341,6 +797,16 @@ DiagnosticResult check_uwf(DiagnosticRole role) {
             L"Install a properly licensed Education, Enterprise, or IoT Enterprise edition, or use supported third-party freezing software.",
             L"Cài Windows Education, Enterprise hoặc IoT Enterprise có bản quyền, hoặc dùng phần mềm đóng băng bên thứ ba được hỗ trợ.");
     }
+    if (state == UwfState::probe_unavailable) {
+        return result(
+            "uwf", DiagnosticSeverity::warning, L"Reboot-to-restore probe",
+            L"Probe khôi phục sau reboot",
+            L"The Windows optional-feature state could not be determined by the read-only UWF probe; no UWF change was attempted.",
+            L"Không thể xác định trạng thái optional feature Windows bằng probe UWF chỉ đọc; không thực hiện thay đổi UWF nào.",
+            L"Retry from an elevated diagnostic session and verify the Windows WMI/optional-feature providers. Do not enable UWF based on this result alone.",
+            L"Thử lại từ phiên diagnostics có quyền nâng cao và kiểm tra provider WMI/optional feature của Windows. Không bật UWF chỉ dựa trên kết quả này.",
+            17);
+    }
     if (state == UwfState::feature_missing) {
         return result("uwf", DiagnosticSeverity::warning,
                       L"Reboot-to-restore support", L"Hỗ trợ khôi phục sau reboot",
@@ -381,6 +847,355 @@ DiagnosticResult check_uwf(DiagnosticRole role) {
                   L"Reboot-to-restore support", L"Hỗ trợ khôi phục sau reboot",
                   L"Supported edition and UWF provider detected; protection is not enabled.",
                   L"Đã phát hiện edition và provider UWF được hỗ trợ; protection chưa bật.");
+}
+
+std::wstring volume_display_name(const UwfVolumeEntry& entry) {
+    if (!entry.drive_letter.empty()) {
+        return entry.drive_letter;
+    }
+    if (!entry.volume_name.empty()) {
+        return L"volume-id";
+    }
+    return L"unmounted-volume";
+}
+
+DiagnosticResult check_uwf_volumes(DiagnosticRole role) {
+    if (role != DiagnosticRole::client ||
+        !is_uwf_supported_product(os_product_type())) {
+        return result(
+            "uwf_volumes", DiagnosticSeverity::not_applicable,
+            L"Protected UWF volumes", L"Volume UWF được bảo vệ",
+            L"Protected-volume probing is skipped because UWF is not applicable to this role or Windows edition.",
+            L"Đã bỏ qua probe volume được bảo vệ vì UWF không áp dụng cho role hoặc edition Windows này.");
+    }
+    UwfVolumeSummary summary;
+    if (!query_uwf_volumes(summary) || !summary.query_known) {
+        return result(
+            "uwf_volumes", DiagnosticSeverity::warning,
+            L"Protected UWF volumes", L"Volume UWF được bảo vệ",
+            L"The UWF_Volume provider could not be queried; protected-volume state is unavailable.",
+            L"Không thể truy vấn provider UWF_Volume; chưa xác định được trạng thái volume được bảo vệ.",
+            L"Verify the UWF optional feature/provider locally. Diagnostics did not change volume protection.",
+            L"Kiểm tra optional feature/provider UWF tại máy. Diagnostics không thay đổi bảo vệ volume.",
+            18);
+    }
+    std::uint32_t current_total = 0;
+    std::uint32_t next_total = 0;
+    std::uint32_t current_protected = 0;
+    std::uint32_t next_protected = 0;
+    std::wstring names;
+    for (const auto& entry : summary.entries) {
+        if (!entry.session_known || !entry.protected_known) {
+            continue;
+        }
+        if (entry.current_session) {
+            ++current_total;
+            if (entry.protected_state) {
+                ++current_protected;
+            }
+        } else {
+            ++next_total;
+            if (entry.protected_state) {
+                ++next_protected;
+            }
+        }
+        if (entry.protected_state && names.size() < 160) {
+            if (!names.empty()) {
+                names.append(L", ");
+            }
+            names.append(volume_display_name(entry));
+        }
+    }
+    std::wostringstream detail;
+    detail << L"Current session: " << current_protected << L" protected / "
+           << current_total << L" records; next session: " << next_protected
+           << L" protected / " << next_total << L" records";
+    if (!names.empty()) {
+        detail << L"; protected: " << names;
+    }
+    std::wostringstream detail_vi;
+    detail_vi << L"Phiên hiện tại: " << current_protected << L" được bảo vệ / "
+              << current_total << L" bản ghi; phiên kế tiếp: " << next_protected
+              << L" được bảo vệ / " << next_total << L" bản ghi";
+    if (!names.empty()) {
+        detail_vi << L"; volume được bảo vệ: " << names;
+    }
+
+    const auto same_volumes = detail::protected_volumes_match(summary);
+    if (!same_volumes.has_value()) {
+        return result(
+            "uwf_volumes", DiagnosticSeverity::warning,
+            L"Protected UWF volumes", L"Volume UWF được bảo vệ", detail.str(),
+            detail_vi.str(),
+            L"One or more UWF volume records had unreadable properties; do not approve a restore policy until rechecked.",
+            L"Một hoặc nhiều bản ghi volume UWF không đọc được thuộc tính; không phê duyệt policy restore trước khi kiểm tra lại.",
+            19);
+    }
+    if (summary.entries.empty() || current_protected == 0 || next_protected == 0) {
+        return result(
+            "uwf_volumes", DiagnosticSeverity::warning,
+            L"Protected UWF volumes", L"Volume UWF được bảo vệ", detail.str(),
+            detail_vi.str(),
+            L"No protected volume is confirmed for both sessions; configure and verify the reviewed client policy before rollout.",
+            L"Chưa xác nhận volume được bảo vệ ở cả hai phiên; cấu hình và kiểm tra policy client đã duyệt trước khi triển khai.",
+            20);
+    }
+    if (!*same_volumes) {
+        return result(
+            "uwf_volumes", DiagnosticSeverity::warning,
+            L"Protected UWF volumes", L"Volume UWF được bảo vệ", detail.str(),
+            detail_vi.str(),
+            L"Current and next protected-volume sets differ; a restart is pending.",
+            L"Tập volume được bảo vệ hiện tại và kế tiếp khác nhau; đang chờ restart.",
+            21);
+    }
+    return result("uwf_volumes", DiagnosticSeverity::pass,
+                  L"Protected UWF volumes", L"Volume UWF được bảo vệ",
+                  detail.str(), detail_vi.str());
+}
+
+DiagnosticResult check_uwf_exclusions(DiagnosticRole role) {
+    if (role != DiagnosticRole::client ||
+        !is_uwf_supported_product(os_product_type())) {
+        return result(
+            "uwf_exclusions", DiagnosticSeverity::not_applicable,
+            L"UWF file exclusions", L"Exclusion file UWF",
+            L"UWF exclusion probing is skipped because UWF is not applicable to this role or Windows edition.",
+            L"Đã bỏ qua probe exclusion UWF vì UWF không áp dụng cho role hoặc edition Windows này.");
+    }
+    UwfExclusionSummary summary;
+    if (!query_uwf_exclusions(summary) || !summary.query_known) {
+        return result(
+            "uwf_exclusions", DiagnosticSeverity::warning,
+            L"UWF file exclusions", L"Exclusion file UWF",
+            L"UWF exclusions could not be read from the provider.",
+            L"Không thể đọc exclusion UWF từ provider.",
+            L"Verify the UWF provider locally. Diagnostics never adds, removes, or changes exclusions.",
+            L"Kiểm tra provider UWF tại máy. Diagnostics không thêm, xóa hoặc thay đổi exclusion.",
+            22);
+    }
+    if (summary.current_volume_count == 0 && summary.next_volume_count == 0) {
+        return result(
+            "uwf_exclusions", DiagnosticSeverity::warning,
+            L"UWF file exclusions", L"Exclusion file UWF",
+            L"No UWF volume records were returned, so exclusions cannot be assessed.",
+            L"Không có bản ghi volume UWF; chưa thể đánh giá exclusion.",
+            L"Re-run the read-only probe after the UWF provider is healthy.",
+            L"Chạy lại probe chỉ đọc sau khi provider UWF hoạt động bình thường.",
+            23);
+    }
+    std::wostringstream detail;
+    detail << L"Current session: " << summary.current_exclusion_count
+           << L" exclusions across " << summary.current_volume_count
+           << L" volume records; next session: " << summary.next_exclusion_count
+           << L" exclusions across " << summary.next_volume_count
+           << L" volume records";
+    std::wostringstream detail_vi;
+    detail_vi << L"Phiên hiện tại: " << summary.current_exclusion_count
+              << L" exclusion trên " << summary.current_volume_count
+              << L" bản ghi volume; phiên kế tiếp: "
+              << summary.next_exclusion_count << L" exclusion trên "
+              << summary.next_volume_count << L" bản ghi volume";
+    if (!summary.current_known || !summary.next_known) {
+        return result(
+            "uwf_exclusions", DiagnosticSeverity::warning,
+            L"UWF file exclusions", L"Exclusion file UWF", detail.str(),
+            detail_vi.str(),
+            L"One session's exclusion list could not be read completely; review it locally before enabling protection.",
+            L"Không thể đọc đầy đủ exclusion của một phiên; hãy kiểm tra tại máy trước khi bật bảo vệ.",
+            24);
+    }
+    if (summary.current_exclusion_count != 0 ||
+        summary.next_exclusion_count != 0) {
+        return result(
+            "uwf_exclusions", DiagnosticSeverity::warning,
+            L"UWF file exclusions", L"Exclusion file UWF", detail.str(),
+            detail_vi.str(),
+            L"Exclusions create persistent write paths; verify every entry against the reviewed policy.",
+            L"Exclusion tạo đường ghi bền vững; kiểm tra từng mục theo policy đã duyệt.",
+            25);
+    }
+    return result("uwf_exclusions", DiagnosticSeverity::pass,
+                  L"UWF file exclusions", L"Exclusion file UWF", detail.str(),
+                  detail_vi.str());
+}
+
+std::wstring overlay_type_name(std::uint32_t type) {
+    switch (type) {
+    case 0:
+        return L"RAM";
+    case 1:
+        return L"disk";
+    default:
+        return L"unknown (" + std::to_wstring(type) + L")";
+    }
+}
+
+DiagnosticResult check_uwf_overlay(DiagnosticRole role) {
+    if (role != DiagnosticRole::client ||
+        !is_uwf_supported_product(os_product_type())) {
+        return result(
+            "uwf_overlay", DiagnosticSeverity::not_applicable,
+            L"UWF overlay configuration", L"Cấu hình overlay UWF",
+            L"UWF overlay probing is skipped because UWF is not applicable to this role or Windows edition.",
+            L"Đã bỏ qua probe overlay UWF vì UWF không áp dụng cho role hoặc edition Windows này.");
+    }
+    UwfOverlaySummary summary;
+    if (!query_uwf_overlay(summary) || !summary.query_known) {
+        return result(
+            "uwf_overlay", DiagnosticSeverity::warning,
+            L"UWF overlay configuration", L"Cấu hình overlay UWF",
+            L"UWF overlay configuration and consumption could not be read.",
+            L"Không thể đọc cấu hình và mức sử dụng overlay UWF.",
+            L"Verify the UWF provider locally. Diagnostics never changes overlay type, size, or thresholds.",
+            L"Kiểm tra provider UWF tại máy. Diagnostics không thay đổi loại, kích thước hoặc threshold overlay.",
+            26);
+    }
+    std::wostringstream detail;
+    detail << L"Current: ";
+    if (summary.current_config_known) {
+        detail << overlay_type_name(summary.current_type) << L", max "
+               << summary.current_maximum_size_mb << L" MB";
+    } else {
+        detail << L"unavailable";
+    }
+    detail << L"; next: ";
+    if (summary.next_config_known) {
+        detail << overlay_type_name(summary.next_type) << L", max "
+               << summary.next_maximum_size_mb << L" MB";
+    } else {
+        detail << L"unavailable";
+    }
+    if (summary.consumption_known) {
+        detail << L"; consumption " << summary.consumption_mb << L" MB"
+               << L" (warning " << summary.warning_threshold_mb << L" MB,"
+               << L" critical " << summary.critical_threshold_mb << L" MB)";
+    }
+    std::wostringstream detail_vi;
+    detail_vi << L"Hiện tại: ";
+    if (summary.current_config_known) {
+        detail_vi << overlay_type_name(summary.current_type) << L", tối đa "
+                  << summary.current_maximum_size_mb << L" MB";
+    } else {
+        detail_vi << L"không khả dụng";
+    }
+    detail_vi << L"; kế tiếp: ";
+    if (summary.next_config_known) {
+        detail_vi << overlay_type_name(summary.next_type) << L", tối đa "
+                  << summary.next_maximum_size_mb << L" MB";
+    } else {
+        detail_vi << L"không khả dụng";
+    }
+    if (summary.consumption_known) {
+        detail_vi << L"; đã dùng " << summary.consumption_mb << L" MB"
+                  << L" (warning " << summary.warning_threshold_mb << L" MB,"
+                  << L" critical " << summary.critical_threshold_mb << L" MB)";
+    }
+
+    if (!summary.config_known || !summary.current_config_known || !summary.next_config_known ||
+        !summary.consumption_known) {
+        return result(
+            "uwf_overlay", DiagnosticSeverity::warning,
+            L"UWF overlay configuration", L"Cấu hình overlay UWF", detail.str(),
+            detail_vi.str(),
+            L"Overlay state is incomplete; do not approve a restore policy until all read-only fields are available.",
+            L"Trạng thái overlay chưa đầy đủ; không phê duyệt policy restore trước khi đọc đủ các trường chỉ đọc.",
+            27);
+    }
+    const auto severity = detail::overlay_severity(summary);
+    if (severity == DiagnosticSeverity::failure) {
+        return result(
+            "uwf_overlay", DiagnosticSeverity::failure,
+            L"UWF overlay configuration", L"Cấu hình overlay UWF", detail.str(),
+            detail_vi.str(),
+            L"Overlay limits are invalid or the critical threshold has been reached. Stop rollout and follow the local recovery runbook.",
+            L"Giới hạn overlay không hợp lệ hoặc đã chạm critical threshold. Dừng triển khai và theo runbook recovery tại máy.",
+            28);
+    }
+    if (severity == DiagnosticSeverity::warning) {
+        return result(
+            "uwf_overlay", DiagnosticSeverity::warning,
+            L"UWF overlay configuration", L"Cấu hình overlay UWF", detail.str(),
+            detail_vi.str(),
+            L"The overlay policy is pending restart or has crossed its warning threshold; review before classroom use.",
+            L"Policy overlay đang chờ restart hoặc đã vượt warning threshold; kiểm tra trước khi dùng trong lớp.",
+            29);
+    }
+    return result("uwf_overlay", DiagnosticSeverity::pass,
+                  L"UWF overlay configuration", L"Cấu hình overlay UWF",
+                  detail.str(), detail_vi.str());
+}
+
+DiagnosticResult check_uwf_events(DiagnosticRole role) {
+    if (role != DiagnosticRole::client ||
+        !is_uwf_supported_product(os_product_type())) {
+        return result(
+            "uwf_events", DiagnosticSeverity::not_applicable,
+            L"UWF event health", L"Sức khỏe event UWF",
+            L"UWF event probing is skipped because UWF is not applicable to this role or Windows edition.",
+            L"Đã bỏ qua probe event UWF vì UWF không áp dụng cho role hoặc edition Windows này.");
+    }
+    UwfEventHealthSummary summary;
+    if (!query_uwf_event_health(summary) || !summary.query_known) {
+        return result(
+            "uwf_events", DiagnosticSeverity::warning,
+            L"UWF event health", L"Sức khỏe event UWF",
+            L"UWF event channels could not be queried; recent overlay/configuration health is unknown.",
+            L"Không thể truy vấn các channel event UWF; chưa xác định sức khỏe overlay/cấu hình gần đây.",
+            L"Verify read access to the System and UnifiedWriteFilter event channels. No event or UWF state was changed.",
+            L"Kiểm tra quyền đọc channel System và UnifiedWriteFilter. Không thay đổi event hoặc trạng thái UWF.",
+            30);
+    }
+    const auto health = classify_uwf_event_health(summary);
+    std::wostringstream detail;
+    detail << L"System uwfvol: warning " << summary.warning_events
+           << L", critical " << summary.critical_events << L", info "
+           << summary.informational_events << L"; Admin errors "
+           << summary.admin_error_events << L", warnings "
+           << summary.admin_warning_events << L"; channels: system "
+           << (summary.system_channel_known ? L"ok" : L"unavailable")
+           << L", admin "
+           << (summary.admin_channel_known ? L"ok" : L"unavailable")
+           << L", operational "
+           << (summary.operational_channel_known ? L"ok" : L"unavailable");
+    if (summary.truncated) {
+        detail << L"; bounded query limit reached";
+    }
+    std::wostringstream detail_vi;
+    detail_vi << L"System uwfvol: warning " << summary.warning_events
+              << L", critical " << summary.critical_events << L", info "
+              << summary.informational_events << L"; Admin errors "
+              << summary.admin_error_events << L", warnings "
+              << summary.admin_warning_events << L"; channel: system "
+              << (summary.system_channel_known ? L"ok" : L"không khả dụng")
+              << L", admin "
+              << (summary.admin_channel_known ? L"ok" : L"không khả dụng")
+              << L", operational "
+              << (summary.operational_channel_known ? L"ok" : L"không khả dụng");
+    if (summary.truncated) {
+        detail_vi << L"; đã chạm giới hạn truy vấn";
+    }
+    if (health == UwfEventHealth::critical) {
+        return result(
+            "uwf_events", DiagnosticSeverity::failure,
+            L"UWF event health", L"Sức khỏe event UWF", detail.str(),
+            detail_vi.str(),
+            L"Recent UWF critical/error events were detected. Stop rollout and inspect the local event details.",
+            L"Đã phát hiện event critical/error UWF gần đây. Dừng triển khai và kiểm tra chi tiết event tại máy.",
+            31);
+    }
+    if (health == UwfEventHealth::warning || summary.truncated) {
+        return result(
+            "uwf_events", DiagnosticSeverity::warning,
+            L"UWF event health", L"Sức khỏe event UWF", detail.str(),
+            detail_vi.str(),
+            L"Recent UWF warnings or a bounded event query require local review before rollout.",
+            L"Có warning UWF gần đây hoặc truy vấn event bị giới hạn; cần kiểm tra tại máy trước khi triển khai.",
+            32);
+    }
+    return result("uwf_events", DiagnosticSeverity::pass,
+                  L"UWF event health", L"Sức khỏe event UWF", detail.str(),
+                  detail_vi.str());
 }
 
 DiagnosticResult check_safe_mode() {
@@ -713,13 +1528,76 @@ DiagnosticResult check_installation(const DiagnosticOptions& options) {
                   L"Role NSTU và metadata cài đặt nhất quán.");
 }
 
+std::wstring normalized_image_path(const std::filesystem::path& path) {
+    auto value = path.lexically_normal().wstring();
+    if (value.starts_with(L"\\\\?\\")) {
+        value.erase(0, 4);
+    }
+    while (value.size() > 3 &&
+           (value.back() == L'\\' || value.back() == L'/')) {
+        value.pop_back();
+    }
+    return value;
+}
+
+bool installed_agent_running_in_session(
+    const std::filesystem::path& expected_path, DWORD session_id) {
+    const HANDLE process_snapshot =
+        CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (process_snapshot == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    const auto expected = normalized_image_path(expected_path);
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    bool found = false;
+    if (Process32FirstW(process_snapshot, &entry) != FALSE) {
+        do {
+            if (_wcsicmp(entry.szExeFile, L"nstu-agent.exe") != 0) {
+                continue;
+            }
+            DWORD process_session = 0;
+            if (ProcessIdToSessionId(entry.th32ProcessID, &process_session) ==
+                    FALSE ||
+                process_session != session_id) {
+                continue;
+            }
+            const HANDLE process = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+            if (process == nullptr) {
+                continue;
+            }
+            std::array<wchar_t, 32'768> image{};
+            DWORD image_length = static_cast<DWORD>(image.size());
+            const bool queried = QueryFullProcessImageNameW(
+                process, 0, image.data(), &image_length) != FALSE;
+            CloseHandle(process);
+            if (!queried || image_length == 0 ||
+                image_length >= image.size()) {
+                continue;
+            }
+            const auto actual = normalized_image_path(
+                std::filesystem::path(
+                    std::wstring_view(image.data(), image_length)));
+            if (_wcsicmp(actual.c_str(), expected.c_str()) == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(process_snapshot, &entry) != FALSE);
+    }
+    CloseHandle(process_snapshot);
+    return found;
+}
+
 DiagnosticResult check_service(const DiagnosticOptions& options) {
     if (options.role != DiagnosticRole::client || !options.boot_check) {
         return result("service", DiagnosticSeverity::not_applicable,
-                      L"Client service", L"Client service",
-                      L"Service verification runs on client boot checks.",
-                      L"Kiểm tra service chạy trong boot check của client.");
+                      L"Client runtime", L"Tiến trình client",
+                      L"Client runtime verification runs on client boot checks.",
+                      L"Kiểm tra tiến trình client chạy trong boot check của client.");
     }
+    ClientRuntimeSnapshot runtime;
     SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
     SC_HANDLE service = manager == nullptr
         ? nullptr
@@ -728,26 +1606,32 @@ DiagnosticResult check_service(const DiagnosticOptions& options) {
     if (service == nullptr) {
         if (manager != nullptr) CloseServiceHandle(manager);
         return result("service", DiagnosticSeverity::failure,
-                      L"Client service", L"Client service",
+                      L"Client runtime", L"Tiến trình client",
                       L"nstu-service is missing or cannot be queried.",
                       L"Thiếu nstu-service hoặc không thể truy vấn.", {}, {}, 14);
     }
+    runtime.service_present = true;
     SERVICE_STATUS_PROCESS status{};
     DWORD bytes = 0;
-    const bool running = QueryServiceStatusEx(
+    runtime.service_running = QueryServiceStatusEx(
         service, SC_STATUS_PROCESS_INFO, reinterpret_cast<BYTE*>(&status),
         sizeof(status), &bytes) != FALSE &&
         status.dwCurrentState == SERVICE_RUNNING;
+    DWORD service_session = std::numeric_limits<DWORD>::max();
+    runtime.service_session_zero = runtime.service_running &&
+        status.dwProcessId != 0 &&
+        ProcessIdToSessionId(status.dwProcessId, &service_session) != FALSE &&
+        service_session == 0;
     DWORD required = 0;
     QueryServiceConfigW(service, nullptr, 0, &required);
-    bool automatic = false;
-    bool local_system = false;
     if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && required > 0) {
         std::vector<std::byte> buffer(required);
         auto* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data());
         if (QueryServiceConfigW(service, config, required, &required)) {
-            automatic = config->dwStartType == SERVICE_AUTO_START;
-            local_system = config->lpServiceStartName != nullptr &&
+            runtime.service_automatic =
+                config->dwStartType == SERVICE_AUTO_START;
+            runtime.service_local_system =
+                config->lpServiceStartName != nullptr &&
                 (_wcsicmp(config->lpServiceStartName, L"LocalSystem") == 0 ||
                  _wcsicmp(config->lpServiceStartName,
                           L"NT AUTHORITY\\SYSTEM") == 0);
@@ -755,14 +1639,101 @@ DiagnosticResult check_service(const DiagnosticOptions& options) {
     }
     CloseServiceHandle(service);
     CloseServiceHandle(manager);
-    const bool ok = running && automatic && local_system;
-    return result("service", ok ? DiagnosticSeverity::pass
-                                 : DiagnosticSeverity::failure,
-                  L"Client service", L"Client service",
-                  ok ? L"Automatic LocalSystem service is running in Session 0."
-                     : L"nstu-service is not running with the required automatic LocalSystem configuration.",
-                  ok ? L"Service LocalSystem tự động đang chạy trong Session 0."
-                     : L"nstu-service chưa chạy với cấu hình LocalSystem tự động bắt buộc.", {}, {}, ok ? 0 : 15);
+
+    std::wstring installation_root;
+    const bool has_root = read_reg_string(
+        HKEY_LOCAL_MACHINE,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU",
+        L"InstallLocation", installation_root);
+    const std::filesystem::path agent_path = has_root
+        ? std::filesystem::path(installation_root) / L"client" /
+              L"nstu-agent.exe"
+        : std::filesystem::path();
+    std::error_code agent_status_error;
+    runtime.agent_binary_present = !agent_path.empty() &&
+        std::filesystem::is_regular_file(agent_path, agent_status_error) &&
+        !agent_status_error;
+
+    DWORD interactive_session = 0;
+    runtime.interactive_session = ProcessIdToSessionId(
+        GetCurrentProcessId(), &interactive_session) != FALSE &&
+        interactive_session != 0 &&
+        interactive_session != std::numeric_limits<DWORD>::max();
+    if (runtime.service_running && runtime.service_automatic &&
+        runtime.service_local_system && runtime.service_session_zero &&
+        runtime.agent_binary_present && runtime.interactive_session) {
+        constexpr int kAgentProbeAttempts = 20;
+        constexpr DWORD kAgentProbeDelayMs = 250;
+        for (int attempt = 0; attempt < kAgentProbeAttempts; ++attempt) {
+            if (installed_agent_running_in_session(agent_path,
+                                                   interactive_session)) {
+                runtime.agent_running_in_session = true;
+                break;
+            }
+            if (attempt + 1 < kAgentProbeAttempts) {
+                Sleep(kAgentProbeDelayMs);
+            }
+        }
+    }
+
+    const auto state = classify_client_runtime(runtime);
+    switch (state) {
+    case ClientRuntimeState::ready:
+        return result(
+            "service", DiagnosticSeverity::pass,
+            L"Client runtime", L"Client runtime",
+            L"The automatic LocalSystem service is running in Session 0 and the installed agent is running in this interactive session.",
+            L"Service LocalSystem tự động đang chạy trong Session 0 và agent đã cài đang chạy trong session tương tác này.");
+    case ClientRuntimeState::service_missing:
+        return result("service", DiagnosticSeverity::failure,
+                      L"Client runtime", L"Client runtime",
+                      L"nstu-service is missing or cannot be queried.",
+                      L"Thiếu nstu-service hoặc không thể truy vấn.", {}, {},
+                      14);
+    case ClientRuntimeState::service_not_running:
+        return result("service", DiagnosticSeverity::failure,
+                      L"Client runtime", L"Client runtime",
+                      L"nstu-service is installed but is not running.",
+                      L"nstu-service đã cài nhưng không chạy.", {}, {}, 15);
+    case ClientRuntimeState::service_not_automatic:
+        return result("service", DiagnosticSeverity::failure,
+                      L"Client runtime", L"Client runtime",
+                      L"nstu-service is not configured for automatic startup.",
+                      L"nstu-service chưa được cấu hình tự khởi động.", {}, {},
+                      16);
+    case ClientRuntimeState::service_wrong_account:
+        return result("service", DiagnosticSeverity::failure,
+                      L"Client runtime", L"Client runtime",
+                      L"nstu-service is not configured for LocalSystem.",
+                      L"nstu-service chưa được cấu hình chạy bằng LocalSystem.",
+                      {}, {}, 17);
+    case ClientRuntimeState::service_wrong_session:
+        return result("service", DiagnosticSeverity::failure,
+                      L"Client runtime", L"Client runtime",
+                      L"nstu-service is not running in Session 0.",
+                      L"nstu-service không chạy trong Session 0.", {}, {}, 18);
+    case ClientRuntimeState::agent_binary_missing:
+        return result("service", DiagnosticSeverity::failure,
+                      L"Client runtime", L"Client runtime",
+                      L"The installed nstu-agent.exe binary is missing.",
+                      L"Thiếu binary nstu-agent.exe đã cài.", {}, {}, 19);
+    case ClientRuntimeState::interactive_session_unavailable:
+        return result("service", DiagnosticSeverity::failure,
+                      L"Client runtime", L"Client runtime",
+                      L"Diagnostics is not running in an interactive user session.",
+                      L"Diagnostics không chạy trong session người dùng tương tác.",
+                      {}, {}, 20);
+    case ClientRuntimeState::agent_not_running:
+    default:
+        return result(
+            "service", DiagnosticSeverity::failure,
+            L"Client runtime", L"Client runtime",
+            L"The installed nstu-agent.exe did not start in this interactive session.",
+            L"nstu-agent.exe đã cài không khởi động trong session tương tác này.",
+            L"Restart the client once. If the issue remains, repair the client role with the signed installer.",
+            L"Restart client một lần. Nếu lỗi còn, sửa role client bằng installer đã ký.",
+            21);
+    }
 }
 
 DiagnosticResult check_registry() {
@@ -813,7 +1784,10 @@ UwfState classify_uwf(const UwfProbeSnapshot& snapshot) noexcept {
     if (!is_uwf_supported_product(snapshot.product_type)) {
         return UwfState::unsupported_edition;
     }
-    if (!snapshot.feature_known || !snapshot.feature_enabled) {
+    if (!snapshot.feature_known) {
+        return UwfState::probe_unavailable;
+    }
+    if (!snapshot.feature_enabled) {
         return UwfState::feature_missing;
     }
     if (!snapshot.provider_available || !snapshot.filter_state_known) {
@@ -824,6 +1798,27 @@ UwfState classify_uwf(const UwfProbeSnapshot& snapshot) noexcept {
     }
     return snapshot.current_enabled ? UwfState::enabled
                                     : UwfState::available_unconfigured;
+}
+
+UwfEventHealth classify_uwf_event_health(
+    const UwfEventHealthSummary& summary) noexcept {
+    // A query that did not establish any channel state is not evidence of a
+    // healthy UWF installation. Keep this distinction explicit so callers can
+    // present a retry/read-access remediation instead of a false pass.
+    if (!summary.query_known ||
+        (!summary.system_channel_known && !summary.admin_channel_known &&
+         !summary.operational_channel_known)) {
+        return UwfEventHealth::unavailable;
+    }
+    if (summary.critical_events != 0 || summary.admin_error_events != 0) {
+        return UwfEventHealth::critical;
+    }
+    if (summary.warning_events != 0 || summary.admin_warning_events != 0 ||
+        summary.truncated || !summary.system_channel_known ||
+        !summary.admin_channel_known || !summary.operational_channel_known) {
+        return UwfEventHealth::warning;
+    }
+    return UwfEventHealth::healthy;
 }
 
 Readiness classify_memory_gib(std::uint64_t gib) noexcept {
@@ -845,10 +1840,43 @@ Readiness classify_processor(bool x64, std::uint32_t physical,
     return Readiness::good;
 }
 
+ClientRuntimeState classify_client_runtime(
+    const ClientRuntimeSnapshot& snapshot) noexcept {
+    if (!snapshot.service_present) {
+        return ClientRuntimeState::service_missing;
+    }
+    if (!snapshot.service_running) {
+        return ClientRuntimeState::service_not_running;
+    }
+    if (!snapshot.service_automatic) {
+        return ClientRuntimeState::service_not_automatic;
+    }
+    if (!snapshot.service_local_system) {
+        return ClientRuntimeState::service_wrong_account;
+    }
+    if (!snapshot.service_session_zero) {
+        return ClientRuntimeState::service_wrong_session;
+    }
+    if (!snapshot.agent_binary_present) {
+        return ClientRuntimeState::agent_binary_missing;
+    }
+    if (!snapshot.interactive_session) {
+        return ClientRuntimeState::interactive_session_unavailable;
+    }
+    if (!snapshot.agent_running_in_session) {
+        return ClientRuntimeState::agent_not_running;
+    }
+    return ClientRuntimeState::ready;
+}
+
 std::vector<DiagnosticCheck> diagnostic_checks(const DiagnosticOptions&) {
     std::vector<DiagnosticCheck> checks = {
         {"os", L"Operating system", L"Hệ điều hành"},
         {"uwf", L"Reboot-to-restore support", L"Hỗ trợ khôi phục sau reboot"},
+        {"uwf_volumes", L"Protected UWF volumes", L"Volume UWF được bảo vệ"},
+        {"uwf_exclusions", L"UWF file exclusions", L"Exclusion file UWF"},
+        {"uwf_overlay", L"UWF overlay configuration", L"Cấu hình overlay UWF"},
+        {"uwf_events", L"UWF event health", L"Sức khỏe event UWF"},
         {"safe_mode", L"Safe Mode", L"Safe Mode"},
         {"installation", L"Installation integrity", L"Toàn vẹn cài đặt"},
         {"registry", L"NSTU registry", L"Registry NSTU"},
@@ -860,7 +1888,7 @@ std::vector<DiagnosticCheck> diagnostic_checks(const DiagnosticOptions&) {
         {"internet", L"Public Internet", L"Internet công cộng"},
         {"server", L"NSTU server reachability", L"Khả năng kết nối server NSTU"},
     };
-    checks.push_back({"service", L"Client service", L"Client service"});
+    checks.push_back({"service", L"Client runtime", L"Tiến trình client"});
     return checks;
 }
 
@@ -868,7 +1896,10 @@ void run_startup_diagnostics(const DiagnosticOptions& options,
                              const DiagnosticStartSink& on_start,
                              const DiagnosticResultSink& on_result) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool uninitialize = com == S_OK || com == S_FALSE;
+    struct ComScope {
+        bool initialized;
+        ~ComScope() { if (initialized) CoUninitialize(); }
+    } com_scope{com == S_OK || com == S_FALSE};
     const auto hardware = scan_hardware();
     const auto checks = diagnostic_checks(options);
     auto run = [&](const DiagnosticCheck& check, auto&& function) {
@@ -882,22 +1913,36 @@ void run_startup_diagnostics(const DiagnosticOptions& options,
                              L"Probe chẩn đoán thất bại ngoài dự kiến.", {}, {}, 0xffff));
         }
     };
-    run(checks[0], [] { return check_os(); });
-    run(checks[1], [&] { return check_uwf(options.role); });
-    run(checks[2], [] { return check_safe_mode(); });
-    run(checks[3], [&] { return check_installation(options); });
-    run(checks[4], [] { return check_registry(); });
-    run(checks[5], [&] { return check_hardware(hardware); });
-    run(checks[6], [&] { return check_network(hardware); });
-    run(checks[7], [] { return check_graphics(); });
-    run(checks[8], [&] { return check_encoder(options.role); });
-    run(checks[9], [] { return check_time(); });
-    run(checks[10], [] { return check_internet(); });
-    run(checks[11], [&] { return check_server(options); });
-    run(checks[12], [&] { return check_service(options); });
-    if (uninitialize) {
-        CoUninitialize();
-    }
+    // Resolve checks by stable identifier rather than relying on vector
+    // positions. This keeps the progress/report stream correct when a probe is
+    // inserted or reordered, and avoids out-of-bounds access if the catalogue
+    // changes independently of this dispatcher.
+    auto run_named = [&](std::string_view id, auto&& function) {
+        const auto found = std::find_if(
+            checks.begin(), checks.end(),
+            [id](const DiagnosticCheck& check) { return check.id == id; });
+        if (found != checks.end()) {
+            run(*found, std::forward<decltype(function)>(function));
+        }
+    };
+    run_named("os", [] { return check_os(); });
+    run_named("uwf", [&] { return check_uwf(options.role); });
+    run_named("uwf_volumes", [&] { return check_uwf_volumes(options.role); });
+    run_named("uwf_exclusions",
+              [&] { return check_uwf_exclusions(options.role); });
+    run_named("uwf_overlay", [&] { return check_uwf_overlay(options.role); });
+    run_named("uwf_events", [&] { return check_uwf_events(options.role); });
+    run_named("safe_mode", [] { return check_safe_mode(); });
+    run_named("installation", [&] { return check_installation(options); });
+    run_named("registry", [] { return check_registry(); });
+    run_named("hardware", [&] { return check_hardware(hardware); });
+    run_named("network", [&] { return check_network(hardware); });
+    run_named("graphics", [] { return check_graphics(); });
+    run_named("encoder", [&] { return check_encoder(options.role); });
+    run_named("time", [] { return check_time(); });
+    run_named("internet", [] { return check_internet(); });
+    run_named("server", [&] { return check_server(options); });
+    run_named("service", [&] { return check_service(options); });
 }
 
 std::string json_escape(std::wstring_view value) {

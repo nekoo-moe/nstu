@@ -143,6 +143,51 @@ bool generate_random(std::span<std::byte> output) noexcept {
                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
 }
 
+std::optional<Sha256Digest> sha256(
+    std::span<const std::byte> message) noexcept {
+    if (message.size() > std::numeric_limits<ULONG>::max()) {
+        return std::nullopt;
+    }
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
+                                    nullptr, 0) != 0) {
+        return std::nullopt;
+    }
+    DWORD object_bytes = 0;
+    DWORD copied = 0;
+    if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                          reinterpret_cast<PUCHAR>(&object_bytes),
+                          sizeof(object_bytes), &copied, 0) != 0 ||
+        object_bytes == 0) {
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        return std::nullopt;
+    }
+    std::vector<UCHAR> hash_object(object_bytes);
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    const NTSTATUS create_status = BCryptCreateHash(
+        algorithm, &hash, hash_object.data(), object_bytes, nullptr, 0, 0);
+    Sha256Digest digest{};
+    const bool succeeded =
+        create_status == 0 &&
+        BCryptHashData(hash,
+                       const_cast<PUCHAR>(reinterpret_cast<const UCHAR*>(
+                           message.data())),
+                       static_cast<ULONG>(message.size()), 0) == 0 &&
+        BCryptFinishHash(hash, reinterpret_cast<PUCHAR>(digest.data()),
+                         static_cast<ULONG>(digest.size()), 0) == 0;
+    if (hash != nullptr) {
+        BCryptDestroyHash(hash);
+    }
+    secure_zero({reinterpret_cast<std::byte*>(hash_object.data()),
+                 hash_object.size()});
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (!succeeded) {
+        secure_zero(digest);
+        return std::nullopt;
+    }
+    return digest;
+}
+
 std::optional<Sha256Digest> hmac_sha256(
     std::span<const std::byte> key,
     std::span<const std::byte> message) noexcept {
@@ -302,6 +347,35 @@ std::optional<ControlAuthTag> compute_control_auth_tag(
     return tag;
 }
 
+std::optional<ControlAuthTag> compute_control_auth_tag(
+    std::span<const std::byte> session_key,
+    const protocol::CommandEnvelope& envelope, std::uint64_t sequence,
+    std::span<const std::byte> payload, ControlDirection direction) noexcept {
+    if (session_key.size() < kMinimumProtocolKeyBytes ||
+        (direction != ControlDirection::client_to_server &&
+         direction != ControlDirection::server_to_client)) {
+        return std::nullopt;
+    }
+    // V2 is intentionally an opt-in domain. The live v1 transport continues
+    // to use the neutral label until capability negotiation is deployed.
+    constexpr char label[] = "NSTU-CONTROL-FRAME-V2";
+    std::vector<std::byte> message{
+        reinterpret_cast<const std::byte*>(label),
+        reinterpret_cast<const std::byte*>(label) + sizeof(label) - 1};
+    message.push_back(static_cast<std::byte>(direction));
+    const auto header = protocol::encode_command_header(envelope);
+    message.insert(message.end(), header.begin(), header.end());
+    append_le(message, sequence);
+    message.insert(message.end(), payload.begin(), payload.end());
+    const auto digest = hmac_sha256(session_key, message);
+    if (!digest) {
+        return std::nullopt;
+    }
+    ControlAuthTag tag{};
+    std::copy_n(digest->begin(), tag.size(), tag.begin());
+    return tag;
+}
+
 bool verify_control_auth_tag(std::span<const std::byte> session_key,
                              const protocol::CommandEnvelope& envelope,
                              std::uint64_t sequence,
@@ -312,6 +386,20 @@ bool verify_control_auth_tag(std::span<const std::byte> session_key,
     }
     const auto expected = compute_control_auth_tag(session_key, envelope,
                                                    sequence, payload);
+    return expected && constant_time_equal(*expected, tag);
+}
+
+bool verify_control_auth_tag(std::span<const std::byte> session_key,
+                             const protocol::CommandEnvelope& envelope,
+                             std::uint64_t sequence,
+                             std::span<const std::byte> payload,
+                             ControlDirection direction,
+                             std::span<const std::byte> tag) noexcept {
+    if (tag.size() != kControlAuthTagBytes) {
+        return false;
+    }
+    const auto expected = compute_control_auth_tag(
+        session_key, envelope, sequence, payload, direction);
     return expected && constant_time_equal(*expected, tag);
 }
 

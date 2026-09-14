@@ -1,6 +1,7 @@
 #include "nstu/control_channel.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/control_plane.hpp"
+#include "nstu/exam_control.hpp"
 #include "nstu/multicast.hpp"
 
 #include <cassert>
@@ -138,6 +139,40 @@ int main() {
     assert(remote_end.has_value());
     assert(remote_end->envelope.type ==
            nstu::protocol::CommandType::remote_end);
+
+    nstu::exam::ExamStartRequest exam_start;
+    exam_start.package_root = "C:/ProgramData/NSTU/exams/sample";
+    exam_start.web_root = "C:/ProgramData/NSTU/exams/sample/exam/web";
+    exam_start.user_data_root = "C:/ProgramData/NSTU/exam-user-data";
+    exam_start.package_id = "sample-package";
+    exam_start.candidate_id = "candidate-01";
+    exam_start.client_id = id;
+    for (std::size_t index = 0; index < exam_start.package_digest.size(); ++index) {
+        exam_start.package_digest[index] = static_cast<std::byte>(index + 1);
+    }
+    for (std::size_t index = 0; index < exam_start.session_id.size(); ++index) {
+        exam_start.session_id[index] = static_cast<std::byte>(index + 0x10);
+    }
+    auto wrong_identity = exam_start;
+    wrong_identity.client_id[0] = std::byte{0xff};
+    assert(!control_plane.start_exam(registry_id, wrong_identity, &error));
+    assert(control_plane.start_exam(registry_id, exam_start, &error));
+    const auto exam_start_command = channel.receive(&error);
+    assert(exam_start_command.has_value());
+    assert(exam_start_command->envelope.type ==
+           nstu::protocol::CommandType::exam_start);
+    const auto decoded_exam_start =
+        nstu::exam::decode_exam_start_request(exam_start_command->payload);
+    assert(decoded_exam_start.has_value());
+    assert(decoded_exam_start->client_id == id);
+    assert(decoded_exam_start->package_id == exam_start.package_id);
+
+    assert(control_plane.stop_exam(registry_id, &error));
+    const auto exam_stop_command = channel.receive(&error);
+    assert(exam_stop_command.has_value());
+    assert(exam_stop_command->envelope.type ==
+           nstu::protocol::CommandType::exam_stop);
+    assert(exam_stop_command->payload.empty());
 
     nstu::control::SnapshotFrame host_frame;
     host_frame.width = 320;

@@ -122,8 +122,8 @@ if ($Role -eq "Server") {
         $tcpConflict = @(Get-NetTCPConnection -State Listen `
             -LocalPort $ControlPort -ErrorAction Stop)
     } catch {
-        $warnings.Add(("Could not query TCP listeners for port {0}: {1}. " +
-            "The port conflict check could not be completed." -f $ControlPort,
+        $warnings.Add((("Could not query TCP listeners for port {0}: {1}. " +
+            "The port conflict check could not be completed.") -f $ControlPort,
             $_.Exception.Message))
     }
     if ($null -ne $tcpConflict -and $tcpConflict.Count -gt 0) {
@@ -141,8 +141,8 @@ if ($Role -eq "Server") {
         $udpConflict = @(Get-NetUDPEndpoint -LocalPort $VideoPort `
             -ErrorAction Stop)
     } catch {
-        $warnings.Add(("Could not query UDP endpoints for port {0}: {1}. " +
-            "The port conflict check could not be completed." -f $VideoPort,
+        $warnings.Add((("Could not query UDP endpoints for port {0}: {1}. " +
+            "The port conflict check could not be completed.") -f $VideoPort,
             $_.Exception.Message))
     }
     if ($null -ne $udpConflict -and $udpConflict.Count -gt 0) {

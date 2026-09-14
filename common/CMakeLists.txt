@@ -3,11 +3,15 @@ add_library(nstu_common STATIC
     src/control_channel.cpp
     src/control_messages.cpp
     src/deployment.cpp
+    src/exam_control.cpp
+    src/exam_sync.cpp
+    src/answer_journal.cpp
     src/enrollment.cpp
     src/frame_reassembler.cpp
     src/iocp_dispatcher.cpp
     src/key_store.cpp
     src/keyring.cpp
+    src/maintenance_intent.cpp
     src/multicast.cpp
     src/network.cpp
     src/packet_loss.cpp

@@ -159,6 +159,19 @@ rollback do health check lỗi và cleanup. Trial không dừng service, không 
 không sửa Program Files, không gọi update server và không thay đổi Deep Freeze.
 Validation LTSC/Deep Freeze thực tế vẫn là production gate.
 
+Staging package bài thi có trial offline riêng:
+
+~~~powershell
+pwsh -NoProfile -File packaging/test-exam-package-staging.ps1
+~~~
+
+Trial tạo ZIP tạm và kiểm tra giải nén có giới hạn, từ chối path/reparse/
+duplicate/collision, kiểm tra pin archive và content digest, xử lý chữ ký
+publisher lỗi, publish content-addressed lặp lại an toàn và cleanup khi
+verification thất bại. Trial không cài service, không reboot Windows, không
+tải package và không sửa data root của trường. Certificate production,
+chain/revocation policy và ma trận WebView2 image vẫn còn là gate.
+
 ### Biên bản trial: 2026-09-08
 
 Trial đầu tiên trong repository đạt trên PowerShell 7 và Windows PowerShell
@@ -169,7 +182,8 @@ thay service thật, reboot, image LTSC hoặc chu kỳ bảo trì Deep Freeze.
 
 ## Trạng thái hiện tại
 
-MVP hiện có nền tảng package đã ký và lifecycle reboot-safe, nhưng chưa có client
+MVP hiện có helper staging package bài thi offline do deployment quản lý cùng
+nền tảng package đã ký và lifecycle reboot-safe, nhưng chưa có client
 auto-update nền và service manifest phía server. Bước tiếp theo là thêm state
 machine cập nhật sau một feature flag do administrator kiểm soát, chạy trial,
 rồi chạy test VM disposable trước khi bật cho bất kỳ trường nào.

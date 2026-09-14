@@ -108,7 +108,23 @@ int main() {
     assert(verify_control_auth_tag(*session_key, command, 0, payload,
                                    *control_tag));
     assert(!verify_control_auth_tag(*session_key, command, 1, payload,
-                                    *control_tag));
+                                     *control_tag));
+    const auto client_directional_tag = compute_control_auth_tag(
+        *session_key, command, 0, payload,
+        ControlDirection::client_to_server);
+    const auto server_directional_tag = compute_control_auth_tag(
+        *session_key, command, 0, payload,
+        ControlDirection::server_to_client);
+    assert(client_directional_tag.has_value());
+    assert(server_directional_tag.has_value());
+    assert(!constant_time_equal(*client_directional_tag,
+                                *server_directional_tag));
+    assert(verify_control_auth_tag(*session_key, command, 0, payload,
+                                   ControlDirection::client_to_server,
+                                   *client_directional_tag));
+    assert(!verify_control_auth_tag(*session_key, command, 0, payload,
+                                    ControlDirection::server_to_client,
+                                    *client_directional_tag));
     nstu::security::ControlSequenceGuard sequence_guard;
     sequence_guard.reset(0);
     assert(sequence_guard.accept(0));

@@ -1,21 +1,58 @@
 #include "nstu/agent_protocol.hpp"
+#include "nstu/exam_profile.hpp"
 #include "nstu/control_messages.hpp"
+#include "nstu/deployment.hpp"
+#include "nstu/exam_bridge.hpp"
+#include "nstu/exam_control.hpp"
+#include "nstu/exam_host.hpp"
 #include "nstu/screen_snapshot.hpp"
 
 #include <windows.h>
 #include <shellapi.h>
+#include <objbase.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <deque>
+#include <filesystem>
 #include <iterator>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
+
+// WebView2 is an apartment-threaded COM client.  Keep the initialization
+// scoped to the agent UI thread so every exit path (including window-creation
+// failures) balances a successful CoInitializeEx call.
+class UiComApartment final {
+public:
+    UiComApartment() noexcept
+        : result_(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)) {}
+
+    ~UiComApartment() {
+        if (SUCCEEDED(result_)) {
+            CoUninitialize();
+        }
+    }
+
+    UiComApartment(const UiComApartment&) = delete;
+    UiComApartment& operator=(const UiComApartment&) = delete;
+
+    [[nodiscard]] bool ready() const noexcept {
+        return SUCCEEDED(result_);
+    }
+
+    [[nodiscard]] HRESULT result() const noexcept { return result_; }
+
+private:
+    HRESULT result_;
+};
 
 constexpr wchar_t kWindowClass[] = L"NstuAgentOverlay";
 constexpr wchar_t kChatWindowClass[] = L"NstuAgentChat";
@@ -26,6 +63,15 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kAgentCommandMessage = WM_APP + 2;
 constexpr UINT kAnnotationUpdatedMessage = WM_APP + 3;
 constexpr UINT kBroadcastUpdatedMessage = WM_APP + 4;
+// The WebView2 host drains exam_bridge() after this notification. Keeping the
+// bridge notification in the agent avoids doing browser work on the pipe
+// thread.
+constexpr UINT kExamBridgeMessage = WM_APP + 5;
+// A service pipe loss is terminal for the current exam session. The pipe
+// thread posts this message and the UI thread performs ExamHost::stop(), which
+// is required because WebView2 and the kiosk window are UI/STA-owned.
+constexpr UINT kExamServiceDisconnectedMessage = WM_APP + 6;
+constexpr UINT kExamHostStatusMessage = WM_APP + 7;
 constexpr UINT kTrayId = 1;
 constexpr int kChatMessages = 1001;
 constexpr int kChatInput = 1002;
@@ -38,6 +84,7 @@ WNDPROC g_chat_input_original_proc = nullptr;
 HWND g_lock_window = nullptr;
 HWND g_annotation_window = nullptr;
 HWND g_broadcast_window = nullptr;
+nstu::client::ExamHost g_exam_host;
 std::atomic_bool g_agent_stopping = false;
 std::atomic_bool g_locked = false;
 std::atomic_bool g_streaming = false;
@@ -50,8 +97,210 @@ std::mutex g_annotation_mutex;
 std::vector<nstu::control::OverlayStroke> g_annotation_strokes;
 std::mutex g_broadcast_mutex;
 nstu::screen::BgraImage g_broadcast_image;
+std::mutex g_service_queue_mutex;
+std::deque<nstu::client::AgentMessage> g_service_queue;
+constexpr std::size_t kMaximumQueuedServiceMessages = 128;
+std::mutex g_exam_command_mutex;
+std::deque<nstu::client::AgentMessage> g_exam_commands;
+constexpr std::size_t kMaximumQueuedExamCommands = 4;
+bool g_exam_controls_suppressed = false;
+bool g_chat_was_visible_for_exam = false;
+bool g_lock_was_visible_for_exam = false;
+bool g_annotation_was_visible_for_exam = false;
+bool g_broadcast_was_visible_for_exam = false;
+
+void queue_service_message(nstu::client::AgentMessage message) noexcept {
+    if (message.payload.size() > nstu::client::kMaximumAgentPayloadBytes) {
+        OutputDebugStringA("NSTU exam message exceeded the agent payload limit\n");
+        return;
+    }
+    try {
+        std::scoped_lock lock(g_service_queue_mutex);
+        if (g_service_queue.size() >= kMaximumQueuedServiceMessages) {
+            // Answer/state messages are durable in the service outbox. Keep
+            // the queue bounded and discard the oldest volatile transport
+            // copy if the service is unavailable for an extended period.
+            g_service_queue.pop_front();
+        }
+        g_service_queue.push_back(std::move(message));
+    } catch (...) {
+        OutputDebugStringA("NSTU could not queue an exam service message\n");
+    }
+}
+
+void queue_exam_command_for_ui(nstu::client::AgentMessage message) noexcept {
+    try {
+        std::scoped_lock lock(g_exam_command_mutex);
+        if (message.type == nstu::client::AgentMessageType::exam_stop) {
+            // A stop supersedes any not-yet-started request. This prevents a
+            // delayed start from resurrecting a session after disconnect.
+            g_exam_commands.clear();
+        } else {
+            std::erase_if(g_exam_commands, [](const auto& queued) {
+                return queued.type ==
+                       nstu::client::AgentMessageType::exam_start;
+            });
+        }
+        if (g_exam_commands.size() >= kMaximumQueuedExamCommands) {
+            g_exam_commands.pop_front();
+        }
+        g_exam_commands.push_back(std::move(message));
+    } catch (...) {
+        OutputDebugStringA("NSTU could not queue an exam UI command\n");
+    }
+}
+
+std::optional<nstu::client::AgentMessage> pop_exam_command_for_ui() noexcept {
+    try {
+        std::scoped_lock lock(g_exam_command_mutex);
+        if (g_exam_commands.empty()) return std::nullopt;
+        auto result = std::move(g_exam_commands.front());
+        g_exam_commands.pop_front();
+        return result;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+void clear_exam_commands_for_ui() noexcept {
+    try {
+        std::scoped_lock lock(g_exam_command_mutex);
+        g_exam_commands.clear();
+    } catch (...) {
+        OutputDebugStringA("NSTU could not clear queued exam commands\n");
+    }
+}
+
+std::string bytes_to_hex(std::span<const std::byte> bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (const auto byte : bytes) {
+        const auto value = std::to_integer<unsigned int>(byte);
+        result.push_back(digits[(value >> 4u) & 0x0fu]);
+        result.push_back(digits[value & 0x0fu]);
+    }
+    return result;
+}
+
+std::string json_escape(std::string_view value) {
+    std::string result;
+    result.reserve(value.size() + 16);
+    static constexpr char digits[] = "0123456789abcdef";
+    for (const unsigned char character : value) {
+        switch (character) {
+        case '"': result += "\\\""; break;
+        case '\\': result += "\\\\"; break;
+        case '\b': result += "\\b"; break;
+        case '\f': result += "\\f"; break;
+        case '\n': result += "\\n"; break;
+        case '\r': result += "\\r"; break;
+        case '\t': result += "\\t"; break;
+        default:
+            if (character < 0x20u) {
+                result += "\\u00";
+                result.push_back(digits[(character >> 4u) & 0x0fu]);
+                result.push_back(digits[character & 0x0fu]);
+            } else {
+                result.push_back(static_cast<char>(character));
+            }
+            break;
+        }
+    }
+    return result;
+}
+
+bool flush_service_messages(nstu::client::NamedPipe& pipe) noexcept {
+    std::deque<nstu::client::AgentMessage> pending;
+    {
+        std::scoped_lock lock(g_service_queue_mutex);
+        pending.swap(g_service_queue);
+    }
+    while (!pending.empty()) {
+        auto message = std::move(pending.front());
+        pending.pop_front();
+        if (nstu::client::send_agent_message(pipe, message, nullptr)) {
+            continue;
+        }
+        // Preserve unsent messages for the next authenticated pipe instance.
+        // The already-sent prefix must not be replayed here; the service's
+        // durable outbox handles duplicate answer events separately.
+        std::scoped_lock lock(g_service_queue_mutex);
+        if (g_service_queue.size() >= kMaximumQueuedServiceMessages) {
+            g_service_queue.pop_back();
+        }
+        g_service_queue.push_front(std::move(message));
+        while (!pending.empty()) {
+            if (g_service_queue.size() >= kMaximumQueuedServiceMessages) {
+                g_service_queue.pop_back();
+            }
+            g_service_queue.push_front(std::move(pending.back()));
+            pending.pop_back();
+        }
+        return false;
+    }
+    return true;
+}
+
+bool exam_host_engaged() noexcept {
+    const auto state = g_exam_host.state();
+    return g_exam_host.window() != nullptr &&
+           state != nstu::client::ExamHostState::idle &&
+           state != nstu::client::ExamHostState::failed;
+}
+
+std::wstring utf8_to_wide(std::span<const std::byte> bytes);
+
+void restore_exam_suppressed_windows() noexcept {
+    if (!g_exam_controls_suppressed) {
+        return;
+    }
+    if (g_chat_window != nullptr) {
+        ShowWindow(g_chat_window,
+                   g_chat_was_visible_for_exam ? SW_SHOWNA : SW_HIDE);
+    }
+    if (g_lock_window != nullptr) {
+        ShowWindow(g_lock_window,
+                   g_lock_was_visible_for_exam ? SW_SHOWNA : SW_HIDE);
+    }
+    if (g_annotation_window != nullptr) {
+        ShowWindow(g_annotation_window,
+                   g_annotation_was_visible_for_exam ? SW_SHOWNOACTIVATE
+                                                      : SW_HIDE);
+    }
+    if (g_broadcast_window != nullptr) {
+        ShowWindow(g_broadcast_window,
+                   g_broadcast_was_visible_for_exam ? SW_SHOWNOACTIVATE
+                                                     : SW_HIDE);
+    }
+    g_exam_controls_suppressed = false;
+}
 
 void restore_control_window_order() {
+    if (exam_host_engaged()) {
+        if (!g_exam_controls_suppressed) {
+            g_exam_controls_suppressed = true;
+            g_chat_was_visible_for_exam =
+                g_chat_window != nullptr && IsWindowVisible(g_chat_window);
+            g_lock_was_visible_for_exam =
+                g_lock_window != nullptr && IsWindowVisible(g_lock_window);
+            g_annotation_was_visible_for_exam =
+                g_annotation_window != nullptr &&
+                IsWindowVisible(g_annotation_window);
+            g_broadcast_was_visible_for_exam =
+                g_broadcast_window != nullptr &&
+                IsWindowVisible(g_broadcast_window);
+        }
+        if (g_chat_window != nullptr) ShowWindow(g_chat_window, SW_HIDE);
+        if (g_lock_window != nullptr) ShowWindow(g_lock_window, SW_HIDE);
+        if (g_annotation_window != nullptr)
+            ShowWindow(g_annotation_window, SW_HIDE);
+        if (g_broadcast_window != nullptr)
+            ShowWindow(g_broadcast_window, SW_HIDE);
+        g_exam_host.enforce_foreground();
+        return;
+    }
+    restore_exam_suppressed_windows();
     constexpr UINT flags =
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
     if (g_broadcast_window != nullptr &&
@@ -66,6 +315,163 @@ void restore_control_window_order() {
         IsWindowVisible(g_lock_window)) {
         SetWindowPos(g_lock_window, HWND_TOPMOST, 0, 0, 0, 0, flags);
     }
+}
+
+// Entry point for the authenticated exam-start path. The service/session
+// layer supplies the already validated package options; this function only
+// wires the UI-owned host to the bounded, asynchronous pipe queue.
+[[maybe_unused]] bool start_exam_host_ui(
+    HWND owner, const nstu::client::ExamHostOptions& options) {
+    if (g_exam_host.window() != nullptr) {
+        if (g_exam_host.active()) {
+            return true;
+        }
+        g_exam_host.stop();
+    }
+    nstu::client::ExamHostCallbacks callbacks;
+    callbacks.send_to_service = [](nstu::client::AgentMessage message) {
+        queue_service_message(std::move(message));
+    };
+    callbacks.status = [owner](std::string status) {
+        const std::string line = "NSTU exam host: " + status + "\n";
+        OutputDebugStringA(line.c_str());
+        if (owner != nullptr) {
+            // Failure can be reported by an asynchronous WebView2 callback.
+            // Marshal cleanup back to the agent UI thread instead of stopping
+            // the host re-entrantly from inside the browser callback.
+            PostMessageW(owner, kExamHostStatusMessage, 0, 0);
+        }
+    };
+    std::string error;
+    const bool started = g_exam_host.start(owner, options, std::move(callbacks),
+                                           &error);
+    if (!started || g_exam_host.state() == nstu::client::ExamHostState::failed) {
+        if (!error.empty()) {
+            const std::string line = "NSTU exam host start failed: " + error +
+                                     "\n";
+            OutputDebugStringA(line.c_str());
+        }
+        g_exam_host.stop();
+        restore_control_window_order();
+        return false;
+    }
+    restore_control_window_order();
+    return true;
+}
+
+bool start_exam_from_command_ui(
+    HWND owner, const nstu::client::AgentMessage& message) {
+    const auto request = nstu::exam::decode_exam_start_request(message.payload);
+    if (!request) {
+        OutputDebugStringA("NSTU rejected malformed exam start command\n");
+        return false;
+    }
+    const auto package_root = utf8_to_wide(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(request->package_root.data()),
+        request->package_root.size()));
+    const auto web_root = utf8_to_wide(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(request->web_root.data()),
+        request->web_root.size()));
+    const auto user_data_root = utf8_to_wide(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(request->user_data_root.data()),
+        request->user_data_root.size()));
+    if (package_root.empty() ||
+        (!request->web_root.empty() && web_root.empty()) ||
+        (!request->user_data_root.empty() && user_data_root.empty())) {
+        OutputDebugStringA("NSTU exam start path is not valid UTF-8\n");
+        return false;
+    }
+    std::string data_root_error;
+    const auto data_root = nstu::deployment::data_root(&data_root_error);
+    if (data_root.empty()) {
+        OutputDebugStringA(("NSTU exam data root is unavailable: " +
+                            (data_root_error.empty()
+                                 ? "unknown error"
+                                 : data_root_error) +
+                            "\n")
+                               .c_str());
+        return false;
+    }
+    wchar_t local_app_data_buffer[32768]{};
+    const DWORD local_app_data_length = GetEnvironmentVariableW(
+        L"LOCALAPPDATA", local_app_data_buffer,
+        static_cast<DWORD>(std::size(local_app_data_buffer)));
+    if (local_app_data_length == 0 ||
+        local_app_data_length >= std::size(local_app_data_buffer)) {
+        OutputDebugStringA("NSTU exam local profile root is unavailable\n");
+        return false;
+    }
+    const auto profile_root = std::filesystem::path(local_app_data_buffer) /
+                              L"NSTU" / L"exam-webview";
+    const auto derived_user_data_root =
+        nstu::client::derive_exam_profile_path(
+            profile_root, request->package_digest, request->client_id,
+            request->session_id);
+    if (!derived_user_data_root) {
+        OutputDebugStringA("NSTU exam profile identity is invalid\n");
+        return false;
+    }
+    const auto& effective_user_data_root = *derived_user_data_root;
+    if (!user_data_root.empty()) {
+        // Keep the wire field for protocol compatibility, but never permit a
+        // server command to select an arbitrary persistent browser profile.
+        // An explicit path is accepted only when it resolves to the same
+        // digest/client/session-bound directory selected locally.
+        std::string supplied_path_error;
+        if (!nstu::client::validate_exam_user_data_path(
+                profile_root, user_data_root, &supplied_path_error)) {
+            OutputDebugStringA("NSTU exam supplied profile path is invalid\n");
+            return false;
+        }
+        std::error_code supplied_compare_error;
+        std::error_code derived_compare_error;
+        const auto supplied_canonical = std::filesystem::weakly_canonical(
+            user_data_root, supplied_compare_error);
+        const auto derived_canonical = std::filesystem::weakly_canonical(
+            effective_user_data_root, derived_compare_error);
+        if (supplied_compare_error || derived_compare_error ||
+            supplied_canonical != derived_canonical) {
+            OutputDebugStringA(
+                "NSTU exam supplied profile path does not match the authenticated context\n");
+            return false;
+        }
+    }
+    std::string path_error;
+    if (!nstu::client::validate_exam_path_policy(
+            data_root, package_root, web_root, {},
+            &path_error)) {
+        OutputDebugStringA(("NSTU exam path policy rejected start: " +
+                            (path_error.empty() ? "unknown error" : path_error) +
+                            "\n")
+                               .c_str());
+        return false;
+    }
+    if (!nstu::client::validate_exam_user_data_path(
+            profile_root, effective_user_data_root, &path_error)) {
+        OutputDebugStringA(("NSTU exam profile path rejected: " +
+                            (path_error.empty() ? "unknown error" : path_error) +
+                            "\n")
+                               .c_str());
+        return false;
+    }
+    const std::string context =
+        "{\"packageId\":\"" + json_escape(request->package_id) +
+        "\",\"packageDigestHex\":\"" +
+        bytes_to_hex(request->package_digest) +
+        "\",\"clientIdHex\":\"" + bytes_to_hex(request->client_id) +
+        "\",\"sessionIdHex\":\"" + bytes_to_hex(request->session_id) +
+        "\",\"candidateId\":\"" + json_escape(request->candidate_id) +
+        "\"}";
+    nstu::client::ExamHostOptions options;
+    options.package_root = package_root;
+    options.web_root = web_root;
+    options.user_data_root = effective_user_data_root;
+    options.allowed_data_root = data_root;
+    options.allowed_user_data_root = profile_root;
+    options.context_json = context;
+    options.expected_digest_hex = bytes_to_hex(request->package_digest);
+    options.require_digest = true;
+    return start_exam_host_ui(owner, options);
 }
 
 std::uint64_t unix_milliseconds_now() {
@@ -94,7 +500,7 @@ std::wstring utf8_to_wide(std::span<const std::byte> bytes) {
     return wide;
 }
 
-void send_agent_status(nstu::client::NamedPipe& pipe) {
+bool send_agent_status(nstu::client::NamedPipe& pipe) {
     const nstu::client::AgentStatus status{
         .locked = g_locked.load(),
         .streaming = g_streaming.load(),
@@ -105,11 +511,11 @@ void send_agent_status(nstu::client::NamedPipe& pipe) {
             g_snapshot_interval_seconds.load(),
         .session_id = WTSGetActiveConsoleSessionId(),
     };
-    (void)nstu::client::send_agent_message(
+    return nstu::client::send_agent_message(
         pipe,
         {nstu::client::AgentMessageType::status_report,
          nstu::client::encode_agent_status(status)},
-        nullptr);
+         nullptr);
 }
 
 void stop_remote_control() noexcept {
@@ -191,19 +597,30 @@ void pipe_control_loop(HWND overlay) {
         nstu::client::NamedPipe pipe;
         if (!pipe.connect_client(nstu::client::kControlPipeName, 1000,
                                  nullptr)) {
+            Sleep(50);
             continue;
         }
+        bool pipe_failed = false;
         while (!g_agent_stopping.load()) {
+            // ExamHost callbacks are issued on the UI/STA thread. Only this
+            // transport thread drains the queue, so WebView2 never blocks on
+            // a named-pipe write.
+            if (!flush_service_messages(pipe)) {
+                pipe_failed = true;
+                break;
+            }
             std::uint32_t available = 0;
             if (!pipe.available_bytes(available, nullptr)) {
+                pipe_failed = true;
                 break;
             }
             if (available == 0) {
                 Sleep(10);
             } else {
-                const auto message =
+                auto message =
                     nstu::client::receive_agent_message(pipe, nullptr);
                 if (!message) {
+                    pipe_failed = true;
                     break;
                 }
                 if (message->type == nstu::client::AgentMessageType::lock ||
@@ -308,8 +725,34 @@ void pipe_control_loop(HWND overlay) {
                     g_viewing_broadcast = false;
                     PostMessageW(g_broadcast_window,
                                  kBroadcastUpdatedMessage, 0, 0);
+                } else if (message->type ==
+                               nstu::client::AgentMessageType::exam_answer_ack ||
+                           message->type ==
+                               nstu::client::AgentMessageType::exam_state_response) {
+                    // The service has already decoded and authenticated these
+                    // payloads. The bounded bridge lets an optional exam host
+                    // consume them on the UI thread without blocking this
+                    // transport loop.
+                    if (nstu::client::exam_bridge().publish(std::move(*message))) {
+                        PostMessageW(overlay, kExamBridgeMessage, 0, 0);
+                    }
+                } else if (message->type ==
+                               nstu::client::AgentMessageType::exam_start ||
+                           message->type ==
+                               nstu::client::AgentMessageType::exam_stop) {
+                    // ExamHost/WebView2 is UI/STA-owned. Move the command to
+                    // the message loop instead of touching it from the pipe
+                    // worker.
+                    queue_exam_command_for_ui(std::move(*message));
+                    PostMessageW(overlay, kAgentCommandMessage,
+                                 static_cast<WPARAM>(
+                                     nstu::client::AgentMessageType::exam_start),
+                                 0);
                 }
-                send_agent_status(pipe);
+                if (!send_agent_status(pipe)) {
+                    pipe_failed = true;
+                    break;
+                }
             }
             const auto now = std::chrono::steady_clock::now();
             if (g_snapshotting.load() && now >= next_snapshot) {
@@ -326,11 +769,14 @@ void pipe_control_loop(HWND overlay) {
                     const auto payload =
                         nstu::control::encode_snapshot_frame(frame);
                     if (!payload.empty()) {
-                        (void)nstu::client::send_agent_message(
+                        if (!nstu::client::send_agent_message(
                             pipe,
                             {nstu::client::AgentMessageType::snapshot_frame,
                              payload},
-                            nullptr);
+                            nullptr)) {
+                            pipe_failed = true;
+                            break;
+                        }
                     }
                 }
                 next_snapshot = now + std::chrono::seconds(
@@ -338,6 +784,18 @@ void pipe_control_loop(HWND overlay) {
             }
         }
         stop_remote_control();
+        pipe.close();
+        if (pipe_failed && !g_agent_stopping.load()) {
+            // Fail closed for exams. The host owns the WebView2 controller and
+            // must be stopped by the UI thread, never from this pipe thread.
+            queue_exam_command_for_ui(
+                {nstu::client::AgentMessageType::exam_stop, {}});
+            PostMessageW(overlay, kAgentCommandMessage,
+                         static_cast<WPARAM>(
+                             nstu::client::AgentMessageType::exam_start),
+                         0);
+            PostMessageW(overlay, kExamServiceDisconnectedMessage, 0, 0);
+        }
     }
 }
 
@@ -570,11 +1028,20 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         ShowWindow(window, SW_HIDE);
         return 0;
     case WM_DESTROY:
+        // ExamHost owns a UI/STA WebView2 controller. Stop it before the
+        // message loop exits so no asynchronous browser callback can outlive
+        // the agent window or pipe thread.
+        g_exam_host.stop();
+        restore_exam_suppressed_windows();
         stop_remote_control();
         PostQuitMessage(0);
         return 0;
     case kTrayMessage:
         if (lparam == WM_LBUTTONDBLCLK) {
+            if (exam_host_engaged()) {
+                g_exam_host.enforce_foreground();
+                return 0;
+            }
             if (g_chat_window != nullptr) {
                 ShowWindow(g_chat_window,
                            IsWindowVisible(g_chat_window) ? SW_HIDE : SW_SHOW);
@@ -585,14 +1052,26 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     case kAgentCommandMessage: {
         const auto type = static_cast<nstu::client::AgentMessageType>(wparam);
         if (type == nstu::client::AgentMessageType::lock) {
+            if (exam_host_engaged()) {
+                g_exam_host.enforce_foreground();
+                return 0;
+            }
             g_locked = true;
             ShowWindow(window, SW_SHOW);
             restore_control_window_order();
         } else if (type == nstu::client::AgentMessageType::unlock) {
+            if (exam_host_engaged()) {
+                g_exam_host.enforce_foreground();
+                return 0;
+            }
             g_locked = false;
             ShowWindow(window, SW_HIDE);
             restore_control_window_order();
         } else if (type == nstu::client::AgentMessageType::chat && lparam != 0) {
+            if (exam_host_engaged()) {
+                g_exam_host.enforce_foreground();
+                return 0;
+            }
             append_chat_line(reinterpret_cast<const wchar_t*>(lparam));
             if (g_chat_window != nullptr) {
                 ShowWindow(g_chat_window, SW_SHOW);
@@ -604,9 +1083,47 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         } else if (type == nstu::client::AgentMessageType::stop_stream) {
             g_streaming = false;
             g_stream_fps = 0;
+        } else if (type == nstu::client::AgentMessageType::exam_start) {
+            while (const auto command = pop_exam_command_for_ui()) {
+                if (command->type ==
+                    nstu::client::AgentMessageType::exam_stop) {
+                    g_exam_host.stop();
+                    restore_control_window_order();
+                    continue;
+                }
+                if (command->type ==
+                    nstu::client::AgentMessageType::exam_start) {
+                    (void)start_exam_from_command_ui(window, *command);
+                }
+                // Preserve command ordering: the queue coalesces starts and
+                // makes stop terminal, so one pass is enough in normal use.
+            }
+            restore_control_window_order();
         }
         return 0;
     }
+    case kExamBridgeMessage:
+        g_exam_host.drain_bridge();
+        if (exam_host_engaged()) {
+            g_exam_host.enforce_foreground();
+        }
+        return 0;
+    case kExamServiceDisconnectedMessage:
+        // The service is the authenticated control authority. If its pipe
+        // disappears, stop the kiosk immediately; browser/service durable
+        // queues retain answers for the next authenticated connection.
+        clear_exam_commands_for_ui();
+        if (g_exam_host.window() != nullptr) {
+            g_exam_host.stop();
+            restore_control_window_order();
+        }
+        return 0;
+    case kExamHostStatusMessage:
+        if (g_exam_host.state() == nstu::client::ExamHostState::failed) {
+            g_exam_host.stop();
+            restore_control_window_order();
+        }
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT paint{};
         HDC context = BeginPaint(window, &paint);
@@ -630,6 +1147,24 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
+    const UiComApartment com_apartment;
+    if (!com_apartment.ready()) {
+        const auto result = com_apartment.result();
+        wchar_t detail[128]{};
+        (void)FormatMessageW(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr, static_cast<DWORD>(result), 0, detail,
+            static_cast<DWORD>(std::size(detail)), nullptr);
+        std::wstring message =
+            L"NSTU client could not initialize the WebView2 UI apartment.";
+        if (detail[0] != L'\0') {
+            message += L"\r\n\r\n";
+            message += detail;
+        }
+        MessageBoxW(nullptr, message.c_str(), L"NSTU client startup error",
+                    MB_OK | MB_ICONERROR | MB_TASKMODAL);
+        return 1;
+    }
     HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, kInstanceMutex);
     if (instance_mutex == nullptr || GetLastError() == ERROR_ALREADY_EXISTS) {
         if (instance_mutex != nullptr) {
@@ -725,6 +1260,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     }
     Shell_NotifyIconW(NIM_DELETE, &tray);
     g_agent_stopping = true;
+    // Ensure the WebView2 controller and low-level keyboard hook are torn
+    // down on the UI thread before waiting for the pipe worker.
+    g_exam_host.stop();
+    restore_exam_suppressed_windows();
     if (control_thread.joinable()) {
         control_thread.join();
     }

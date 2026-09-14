@@ -62,6 +62,9 @@ model và các hạng mục production chưa hoàn thành tại
   video pipeline, control channel và giới hạn hiện tại.
 - [Bảo mật](docs/SECURITY.md): authentication, enrollment, secret và ranh giới
   triển khai.
+- [Đánh giá trên máy tính](docs/EXAM_ASSESSMENT.vi.md): native WebView2 tùy chọn,
+  ranh giới gói bài thi, phục hồi câu trả lời có xác thực, outbox bền vững và
+  định dạng state export.
 - [Development guide](docs/DEVELOPMENT.md): tùy chọn build, test, đóng gói và
   quy trình CI.
 - [Production validation](docs/PRODUCTION_VALIDATION.md): checklist kiểm thử
@@ -105,12 +108,12 @@ test trên phòng máy 50 client thật.
 
 | Vai trò | Cấu hình mục tiêu | Mạng |
 | --- | --- | --- |
-| Server | Intel Core i5-6400, RAM 8 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Gigabit Ethernet có dây |
-| Client | Intel Core i5-6400, RAM 8 GB, trống 512 MB, Windows 10/11 x64 | Khuyến nghị Ethernet có dây |
-| Router/switch | Hỗ trợ UDP multicast, IGMPv2 hoặc IGMPv3, IGMP snooping và IGMP querier | Một LAN/VLAN được kiểm soát cho lần triển khai đầu |
+| Server | Intel Core i5-6400, RAM tối thiểu 6 GiB, khuyến nghị 8 GiB, trống 512 MiB, Windows 10/11 x64 | Khuyến nghị Gigabit Ethernet có dây |
+| Client | Intel Core i5-6400, RAM tối thiểu 6 GiB, khuyến nghị 8 GiB, trống 512 MiB, Windows 10/11 x64 | Khuyến nghị Ethernet có dây |
+| Router/switch | Switching/routing Ethernet thông thường cho snapshot TCP đã xác thực; IGMP snooping và IGMP querier chỉ là yêu cầu tùy chọn cho video tương lai | Một LAN/VLAN được kiểm soát cho lần triển khai đầu |
 
-Với server quản lý từ 50 máy trở lên, RAM 16 GB và SSD là lựa chọn thận trọng
-cho đến khi mục tiêu 8 GB vượt qua kiểm thử phần cứng dài hạn. Intel HD Graphics
+Với server quản lý từ 50 máy trở lên, RAM 16 GiB và SSD là lựa chọn thận trọng
+cho đến khi baseline khuyến nghị 8 GiB vượt qua kiểm thử phần cứng dài hạn. Intel HD Graphics
 530 là baseline cho hardware acceleration, không phải cam kết hoạt động với mọi
 phiên bản driver.
 
@@ -338,7 +341,7 @@ Máy giáo viên (NSTU Server)
           |
      Gigabit Ethernet
           |
-Managed switch/router có IGMP snooping + một IGMP querier
+Ethernet switch/router (snapshot TCP; IGMP tùy chọn cho H.264 tương lai)
      |            |             |
  Client 01     Client 02      Client 50+
 ```
@@ -347,21 +350,24 @@ Trước khi triển khai production:
 
 1. Đặt server và client trong cùng VLAN hoặc subnet tin cậy ở lần triển khai
    đầu tiên.
-2. Bật IGMP snooping trên managed switch và đảm bảo chỉ một router hoặc switch
-   Layer 3 làm IGMP querier cho VLAN đó.
+2. Nên dùng managed switch hoặc router khi có thể. IGMP snooping và một IGMP
+   querier chỉ bắt buộc cho thử nghiệm H.264/multicast liên tục trong tương
+   lai; đường snapshot được hỗ trợ dùng kết nối TCP xác thực thông thường.
 3. Không expose trực tiếp control/video traffic của NSTU ra Internet.
 4. Ưu tiên Ethernet có dây. Nếu thử nghiệm bằng Wi-Fi, tắt AP client isolation
-   và kiểm tra multicast không bị ép xuống legacy data rate.
-5. Không nên dùng unmanaged switch cho phòng máy lớn. Nếu không có IGMP
-   snooping, multicast có thể bị flood đến mọi port. Nếu multicast bị chặn,
-   fallback unicast dự kiến sẽ làm băng thông server và switch tăng theo từng
-   client.
-6. Luôn bật Windows Firewall. TCP `47001` là control port mặc định và UDP `47000`
-   dành cho video transport. Chỉ mở rule cho VLAN phòng học và executable cần
-   thiết; không expose rule rộng ra Internet.
+   và kiểm tra switch/AP đáp ứng được lưu lượng snapshot TCP dự kiến.
+5. Với triển khai chỉ dùng snapshot, switch thông thường là đủ nếu đáp ứng số
+   client và dung lượng uplink đã đo. Không bật multicast chỉ để discovery hoạt
+   động. Nếu sau này bật thử nghiệm H.264 tùy chọn, phải kiểm tra riêng IGMP
+   snooping, querier, flooding và unicast fallback.
+6. Luôn bật Windows Firewall. TCP `47001` là control và snapshot port đã xác
+   thực bắt buộc. UDP `47000` dành cho continuous video tùy chọn trong tương
+   lai và nên đóng nếu chưa bật tính năng. Chỉ mở rule cho VLAN phòng học và
+   executable cần thiết; không expose rule rộng ra Internet.
 
-Multicast qua nhiều VLAN cần multicast routing được cấu hình có chủ đích. Không
-nên bật tính năng này chỉ để discovery hoạt động.
+Multicast qua nhiều VLAN không thuộc triển khai snapshot được hỗ trợ. Nếu thử
+continuous video trong tương lai, phải cấu hình multicast routing có chủ đích
+và kiểm tra như một thay đổi mạng riêng.
 
 ## Cài bản thử nghiệm hiện tại
 
@@ -543,16 +549,47 @@ Cài client
   -> cấp danh tính riêng và enrollment credential được bảo vệ
   -> xác thực với server qua TCP
   -> đăng ký thiết bị và nhận room policy
-  -> nhận cấu hình video group đã được xác thực
-  -> join multicast, đo packet loss và fallback unicast có giới hạn khi cần
+  -> nhận snapshot schedule và room policy đã được xác thực
+  -> chụp JPEG có giới hạn qua kết nối TCP đã xác thực
 ```
+
+Đường continuous H.264 tùy chọn chưa nằm trong quy trình enrollment này. Sau
+này có thể bổ sung group membership và multicast/unicast đã xác thực, chỉ sau
+khi vượt qua các gate kiểm tra switch, decoder và loss-recovery riêng.
 
 Connection preamble chỉ giúp loại nhanh peer sai rõ ràng. Danh tính máy chỉ
 được chấp nhận sau khi cryptographic handshake thành công. Installer là cách
 phân phối được hỗ trợ cho các script này; chỉ chép riêng file EXE là không đủ
 để thiết lập enrollment.
 
+### Staging package bài thi
+
+Archive bài thi chỉ được staging trên client bằng helper do administrator quản
+lý, được đóng gói tại
+`C:\Program Files\NSTU\docs\deployment\stage-exam-package.ps1`. Server
+vẫn giữ package gốc và answer journal trên storage bền vững. Helper bắt buộc có
+cả archive SHA-256 và unpacked content SHA-256, từ chối ZIP không an toàn và
+zip bomb, rồi publish vào thư mục content-addressed bên dưới data root bền
+vững của client:
+
+~~~powershell
+$stager = "$env:ProgramFiles\NSTU\docs\deployment\stage-exam-package.ps1"
+& $stager -ArchivePath "D:\SecureTransfer\exam.nstuexam" -PublishRoot "$env:ProgramData\NSTU\exams\packages" -ExpectedArchiveSha256 "<archive-sha256>" -ExpectedContentSha256 "<content-sha256>" -TrustedPublisherThumbprint "<publisher-thumbprint>"
+~~~
+
+Package production phải có entry detached CMS/PKCS#7 `manifest.p7s`
+được ký bởi publisher đã cấu hình. `-AllowUnsigned` và
+`-AllowNonElevatedTest` chỉ dành cho internal test. Helper không tự
+tải package và không thay đổi server, UWF hoặc Deep Freeze.
+
 ## Triển khai cùng Deep Freeze
+
+Thử nghiệm UWF/reboot-to-restore và bảo vệ Deep Freeze bên thứ ba chỉ áp dụng
+cho máy client. Tuyệt đối không đặt server giáo viên dưới UWF hoặc Deep Freeze:
+gói bài thi, `exams/answer-journal.bin`, trạng thái enrollment, audit record và
+dữ liệu chẩn đoán phải nằm trên storage bền vững. Outbox câu trả lời của client
+được bảo vệ bằng DPAPI chỉ là hàng đợi retry; server journal mới là nguồn chính
+thức.
 
 - Cài binary vào vị trí Windows được bảo vệ thông thường.
 - Dành riêng một thawed location có ACL chặt cho identity đã enroll, key material

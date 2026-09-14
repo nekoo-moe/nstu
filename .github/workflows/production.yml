@@ -33,7 +33,7 @@ jobs:
         run: |
           $requiredGates = @(
             'Authenticode', '50-client soak', 'CPU/RAM/network',
-            'Multicast switches', 'Unicast fallback', 'Windows matrix',
+            'Snapshot network', 'Windows matrix',
             'Intel driver matrix', 'Deep Freeze', 'Security review',
             'Confidentiality decision')
           $lines = Get-Content docs\PRODUCTION_VALIDATION.md

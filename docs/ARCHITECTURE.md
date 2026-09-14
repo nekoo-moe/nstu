@@ -30,6 +30,58 @@ configuration, reconnects to the teacher server, completes the mutual HMAC
 handshake, and forwards authenticated commands to the active-session agent.
 Agent status is returned over the same pipe and then reported to the server.
 
+## Computer-based assessment path
+
+The exam surface is a local, package-contained web UI under `exam/web/`. The
+native `ExamHost` in `client/src/exam_host.cpp` is implemented in
+`nstu-agent` and runs on the agent's UI/STA thread. In builds configured with
+`NSTU_ENABLE_WEBVIEW2_HOST=ON`, it receives an already-unpacked package root,
+validates the manifest and pinned SHA-256 digest, rechecks the package digest
+immediately before virtual-host mapping, creates a topmost full-screen
+Win32 window, maps the package to `https://nstu.exam/`, injects the
+identity-only, package-bound context, and forwards validated browser messages through the
+agent/service boundary. The host also blocks navigation outside the local
+virtual host, package metadata outside the validated web root, popup windows,
+developer tools, default context menus, and zoom;
+it keeps the window foreground and suppresses common user-mode shortcuts while
+the exam is active.
+
+`nstu-service` remains the authenticated transport and durability boundary; it
+must not create a desktop window, and the server never hosts the student's
+browser. The service response path publishes bounded `ExamBridge` messages,
+which the host drains on the agent UI thread. Builds with
+`NSTU_ENABLE_WEBVIEW2_HOST=OFF` retain that bridge and the protocol tests for
+offline/CI use, but intentionally fail closed when an exam is started. A
+WebView2-enabled deployment requires the signed `WebView2Loader.dll` beside
+`nstu-agent.exe` and a compatible WebView2 Runtime on the client. The agent
+loads only that packaged loader and probes the installed Runtime before launch;
+it does not use a system-DLL fallback.
+
+Each native exam browser profile is derived from the package digest, provisioned
+client identity, and authenticated session ID under the interactive user's
+approved profile root. The fixed virtual origin therefore cannot carry a service
+worker or cache from another package/context. A server-supplied profile path is
+accepted only when it matches that locally derived path exactly.
+
+```text
+.nstuexam package (server-owned; release signing required for production)
+  -> deployment-owned per-session staging and extraction with archive/content
+     pins, detached publisher-signature validation, and atomic publication
+  -> native ExamHost manifest/path/digest validation
+  -> WebView2 exam surface in nstu-agent
+  -> authenticated exam_answer_event / exam_state_request
+  -> agent ExamBridge -> LocalSystem service
+  -> DPAPI client outbox (retry only)
+  -> authenticated TCP control channel
+  -> append-only server AnswerJournal (authoritative)
+```
+
+The server keeps packages, answer journal records, state exports, and grading
+data outside any UWF or Deep Freeze boundary. Only the bounded client retry
+outbox may be placed in the approved client persistence location. A server
+reconnect response carries the last event hash and chunk metadata so the
+browser can rebase pending events without guessing over a conflict.
+
 The server shell presents two operational modes. `Room screens` uses a
 responsive grid for all visible clients, health summaries, search/filter, and a
 5-10 second snapshot interval. `Selected client` provides focused telemetry, a
@@ -131,3 +183,23 @@ for reporting, hysteresis, stream-reset, and fallback rules.
 - Long-duration rate control, repeated device loss, multicast/unicast behavior,
   and 50-client resource use still require the hardware validation matrix in
   `PRODUCTION_VALIDATION.md`.
+- The native WebView2 host, answer bridge, and answer journal are implemented in
+  the opt-in WebView2 build. Target-machine WebView2 Runtime/loader testing,
+  production publisher certificate-chain/revocation policy, instructor
+  package/session authorization, grading workflow, and full proctoring remain
+  production gates.
+- The exam window provides user-mode kiosk safeguards only. Secure-desktop,
+  local-administrator, and kernel-level escape paths require an OS-managed
+  policy and are outside this agent host's boundary.
+- The current version-2 authenticated exam-start payload carries the required
+  manifest package ID plus absolute UTF-8 package,
+  web, and user-data roots. The agent canonicalizes and bounds them, rejects
+  parent reparse points, rechecks the content digest before mapping, and binds
+  the browser profile locally. Deployment staging now performs bounded ZIP
+  extraction, path/reparse/duplicate checks, archive and content digest pinning,
+  detached CMS publisher-signature validation, and atomic publication. Remaining
+  release gates are validation on each supported Windows image, production
+  certificate-chain/revocation policy, and instructor/deployment authorization.
+  The native host intentionally does not unpack archives or repeat the
+  deployment signature check; it rechecks the pinned content digest and confines
+  navigation to the validated package root.

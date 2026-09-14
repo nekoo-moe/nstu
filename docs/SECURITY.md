@@ -94,6 +94,12 @@ payload. Because TCP preserves order, `ControlSequenceGuard` requires the exact
 next sequence. A reconnect creates a new session key and resets both directions
 to independently negotiated initial sequences.
 
+The shipped v1 transport uses the legacy neutral control-MAC domain for wire
+compatibility. `ControlDirection` V2 helpers are covered by unit tests but are
+not enabled by the live channel yet; enabling them requires an authenticated
+capability/version rollout across server and clients. Do not describe the
+current v1 traffic as direction-bound.
+
 Verify the MAC before applying the sequence guard. Only advance the guard after
 successful verification. Do not execute, log as trusted, or acknowledge an
 unauthenticated command.
@@ -143,6 +149,70 @@ Neither `PacketLossTracker` nor `FrameReassembler` auto-selects a stream from an
 untrusted first datagram. Both must be reset from authenticated control-plane
 metadata before UDP reception begins.
 
+## Exam answer recovery
+
+Exam answer events use a separate per-session sequence and SHA-256 hash chain.
+The server's append-only `AnswerJournal` is authoritative: it validates the
+chain, flushes each record before acknowledging it, and can recover only an
+incomplete tail after a crash. The client keeps a bounded
+`exam-answer-outbox.bin` retry buffer protected by machine-scope DPAPI. The
+outbox is not a source of truth and an entry is removed only after the matching
+event hash has been durably acknowledged by the server.
+
+The browser and native bridge validate package ID, package digest, client
+identity, session, candidate, question revision, sequence, size, and state
+hashes before forwarding events. State responses are bounded and chunked; a missing or conflicting hash
+causes manual review rather than an automatic overwrite. The outbox must live
+on the explicitly approved client persistence boundary when UWF or third-party
+ freezing is used. Exam packages, the server journal, exports, and grading data
+ must remain on persistent server storage.
+
+Deployment staging is performed by
+`packaging/stage-exam-package.ps1` (installed under
+`docs/deployment`). It holds the archive open with write/delete sharing
+denied, requires archive and unpacked-tree SHA-256 pins, validates the supported
+manifest schema and every declared local asset, rejects traversal,
+case-insensitive duplicates, file/directory collisions, links, reparse points,
+oversized or high-ratio entries, and publishes only through a same-volume
+`MoveFileExW` rename with `MOVEFILE_WRITE_THROUGH` and without
+`MOVEFILE_REPLACE_EXISTING`, preserving any existing destination. A detached CMS/PKCS#7
+`manifest.p7s` and a pinned publisher certificate thumbprint are required by
+default. The helper uses a per-package publication lock and revalidates an
+existing content directory and sidecar after any move collision; it never
+blindly replaces a concurrent publisher's bytes. The development-only
+`-AllowUnsigned` and `-AllowNonElevatedTest` switches are never valid for a
+school deployment. The strict content metadata sidecar is outside the package
+tree, so it cannot silently change the digest checked by `ExamHost`; if its
+commit fails after a new directory is published, the helper removes only that
+newly verified directory and cleans its temporary files.
+
+The current control plane now keeps a server-side active-exam context for each
+authenticated client. Answer events and state requests are accepted only when
+their client ID, package ID, package digest, session ID, and candidate ID
+exactly match the context issued by `start_exam`; the context survives an
+ordinary reconnect and is removed by an authenticated `stop_exam` or server
+shutdown. The native client also checks the server-issued package ID against the
+manifest before opening WebView2. This prevents a
+client from switching journals by changing fields in a browser message, but it
+does not prove that the teacher or deployment administrator authorized the
+original start command. Until a signed, auditable instructor/deployment
+authorization workflow is implemented, answer recovery must not be used as the
+sole integrity control for an official assessment.
+
+The reboot-to-restore work now has a standalone maintenance-intent contract.
+It uses a deployment-administrator credential view and a dedicated
+HMAC-SHA-256 domain rather than the teacher/control-channel MAC domain. Its
+canonical bounded payload authenticates the target client, unique intent ID,
+nonce, exact expected restore state, policy revision, validity window, and a
+fixed operation-specific parameter variant. Local authorization rejects stale,
+future, mistargeted, state-mismatched, replayed, and over-capacity requests.
+Only that successful path returns an opaque capability containing a copy of the
+verified intent. This code is not registered as a network command and cannot
+execute WMI, processes, reboots, or UWF changes. Deployment-key provisioning,
+durable replay state across reboot, technician confirmation, isolated helper
+IPC, audit, and independent review remain mandatory before any mutation path
+is enabled.
+
 ## Remaining blockers
 
 - The unified installer and diagnostics helper do not apply Task Manager,
@@ -159,4 +229,15 @@ metadata before UDP reception begins.
 - Confidentiality: HMAC authenticates but does not encrypt screen content.
   AES-GCM group encryption or an equivalent design is required where LAN users
   must not be able to view captured traffic.
+- Exam authorization: the active context binds the authenticated client to the
+  exact package ID, package digest, session, and candidate for the lifetime of
+  a started exam. It is still not an instructor/deployment authorization record; add
+  signed, replay-resistant bindings and audit them before production assessment
+  use.
+- Exam package staging: the host revalidates the content digest before mapping,
+  checks parent reparse points, and loads only the packaged WebView2 loader.
+  The offline deployment stager now supplies bounded ZIP extraction and
+  content-addressed publication. Production certificate provisioning,
+  chain/revocation policy, signed fixtures, and handle-pinned host I/O still
+  require validation before official assessments.
 - Independent protocol review and fuzzing before deployment.

@@ -1,12 +1,15 @@
 #pragma once
 
 #include "nstu/client_registry.hpp"
+#include "nstu/exam_control.hpp"
+#include "nstu/exam_sync.hpp"
 #include "nstu/iocp_dispatcher.hpp"
 #include "nstu/key_store.hpp"
 #include "nstu/protocol_headers.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
@@ -18,6 +21,9 @@ namespace nstu::server {
 struct ServerControlPlaneConfig {
     std::uint16_t port = 47001;
     std::wstring keyring_path;
+    // Persistent server-owned exam journal. This is intentionally separate
+    // from any client UWF/Deep Freeze data root.
+    std::filesystem::path exam_journal_path;
     std::vector<std::byte> keyring_entropy;
     std::vector<std::byte> enrollment_secret;
     std::size_t maximum_clients = 512;
@@ -67,7 +73,15 @@ public:
         std::uint64_t client_id, const wire::RemoteInputPacket& packet,
         std::string* error = nullptr);
     [[nodiscard]] bool stop_remote_control(std::uint64_t client_id,
-                                           std::string* error = nullptr);
+                                            std::string* error = nullptr);
+    // Starts/stops the client-side exam host over the authenticated control
+    // channel. The server stores the package and answer journal; it never
+    // creates a desktop overlay or applies reboot-to-restore itself.
+    [[nodiscard]] bool start_exam(
+        std::uint64_t client_id, const exam::ExamStartRequest& request,
+        std::string* error = nullptr);
+    [[nodiscard]] bool stop_exam(std::uint64_t client_id,
+                                 std::string* error = nullptr);
 
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::uint16_t local_port() const noexcept;

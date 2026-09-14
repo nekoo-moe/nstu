@@ -31,6 +31,7 @@ jobs:
             [ref]$errors) | Out-Null
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
           node --check exam/web/app.js
+          node tests/exam_web_recovery_tests.js
           Get-Content exam/schema/manifest.schema.json -Raw |
             ConvertFrom-Json | Out-Null
           Get-Content exam/examples/ielts-sample.json -Raw |
@@ -38,6 +39,9 @@ jobs:
       - name: Trial update state machine
         shell: pwsh
         run: ./packaging/test-update-cycle.ps1
+      - name: Trial exam package staging
+        shell: pwsh
+        run: ./packaging/test-exam-package-staging.ps1
       - name: Package unified installer
         run: cmake --build build --config Release --target nstu-package --parallel
       - name: Check documentation payload
@@ -51,6 +55,13 @@ jobs:
           }
           if (-not (Test-Path build\unified-installer-stage\docs\exam\web\index.html)) {
             throw 'Computer-based assessment web assets are missing from the package.'
+          }
+          foreach ($script in @(
+              'stage-exam-package.ps1',
+              'test-exam-package-staging.ps1')) {
+            if (-not (Test-Path (Join-Path build\unified-installer-stage\docs\deployment $script))) {
+              throw "Exam package deployment script is missing from the package: $script"
+            }
           }
       - name: Upload installers
         uses: actions/upload-artifact@v4

@@ -13,6 +13,10 @@ option(NSTU_BUILD_TESTS "Build unit and integration tests" ON)
 option(NSTU_BUILD_VIDEO "Build DXGI and Media Foundation components" ON)
 option(NSTU_ENABLE_WERROR "Treat compiler warnings as errors" OFF)
 option(NSTU_ENABLE_PACKAGING "Enable unified Windows NSIS packaging" ON)
+option(NSTU_ENABLE_WEBVIEW2_HOST
+    "Build the native WebView2 exam host (requires the WebView2 SDK)" OFF)
+set(NSTU_WEBVIEW2_SDK_DIR "" CACHE PATH
+    "Root of the Microsoft.Web.WebView2 SDK package")
 option(NSTU_INTERNAL_TEST_BUILD
     "Build an explicitly labeled installer that permits undersized VM hardware"
     OFF)
@@ -143,6 +147,19 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
             "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-system-setup.ps1"
             DESTINATION client
             COMPONENT client)
+        # The client-side exam host loads these files from the installed
+        # package. Keep the documentation copy below as well so technicians
+        # can inspect the schema and sample without opening the client binary
+        # directory.
+        install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/exam/web/"
+            DESTINATION client/exam/web
+            COMPONENT client)
+        install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/exam/schema/"
+            DESTINATION client/exam/schema
+            COMPONENT client)
+        install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/exam/examples/"
+            DESTINATION client/exam/examples
+            COMPONENT client)
         if(nstu_mingw_runtime_files)
             install(FILES ${nstu_mingw_runtime_files}
                 DESTINATION client
@@ -163,6 +180,8 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-system-setup.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-install-role.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-update-cycle.ps1"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/stage-exam-package.ps1"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-exam-package-staging.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/stage-uninstall.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/finalize-uninstall.ps1"
         "${CMAKE_CURRENT_SOURCE_DIR}/packaging/uninstall-server.ps1"

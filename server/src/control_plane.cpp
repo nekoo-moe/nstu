@@ -3,6 +3,8 @@
 #include "nstu/control_channel.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/enrollment.hpp"
+#include "nstu/exam_control.hpp"
+#include "nstu/exam_sync.hpp"
 #include "nstu/keyring.hpp"
 
 #include <windows.h>
@@ -29,6 +31,13 @@ void set_error(std::string* error, const char* message) {
 std::uint64_t unix_seconds_now() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+                                          .count());
+}
+
+std::uint64_t unix_milliseconds_now() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::milliseconds>(std::chrono::system_clock::now()
+                                       .time_since_epoch())
                                           .count());
 }
 
@@ -131,15 +140,35 @@ public:
         std::mutex mutex;
     };
 
+    // The server is the authority for which exam session a client may
+    // participate in.  This record intentionally outlives a TCP connection:
+    // a client can reconnect after a transient network failure and continue
+    // recovering its answer state.  It is cleared on an explicit stop or
+    // server shutdown, never merely because a socket went away.
+    struct ActiveExamContext {
+        security::ClientId client_id{};
+        security::Sha256Digest package_digest{};
+        exam::SessionId session_id{};
+        std::string package_id;
+        std::string candidate_id;
+    };
+
     bool start(ServerControlPlaneConfig config, std::string* error) {
         if (dispatcher_.running()) {
             set_error(error, "server control plane is already running");
             return false;
         }
         config_ = std::move(config);
+        if (!config_.exam_journal_path.empty() &&
+            !exam_journal_.open(config_.exam_journal_path, error)) {
+            config_ = {};
+            return false;
+        }
         if (keyring_file_exists(config_.keyring_path) &&
             !security::load_keyring(key_store_, config_.keyring_path,
                                     config_.keyring_entropy, error)) {
+            exam_journal_.close();
+            config_ = {};
             return false;
         }
         if (config_.enrollment_secret.size() >=
@@ -174,6 +203,7 @@ public:
         };
         if (!dispatcher_.start(dispatcher_config, std::move(callbacks), error)) {
             enrollment_authority_.reset();
+            exam_journal_.close();
             return false;
         }
         return true;
@@ -186,7 +216,12 @@ public:
             states_.clear();
             client_connections_.clear();
         }
+        {
+            std::scoped_lock lock(exam_contexts_mutex_);
+            active_exam_contexts_.clear();
+        }
         enrollment_authority_.reset();
+        exam_journal_.close();
         security::secure_zero(config_.enrollment_secret);
         security::secure_zero(config_.keyring_entropy);
         config_ = {};
@@ -195,6 +230,24 @@ public:
     bool send_command(std::uint64_t client_id, protocol::CommandType type,
                       std::span<const std::byte> payload,
                       std::string* error) {
+        // Exam start/stop have side effects on the server authorization map;
+        // route callers through the stateful entry points so a raw command
+        // cannot bypass that bookkeeping.
+        if (type == protocol::CommandType::exam_start) {
+            const auto request = exam::decode_exam_start_request(payload);
+            if (!request) {
+                set_error(error, "invalid exam start request");
+                return false;
+            }
+            return start_exam(client_id, *request, error);
+        }
+        if (type == protocol::CommandType::exam_stop) {
+            if (!payload.empty()) {
+                set_error(error, "exam stop command must not have a payload");
+                return false;
+            }
+            return stop_exam(client_id, error);
+        }
         auto state = state_for_client(client_id);
         if (!state) {
             set_error(error, "client is not authenticated");
@@ -206,19 +259,88 @@ public:
             set_error(error, "authenticated command sequence is unavailable");
             return false;
         }
-        const protocol::CommandEnvelope envelope{
-            .version = protocol::kCommandVersion,
-            .type = type,
-            .payload_bytes = static_cast<std::uint32_t>(payload.size()),
-            .request_id = next_request_id_.fetch_add(1),
-        };
-        const auto wire = control::encode_authenticated_command(
-            state->session_key, envelope, state->send_sequence, payload);
-        if (wire.empty() ||
-            !dispatcher_.send(state->connection_id, wire, error)) {
+        return send_authenticated_locked(
+            *state, type, next_request_id_.fetch_add(1), payload, error);
+    }
+
+    bool start_exam(std::uint64_t client_id,
+                    const exam::ExamStartRequest& request,
+                    std::string* error) {
+        if (!exam::validate_exam_start_request(request)) {
+            set_error(error, "invalid exam start request");
             return false;
         }
-        ++state->send_sequence;
+        const auto state = state_for_client(client_id);
+        if (!state) {
+            set_error(error, "client is not authenticated");
+            return false;
+        }
+        const auto payload = exam::encode_exam_start_request(request);
+        if (payload.empty()) {
+            set_error(error, "exam start request could not be encoded");
+            return false;
+        }
+
+        // Keep the connection lock held while the authorization record is
+        // installed and the command is queued.  Inbound answer/state traffic
+        // takes the same lock, so it cannot observe a half-started session.
+        std::scoped_lock state_lock(state->mutex);
+        if (state->stage != Stage::authenticated ||
+            state->hello.client_id != request.client_id ||
+            state->registry_id.load() == 0) {
+            set_error(error, "exam request identity does not match client");
+            return false;
+        }
+        const auto registry_id = state->registry_id.load();
+        std::scoped_lock context_lock(exam_contexts_mutex_);
+        if (active_exam_contexts_.find(registry_id) !=
+            active_exam_contexts_.end()) {
+            set_error(error, "client already has an active exam session");
+            return false;
+        }
+        ActiveExamContext context;
+        context.client_id = request.client_id;
+        context.package_digest = request.package_digest;
+        context.session_id = request.session_id;
+        context.package_id = request.package_id;
+        context.candidate_id = request.candidate_id;
+        const auto [inserted_context, inserted] =
+            active_exam_contexts_.try_emplace(registry_id, std::move(context));
+        if (!inserted) {
+            set_error(error, "client already has an active exam session");
+            return false;
+        }
+        if (!send_authenticated_locked(
+                *state, protocol::CommandType::exam_start,
+                next_request_id_.fetch_add(1), payload, error)) {
+            active_exam_contexts_.erase(inserted_context);
+            return false;
+        }
+        return true;
+    }
+
+    bool stop_exam(std::uint64_t client_id, std::string* error) {
+        auto state = state_for_client(client_id);
+        if (!state) {
+            set_error(error, "client is not authenticated");
+            return false;
+        }
+        std::scoped_lock state_lock(state->mutex);
+        if (state->stage != Stage::authenticated ||
+            state->registry_id.load() == 0) {
+            set_error(error, "authenticated command sequence is unavailable");
+            return false;
+        }
+        if (!send_authenticated_locked(
+                *state, protocol::CommandType::exam_stop,
+                next_request_id_.fetch_add(1), {}, error)) {
+            return false;
+        }
+        // Remove only after the stop command was queued successfully.  If a
+        // connection is unavailable, retaining the context allows a later
+        // reconnect to recover answers and receive an explicit stop.
+        std::scoped_lock context_lock(exam_contexts_mutex_);
+        active_exam_contexts_.erase(state->registry_id.load());
         return true;
     }
 
@@ -251,20 +373,12 @@ public:
                 succeeded = false;
                 continue;
             }
-            const protocol::CommandEnvelope envelope{
-                .version = protocol::kCommandVersion,
-                .type = type,
-                .payload_bytes = static_cast<std::uint32_t>(payload.size()),
-                .request_id = next_request_id_.fetch_add(1),
-            };
-            const auto wire = control::encode_authenticated_command(
-                state->session_key, envelope, state->send_sequence, payload);
-            if (wire.empty() ||
-                !dispatcher_.send(state->connection_id, wire, nullptr)) {
+            if (!send_authenticated_locked(
+                    *state, type, next_request_id_.fetch_add(1), payload,
+                    nullptr)) {
                 succeeded = false;
                 continue;
             }
-            ++state->send_sequence;
         }
         if (!succeeded) {
             set_error(error, "one or more clients rejected the broadcast");
@@ -278,6 +392,33 @@ public:
     }
 
 private:
+    bool send_authenticated_locked(ConnectionState& state,
+                                    protocol::CommandType type,
+                                    std::uint64_t request_id,
+                                    std::span<const std::byte> payload,
+                                    std::string* error) {
+        if (state.stage != Stage::authenticated ||
+            state.send_sequence == std::numeric_limits<std::uint64_t>::max() ||
+            payload.size() > protocol::kMaxCommandPayload) {
+            set_error(error, "authenticated command sequence is unavailable");
+            return false;
+        }
+        const protocol::CommandEnvelope envelope{
+            .version = protocol::kCommandVersion,
+            .type = type,
+            .payload_bytes = static_cast<std::uint32_t>(payload.size()),
+            .request_id = request_id,
+        };
+        const auto wire = control::encode_authenticated_command(
+            state.session_key, envelope, state.send_sequence, payload);
+        if (wire.empty() ||
+            !dispatcher_.send(state.connection_id, wire, error)) {
+            return false;
+        }
+        ++state.send_sequence;
+        return true;
+    }
+
     std::shared_ptr<ConnectionState> state_for_connection(
         net::ConnectionId id) const {
         std::scoped_lock lock(states_mutex_);
@@ -294,6 +435,36 @@ private:
         }
         const auto found = states_.find(mapping->second);
         return found == states_.end() ? nullptr : found->second;
+    }
+
+    std::optional<ActiveExamContext> active_exam_for(
+        std::uint64_t registry_id) const {
+        if (registry_id == 0) {
+            return std::nullopt;
+        }
+        std::scoped_lock lock(exam_contexts_mutex_);
+        const auto found = active_exam_contexts_.find(registry_id);
+        return found == active_exam_contexts_.end()
+                   ? std::nullopt
+                   : std::optional<ActiveExamContext>(found->second);
+    }
+
+    static bool matches_exam_context(const ActiveExamContext& context,
+                                     const exam::AnswerEvent& event) noexcept {
+        return context.client_id == event.client_id &&
+               context.package_digest == event.package_digest &&
+               context.session_id == event.session_id &&
+               context.package_id == event.package_id &&
+               context.candidate_id == event.candidate_id;
+    }
+
+    static bool matches_exam_context(const ActiveExamContext& context,
+                                     const exam::StateRequest& request) noexcept {
+        return context.client_id == request.client_id &&
+               context.package_digest == request.package_digest &&
+               context.session_id == request.session_id &&
+               context.package_id == request.package_id &&
+               context.candidate_id == request.candidate_id;
     }
 
     void on_bytes(net::ConnectionId id, std::vector<std::byte> bytes) {
@@ -557,6 +728,12 @@ private:
             dispatcher_.disconnect(state.connection_id);
             return false;
         }
+        if (command->envelope.type == protocol::CommandType::exam_answer_event) {
+            return process_exam_answer_event(state, *command);
+        }
+        if (command->envelope.type == protocol::CommandType::exam_state_request) {
+            return process_exam_state_request(state, *command);
+        }
         if (command->envelope.type == protocol::CommandType::heartbeat) {
             (void)registry_.touch(state.registry_id.load());
             return true;
@@ -602,6 +779,74 @@ private:
         return true;
     }
 
+    bool process_exam_answer_event(
+        ConnectionState& state, const control::AuthenticatedCommand& command) {
+        std::string decode_error;
+        const auto event = exam::decode_answer_event(command.payload,
+                                                     &decode_error);
+        // The client id is authenticated by the handshake, but the complete
+        // exam tuple is server-issued.  Never accept an event merely because
+        // its embedded client id matches the socket identity.
+        const auto context = active_exam_for(state.registry_id.load());
+        if (!event || !context || event->client_id != state.hello.client_id ||
+            !matches_exam_context(*context, *event)) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+
+        exam::AppendOutcome outcome;
+        if (exam_journal_.is_open()) {
+            outcome = exam_journal_.append(*event, &decode_error);
+        } else {
+            outcome.status = exam::AppendStatus::unavailable;
+            outcome.ack.status = exam::AnswerAckStatus::unavailable;
+            outcome.ack.session_id = event->session_id;
+            outcome.ack.sequence = event->sequence;
+            outcome.ack.server_time_unix_milliseconds =
+                unix_milliseconds_now();
+        }
+        const auto ack = exam::encode_answer_ack(outcome.ack);
+        if (ack.empty() || !send_authenticated_locked(
+                                state, protocol::CommandType::exam_answer_ack,
+                                command.envelope.request_id, ack, nullptr)) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+        return true;
+    }
+
+    bool process_exam_state_request(
+        ConnectionState& state, const control::AuthenticatedCommand& command) {
+        const auto request = exam::decode_state_request(command.payload);
+        const auto context = active_exam_for(state.registry_id.load());
+        if (!request || !context || request->client_id != state.hello.client_id ||
+            !matches_exam_context(*context, *request) ||
+            !exam_journal_.is_open()) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+        std::string state_error;
+        const auto response = exam_journal_.state(*request, &state_error);
+        if (!response) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+        const auto payloads = exam::encode_state_response_chunks(*response);
+        if (payloads.empty()) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+        for (const auto& payload : payloads) {
+            if (!send_authenticated_locked(
+                    state, protocol::CommandType::exam_state_response,
+                    command.envelope.request_id, payload, nullptr)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+        }
+        return true;
+    }
+
     void fail_handshake(ConnectionState& state, std::string detail) {
         dispatcher_.record_handshake_failure(state.connection_id,
                                              std::move(detail));
@@ -638,14 +883,20 @@ public:
     ClientRegistry& registry_;
     security::KeyStore& key_store_;
     ServerControlPlaneConfig config_;
+    // This journal is server-owned and intentionally never placed under a
+    // client freeze/UWF overlay. It remains authoritative across reconnects.
+    exam::AnswerJournal exam_journal_;
     net::IocpDispatcher dispatcher_;
     security::ReplayProtector replay_protector_;
     std::unique_ptr<security::EnrollmentAuthority> enrollment_authority_;
     std::mutex enrollment_mutex_;
     mutable std::mutex states_mutex_;
+    mutable std::mutex exam_contexts_mutex_;
     std::unordered_map<net::ConnectionId,
                        std::shared_ptr<ConnectionState>> states_;
     std::unordered_map<std::uint64_t, net::ConnectionId> client_connections_;
+    std::unordered_map<std::uint64_t, ActiveExamContext>
+        active_exam_contexts_;
     std::atomic<std::uint64_t> next_request_id_ = 1;
 };
 
@@ -786,9 +1037,20 @@ bool ServerControlPlane::send_remote_input(
 }
 
 bool ServerControlPlane::stop_remote_control(std::uint64_t client_id,
-                                             std::string* error) {
+                                              std::string* error) {
     return send_command(client_id, protocol::CommandType::remote_end, {},
                         error);
+}
+
+bool ServerControlPlane::start_exam(
+    std::uint64_t client_id, const exam::ExamStartRequest& request,
+    std::string* error) {
+    return impl_->start_exam(client_id, request, error);
+}
+
+bool ServerControlPlane::stop_exam(std::uint64_t client_id,
+                                   std::string* error) {
+    return impl_->stop_exam(client_id, error);
 }
 
 bool ServerControlPlane::running() const noexcept {

@@ -32,6 +32,14 @@ enum class AgentMessageType : std::uint16_t {
     remote_start = 16,
     remote_input = 17,
     remote_end = 18,
+    // Client-to-service bridge for durable exam answer events. The service
+    // validates and persists the payload before forwarding it to the server.
+    exam_answer_event = 19,
+    exam_state_request = 20,
+    exam_answer_ack = 21,
+    exam_state_response = 22,
+    exam_start = 23,
+    exam_stop = 24,
 };
 
 struct AgentMessage {

@@ -35,6 +35,45 @@
 - [x] Bilingual deployment-facing README with installation, network, licensing,
       Deep Freeze, and honest MVP-status guidance.
 
+## Computer-based assessment
+
+- [x] Package-contained exam UI with multiple-choice, short-answer, essay,
+      listening, reading, PDF/audio references, timer, autosave, bilingual
+      display settings, and local JSON response export.
+- [x] Authenticated answer events with per-session sequence numbers, hash-chain
+      validation, bounded state responses, and framed diagnostic exports.
+- [x] Durable client retry outbox with machine-scope DPAPI protection,
+      migration, quota enforcement, ACK validation, and crash-tail-safe server
+      journal persistence.
+- [x] Implement the optional native WebView2 host with pinned digest/path
+      validation, strict local navigation, user-mode kiosk safeguards,
+      process-failure handling, and a tested agent/service bridge.
+- [x] Bind the authenticated exam start to the manifest package ID (EXS2),
+      carry that identity into the client host, and reject package-ID
+      mismatches in browser recovery, answer events, and state requests.
+- [x] Add deployment-owned package staging with bounded ZIP extraction,
+      traversal/reparse/duplicate/path-collision rejection, archive and
+      content-digest pins, content-addressed publication, and a detached
+      CMS/PKCS#7 publisher-thumbprint gate. The
+      `packaging/stage-exam-package.ps1` helper is covered by an
+      adversarial disposable test and is shipped in the deployment
+      documentation payload. The native host still rechecks the pinned package
+      digest immediately before mapping, rejects parent reparse points,
+      confines navigation to the validated web root, and requires the packaged
+      loader plus a runtime probe.
+- [ ] Validate the staging helper, publisher chain/revocation policy,
+      `WebView2Loader.dll`, and the WebView2 Runtime across the supported
+      Windows images with production certificates and signed fixtures.
+- [ ] Add instructor/deployment authorization for package, session, and
+       candidate bindings; authenticate and audit every official assessment.
+- [ ] Roll out direction-bound control MACs with an authenticated capability or
+       protocol-version negotiation; retain v1 compatibility until the fleet
+       is upgraded.
+- [ ] Add server-side grading, review, sealed exports, and recovery drills
+      covering client resets, offline replay, and school-approved retention.
+- [ ] Run the exam-specific production gates in
+      `PRODUCTION_VALIDATION.md` before enabling official assessments.
+
 ## Completed production engineering
 
 - [x] Persisted, versioned DPAPI keyring with active keys and revoked-ID
@@ -83,12 +122,25 @@ Do not advertise, enable, or make H.264 a prerequisite for classroom use.
 
 - [x] Document a UWF-first architecture, Windows edition gate, threat model,
       persistence boundary, servicing/recovery lifecycle, and staged test plan.
-- [ ] Implement a read-only capability probe for exact Windows SKU/build,
-      optional-feature/provider availability, current/next UWF state, protected
-      volumes, exclusions, overlay configuration, and UWF event health.
-- [ ] Add a separate deployment-administrator authorization role and signed,
-      replay-resistant, strictly typed maintenance intents. Existing teacher
-      control credentials must not authorize UWF mutation.
+- [x] Implement the read-only SKU/optional-feature/provider/current-next UWF
+      capability probe, including an explicit `probe unavailable` state when a
+      supported image cannot be classified without mutation.
+- [x] Extend the read-only capability probe to protected volumes, exclusion
+      counts without path disclosure, overlay configuration/consumption, and
+      recent UWF event health, with bounded queries and explicit partial or
+      truncated-result warnings.
+- [x] Keep this extension local, client-only, and read-only: it does not
+      implement or authorize UWF mutation, and the server role skips UWF so its
+      data remains persistent.
+- [x] Add the standalone contract for a separate deployment-administrator
+      credential and HMAC-authenticated, replay-resistant, strictly typed
+      maintenance intents. The canonical codec binds intent/nonce IDs, target
+      client, exact expected restore state, policy revision, a 15-minute
+      maximum validity window, and bounded operation-specific parameters. It
+      returns an opaque capability only after successful authorization and is
+      deliberately not connected to the teacher control channel, UWF WMI,
+      reboot, UI, or helper execution; durable replay/transaction state
+      remains part of the next milestone.
 - [ ] Implement the typed UWF WMI controller behind a lab-only feature flag,
       with local confirmation for first activation, recovery, and decommission.
 - [ ] Add bounded persistent maintenance transactions, overlay monitoring,
@@ -128,9 +180,12 @@ will not implement a script-based or custom-kernel imitation of UWF.
       binaries.
 - [ ] Validate the conservative Deep Freeze install/uninstall/data-root behavior
       against every edition and version the project claims to support.
-- [ ] Execute and attach evidence for the 50-client soak, multicast switch
-      matrix, forced unicast fallback, Windows build matrix, Intel driver matrix,
-      and CPU/RAM/network benchmarks.
+- [ ] Execute and attach evidence for the 50-client snapshot soak, authenticated
+      TCP snapshot-network/uplink capacity, Windows build matrix, Intel driver
+      matrix, and CPU/RAM/network benchmarks.
+- [ ] If continuous H.264 is enabled in a future release, execute and attach the
+      separate multicast switch matrix and forced unicast-fallback evidence
+      before advertising that mode.
 - [ ] Complete independent protocol review and fuzzing. Where the LAN threat
       model requires screen confidentiality, add authenticated encryption before
       deployment; the current video format authenticates but does not encrypt.

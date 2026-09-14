@@ -8,9 +8,12 @@ target_compile_definitions(nstu_setup_diagnostics PUBLIC
     NSTU_INTERNAL_TEST_BUILD=$<BOOL:${NSTU_INTERNAL_TEST_BUILD}>)
 target_link_libraries(nstu_setup_diagnostics PUBLIC
     nstu_common d3d11 dxgi iphlpapi mf mfplat mfuuid netapi32 ole32 shell32
-    user32 wbemuuid ws2_32
+    oleaut32 user32 wbemuuid wevtapi ws2_32
 )
 nstu_enable_warnings(nstu_setup_diagnostics)
+if(MSVC)
+    target_compile_options(nstu_setup_diagnostics PRIVATE /utf-8)
+endif()
 
 add_executable(nstu-diagnostics WIN32
     resources/nstu-setup.rc

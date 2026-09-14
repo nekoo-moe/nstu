@@ -53,6 +53,15 @@ enum class CommandType : std::uint16_t {
     remote_start = 29,
     remote_input = 30,
     remote_end = 31,
+    exam_answer_event = 32,
+    exam_answer_ack = 33,
+    exam_state_request = 34,
+    exam_state_response = 35,
+    // Authenticated instructor commands for the client-side exam host. The
+    // server never hosts or freezes exam data; it only authorizes a client
+    // start/stop request over the existing control channel.
+    exam_start = 36,
+    exam_stop = 37,
 };
 
 enum class ConnectionRole : std::uint8_t {

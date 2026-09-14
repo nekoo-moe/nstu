@@ -31,6 +31,14 @@ using Sha256Digest = std::array<std::byte, kSha256Bytes>;
 using VideoAuthTag = std::array<std::byte, kVideoAuthTagBytes>;
 using ControlAuthTag = std::array<std::byte, kControlAuthTagBytes>;
 
+// Direction-bound MAC helpers are available for the next negotiated control
+// protocol revision.  The current on-wire channel remains on the legacy
+// neutral domain until both peers advertise the directional capability.
+enum class ControlDirection : std::uint8_t {
+    client_to_server = 1,
+    server_to_client = 2,
+};
+
 struct AuthHello {
     ClientId client_id{};
     Nonce client_nonce{};
@@ -55,6 +63,8 @@ struct AuthChallenge {
     const AuthChallenge& challenge) noexcept;
 
 [[nodiscard]] bool generate_random(std::span<std::byte> output) noexcept;
+[[nodiscard]] std::optional<Sha256Digest> sha256(
+    std::span<const std::byte> message) noexcept;
 [[nodiscard]] std::optional<Sha256Digest> hmac_sha256(
     std::span<const std::byte> key, std::span<const std::byte> message) noexcept;
 [[nodiscard]] bool constant_time_equal(std::span<const std::byte> left,
@@ -84,7 +94,20 @@ void secure_zero(std::span<std::byte> bytes) noexcept;
 [[nodiscard]] std::optional<ControlAuthTag> compute_control_auth_tag(
     std::span<const std::byte> session_key,
     const protocol::CommandEnvelope& envelope, std::uint64_t sequence,
+    std::span<const std::byte> payload,
+    ControlDirection direction) noexcept;
+// Legacy compatibility overload.  Do not use it for a newly negotiated
+// directional channel; it is retained so existing v1 peers remain usable.
+[[nodiscard]] std::optional<ControlAuthTag> compute_control_auth_tag(
+    std::span<const std::byte> session_key,
+    const protocol::CommandEnvelope& envelope, std::uint64_t sequence,
     std::span<const std::byte> payload) noexcept;
+[[nodiscard]] bool verify_control_auth_tag(
+    std::span<const std::byte> session_key,
+    const protocol::CommandEnvelope& envelope, std::uint64_t sequence,
+    std::span<const std::byte> payload,
+    ControlDirection direction,
+    std::span<const std::byte> tag) noexcept;
 [[nodiscard]] bool verify_control_auth_tag(
     std::span<const std::byte> session_key,
     const protocol::CommandEnvelope& envelope, std::uint64_t sequence,
