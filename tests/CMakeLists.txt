@@ -97,6 +97,12 @@ nstu_enable_test_assertions(nstu_control_channel_tests)
 add_test(NAME nstu.control_channel COMMAND nstu_control_channel_tests)
 
 if(WIN32)
+    add_executable(nstu_discovery_tests discovery_tests.cpp)
+    target_link_libraries(nstu_discovery_tests PRIVATE nstu_common)
+    nstu_enable_warnings(nstu_discovery_tests)
+    nstu_enable_test_assertions(nstu_discovery_tests)
+    add_test(NAME nstu.discovery COMMAND nstu_discovery_tests)
+
     add_executable(nstu_screen_snapshot_tests screen_snapshot_tests.cpp)
     target_link_libraries(nstu_screen_snapshot_tests PRIVATE nstu_common)
     nstu_enable_warnings(nstu_screen_snapshot_tests)

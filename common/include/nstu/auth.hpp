@@ -131,7 +131,7 @@ public:
         std::size_t capacity = 4096,
         std::chrono::seconds maximum_clock_skew = std::chrono::seconds(120));
 
-    // Call only after the client's MAC has been verified.
+    // Call only after the peer's cryptographic authenticator has been verified.
     [[nodiscard]] bool accept(const AuthHello& hello,
                               std::uint64_t now_unix_seconds);
     void clear();

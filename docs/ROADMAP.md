@@ -15,8 +15,8 @@
 - [x] In-process key enrollment, monotonic rotation, revocation, and zeroization.
 - [x] Bounded unauthenticated handshake rate limiter with temporary blocking.
 - [x] Unified NSIS role-selecting installer with automatic client service
-      registration, recovery policy, reboot activation, conflict checks, and
-      package-owned uninstall handling.
+      registration, recovery policy, reboot activation, server sign-in startup,
+      conflict checks, and package-owned uninstall handling.
 - [x] Teacher-focused server UI with a responsive latest-snapshot wall,
       adjustable 5-10 second interval, health summary, filtering, focused
       telemetry, chat and controls; lightweight Native Win32 client chat shell.
@@ -83,6 +83,11 @@
       test.
 - [x] Authenticated server control plane and reconnecting service client with
       status, heartbeat, lock/unlock, chat, stream, stop, and keyframe commands.
+- [x] Authenticated same-VLAN server endpoint recovery using the per-client
+      enrollment PSK, bounded UDP discovery on the control port, mutual TCP
+      revalidation before an atomic DPAPI cache update, disconnect fail-safe
+      cleanup, and jittered classroom reconnects. IP and hardware MAC addresses
+      are not identity anchors.
 - [x] Live service-agent named-pipe routing and status reporting.
 - [x] Server dashboard actions connected to authenticated client sessions.
 - [x] Bounded authenticated JPEG snapshots from clients to the dashboard, with
@@ -185,8 +190,9 @@ will not implement a script-based or custom-kernel imitation of UWF.
 - [ ] Validate the conservative Deep Freeze install/uninstall/data-root behavior
       against every edition and version the project claims to support.
 - [ ] Execute and attach evidence for the 50-client snapshot soak, authenticated
-      TCP snapshot-network/uplink capacity, Windows build matrix, Intel driver
-      matrix, and CPU/RAM/network benchmarks.
+      TCP snapshot-network/uplink capacity, same-VLAN server-address change and
+      reconnect storm, Windows build matrix, Intel driver matrix, and
+      CPU/RAM/network benchmarks.
 - [ ] If continuous H.264 is enabled in a future release, execute and attach the
       separate multicast switch matrix and forced unicast-fallback evidence
       before advertising that mode.

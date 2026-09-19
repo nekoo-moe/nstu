@@ -11,6 +11,7 @@
 #include <wtsapi32.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -70,6 +71,34 @@ constexpr std::size_t kMaximumQueuedExamIngress = 64;
 constexpr auto kExamTransientRetryDelay = std::chrono::seconds(2);
 constexpr auto kExamRejectedRetryDelay = std::chrono::seconds(30);
 constexpr auto kExamAckTimeout = std::chrono::seconds(5);
+
+void update_diagnostic_endpoint_cache(
+    const nstu::discovery::ServerEndpoint& endpoint) noexcept {
+    HKEY key = nullptr;
+    const LONG opened = RegOpenKeyExW(
+        HKEY_LOCAL_MACHINE, L"Software\\NSTU", 0,
+        KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
+    if (opened != ERROR_SUCCESS) {
+        OutputDebugStringA(
+            "NSTU diagnostic endpoint registry cache could not be opened\n");
+        return;
+    }
+    const std::wstring address(endpoint.address.begin(), endpoint.address.end());
+    const DWORD address_bytes = static_cast<DWORD>(
+        (address.size() + 1) * sizeof(wchar_t));
+    const DWORD port = endpoint.port;
+    const LONG address_result = RegSetValueExW(
+        key, L"ServerAddress", 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(address.c_str()), address_bytes);
+    const LONG port_result = RegSetValueExW(
+        key, L"ServerPort", 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&port), sizeof(port));
+    RegCloseKey(key);
+    if (address_result != ERROR_SUCCESS || port_result != ERROR_SUCCESS) {
+        OutputDebugStringA(
+            "NSTU diagnostic endpoint registry cache update failed\n");
+    }
+}
 
 std::string exam_inflight_key(const nstu::exam::AnswerEvent& event) {
     // Keep the session/sequence/hash prefix fixed so an ACK can retire only
@@ -870,19 +899,57 @@ void remote_control_loop(std::stop_token stop_token) {
             // service finished opening its identity-bound outbox.
             drain_exam_ingress();
             std::string ignored_error;
+            const auto endpoint_observer =
+                [&](const nstu::discovery::ServerEndpoint& endpoint) {
+                    if (endpoint.address == config.server_address &&
+                        endpoint.port == config.server_port) {
+                        return;
+                    }
+                    auto updated = config;
+                    updated.server_address = endpoint.address;
+                    updated.server_port = endpoint.port;
+                    std::string save_error;
+                    if (!nstu::client::save_client_runtime_config(
+                            updated, path.wstring(), entropy, &save_error)) {
+                        OutputDebugStringA(
+                            ("NSTU authenticated endpoint cache update failed: " +
+                             save_error + "\n")
+                                .c_str());
+                    } else {
+                        update_diagnostic_endpoint_cache(endpoint);
+                    }
+                    nstu::client::clear_client_runtime_config(updated);
+                };
             (void)nstu::client::run_client_control_session(
                 config, stop_token, current_status, handle_server_command,
                 pop_outbound_message,
-                &ignored_error);
+                &ignored_error, endpoint_observer);
             // Commands are only marked in-flight until the authenticated TCP
             // session successfully delivers an acknowledgement. A disconnect
             // must make every unsatisfied event eligible on the next session.
             clear_exam_inflight();
             queue_exam_stop();
+            set_desired_lock(false);
+            queue_agent_message(
+                {nstu::client::AgentMessageType::stop_stream, {}});
+            queue_agent_message(
+                {nstu::client::AgentMessageType::stop_snapshots, {}});
+            queue_agent_message(
+                {nstu::client::AgentMessageType::host_broadcast_stop, {}});
+            queue_agent_message(
+                {nstu::client::AgentMessageType::overlay_clear, {}});
             queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
             nstu::client::clear_client_runtime_config(config);
         }
-        for (int tick = 0; tick < 50 && !stop_token.stop_requested(); ++tick) {
+        std::array<std::byte, 2> jitter_bytes{};
+        const bool have_jitter = nstu::security::generate_random(jitter_bytes);
+        const auto jitter = have_jitter
+            ? (std::to_integer<unsigned int>(jitter_bytes[0]) |
+               (std::to_integer<unsigned int>(jitter_bytes[1]) << 8u)) % 31u
+            : 20u;
+        const auto reconnect_ticks = 30u + jitter;
+        for (std::uint32_t tick = 0;
+             tick < reconnect_ticks && !stop_token.stop_requested(); ++tick) {
             Sleep(100);
         }
     }

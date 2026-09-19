@@ -8,6 +8,11 @@ nstu-service.exe      LocalSystem Session 0 service, policy and lifecycle
 nstu-agent.exe        Logged-in-user tray and fullscreen overlay
 ```
 
+The unified installer registers `nstu-server.exe` in the machine `Run` key so
+the teacher UI starts at interactive sign-in. It is deliberately not a Windows
+service: D3D11, ImGui, and notification-area ownership remain in the signed-in
+user session. The uninstaller removes the startup registration.
+
 The service and agent are separate because Windows services cannot interact
 directly with the logged-in user's desktop. IPC uses a local named pipe whose
 DACL permits SYSTEM, Administrators, and the interactive user and rejects
@@ -29,6 +34,7 @@ The service loads its client identity and PSK from a machine-scoped DPAPI
 configuration, reconnects to the teacher server, completes the mutual HMAC
 handshake, and forwards authenticated commands to the active-session agent.
 Agent status is returned over the same pipe and then reported to the server.
+The stored server IPv4 address is a reconnect cache, not an identity anchor.
 
 ## Computer-based assessment path
 
@@ -162,6 +168,39 @@ The server uses a bounded IOCP dispatcher with posted `AcceptEx`, one outstandin
 and structured audit callbacks. The raw receive path feeds an asynchronous
 preamble/handshake state machine before authenticated frames can update the
 registry or execute dashboard commands.
+
+## Authenticated server endpoint recovery
+
+The server binds an authenticated UDP discovery responder to the same numeric
+port as the TCP control listener (`47001` by default). When the cached endpoint
+cannot connect or complete mutual authentication, the client sends a fixed
+104-byte discovery request to the directed broadcast addresses of active IPv4
+LAN adapters. Loopback and tunnel adapters are excluded from automatic target
+selection; tests and controlled deployments can provide explicit targets.
+
+```text
+try cached IPv4 endpoint
+  -> on failure, send HMAC-authenticated UDP discovery request
+  -> verify response client ID, key ID, nonce, timestamp, port, and HMAC
+  -> connect to the response source address
+  -> complete the normal mutual TCP handshake
+  -> atomically replace the DPAPI-protected endpoint cache
+  -> refresh the non-secret registry hint used by login diagnostics
+```
+
+Requests and responses use separate HMAC domain labels. The responder resolves
+the requesting client's enrolled PSK, rejects stale or replayed nonces, and
+rate-limits invalid requests by source address. A UDP response only supplies a
+candidate endpoint: the client does not cache it until the existing mutual TCP
+handshake succeeds. An IPv4 address or hardware MAC address is therefore never
+used as proof of server identity.
+
+Discovery is deliberately link-local in deployment scope. Routers normally do
+not forward IPv4 broadcasts, so separate VLANs require a stable address,
+controlled DHCP/DNS, or a future authenticated relay. After a control-session
+disconnect, the service clears transient exam, lock, stream, snapshot,
+teacher-broadcast, annotation, and remote-input state, then retries after 3-6
+seconds of cryptographic jitter to avoid a classroom reconnect storm.
 
 ## Packet loss
 

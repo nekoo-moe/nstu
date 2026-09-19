@@ -215,6 +215,7 @@ Section -Server
   WriteRegStr HKLM "Software\\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "DisplayName" "NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@"
+  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "NSTU Server" '"$INSTDIR\\server\\nstu-server.exe"'
   WriteUninstaller "$INSTDIR\\Uninstall.exe"
   Goto nstu_server_done
 nstu_server_setup_failed:
@@ -331,6 +332,7 @@ nstu_uninstall_files:
   Pop $1
   StrCmp $0 "0" 0 nstu_uninstall_finalize_failed
   DeleteRegValue HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "NSTU Diagnostics"
+  DeleteRegValue HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "NSTU Server"
   DeleteRegKey HKLM "Software\\NSTU"
   DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU"
   RMDir /r "$INSTDIR\\client"

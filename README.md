@@ -331,10 +331,8 @@ evaluated for cooperation. Additional test results are still being collected.
 
 <table>
   <tr>
-    <td align="center" valign="top" width="180">
-      <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Vung Tau Junior High School logo" width="112"><br>
-      <sub><b>Vung Tau Junior High School</b><br>Testing completed; teacher-conducted and permitted</sub>
-    </td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Le Quy Don High School for the Gifted logo" width="112"><br><sub><b>Le Quy Don High School for the Gifted</b><br>Cooperation confirmed</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="VNU-HCM High School for the Gifted logo" width="112"><br><sub><b>VNU-HCM High School for the Gifted (PTNK)</b><br>Cooperation confirmed</sub></td>
   </tr>
 </table>
 
@@ -342,11 +340,7 @@ evaluated for cooperation. Additional test results are still being collected.
 
 <table>
   <tr>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Vo Truong Toan Junior High School logo" width="112"><br><sub><b>Vo Truong Toan Junior High School</b><br>Cooperation agreed; testing pending</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Dinh Tien Hoang High School logo" width="112"><br><sub><b>Dinh Tien Hoang High School</b><br>Cooperation agreed; testing pending</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Le Quy Don High School for the Gifted logo" width="112"><br><sub><b>Le Quy Don High School for the Gifted</b><br>Cooperation agreed; testing pending</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="VNU-HCM High School for the Gifted logo" width="112"><br><sub><b>VNU-HCM High School for the Gifted (PTNK)</b><br>Cooperation agreed; testing pending</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ben-cat-high-school.png" alt="Ben Cat High School logo" width="112"><br><sub><b>Ben Cat High School</b><br>Under review; partnership not confirmed</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Dinh Tien Hoang High School logo" width="112"><br><sub><b>Dinh Tien Hoang High School</b><br>Cooperation status awaiting verification</sub></td>
   </tr>
 </table>
 
@@ -374,22 +368,34 @@ Before a production deployment:
 
 1. Put the server and clients on the same trusted VLAN or subnet for the first
    rollout.
-2. Use a managed switch or router where practical. IGMP snooping and one IGMP
+2. Reserve a stable server address outside the DHCP pool where possible. Keep
+   the router/gateway at `.1` and use a separate address such as `.10` for the
+   teacher server.
+3. Use a managed switch or router where practical. IGMP snooping and one IGMP
    querier are required only for a future continuous H.264/multicast trial;
    the supported snapshot path uses ordinary authenticated TCP connections.
-3. Do not expose NSTU control or video traffic directly to the internet.
-4. Prefer wired Ethernet. If Wi-Fi is used for testing, disable access-point
+4. Do not expose NSTU control or video traffic directly to the internet.
+5. Prefer wired Ethernet. If Wi-Fi is used for testing, disable access-point
    client isolation and confirm the switch/AP can sustain the expected TCP
    snapshot traffic.
-5. For snapshot-only deployment, an ordinary switch is sufficient if it meets
+6. For snapshot-only deployment, an ordinary switch is sufficient if it meets
    the measured client count and uplink capacity. Do not enable multicast just
    to make discovery work. If the optional H.264 trial is enabled later,
    validate IGMP snooping, querier, flooding, and unicast fallback separately.
-6. Keep Windows Firewall enabled. TCP `47001` is the required authenticated
-   control and snapshot port. UDP `47000` is reserved for the optional future
+7. Keep Windows Firewall enabled. TCP `47001` is the required authenticated
+   control and snapshot port, and UDP `47001` handles authenticated same-VLAN
+   server address recovery. UDP `47000` is reserved for the optional future
    continuous-video transport and should remain closed unless that feature is
    explicitly enabled. Limit rules to the classroom VLAN and required
    executable; do not create broad internet-facing rules.
+
+After enrollment, a client treats the stored server IPv4 address as a cache. If
+that endpoint fails, it broadcasts a PSK-authenticated discovery request on the
+same VLAN, performs the normal mutual TCP handshake with the candidate, and
+stores the new address only after authentication succeeds. A server MAC address
+may be used by the router for DHCP reservation, but NSTU never treats an IP or
+MAC address as proof of server identity. Broadcast recovery does not cross a
+router, so separate VLANs still require stable addressing or managed routing.
 
 Cross-VLAN multicast is outside the supported snapshot deployment. If a future
 continuous-video trial needs it, configure multicast routing intentionally and
@@ -411,17 +417,19 @@ Get-FileHash .\nstu-*-setup.exe -Algorithm SHA256
 1. Download `nstu-<version>-setup.exe` from the latest pre-release.
 2. Run the unified installer, select **Install for Server**, and accept the
    Windows elevation prompt if requested.
-3. Start:
+3. To use the server immediately without signing out, launch it once:
 
    ```powershell
    & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
    ```
 
-The server executable is not registered as a Windows service and does not
-launch automatically by default; technicians start it manually or create an
-organization-managed shortcut/task for the teacher workstation. The same
-installer's diagnostics helper can be run later to repeat hardware and network
-checks while the machine is thawed.
+The installer registers `NSTU Server` as a machine startup application. It
+launches `nstu-server.exe` automatically in the interactive teacher session
+whenever a user signs in to Windows; it intentionally remains a desktop app,
+not a Session 0 Windows service. Minimizing or closing the window keeps it in
+the notification area. Choosing **Exit** stops it until it is launched manually
+or the next sign-in. The same installer's diagnostics helper can be run later
+to repeat hardware and network checks while the machine is thawed.
 
 To remove the server, use Windows **Installed apps** or the server uninstaller.
 The first invocation stages removal and requires a restart; it does not remove
@@ -517,7 +525,7 @@ The current enrollment flow is command-line based and must be performed while
 the machines are thawed, from an elevated PowerShell prompt. Run the same
 unified installer on each machine, choosing Server on the teacher machine and
 Client on each student machine. Put them on the same trusted VLAN and allow TCP
-port `47001` between clients and the server.
+and UDP traffic on port `47001` between clients and the server.
 
 The commands below use scripts shipped by the installer. A complete installer
 places them under `C:\Program Files\NSTU\docs\deployment`; a standalone
@@ -680,6 +688,7 @@ remain compatible with permissive licensing; GPL dependencies are not accepted.
 
 - **Lê Anh Tuấn (`ssdarealest`)**: Responsible for project management, legal support, conceptualization, progress management, and project development.
 - **Bùi Hồ Hải Đăng (`yanji`)**: Contributor of ideas, participant in building NSTU, provider of testing equipment, and quality assurance reviewer for the final output.
+- **Nguyễn Thị Hồng Quyên**: Informatics teacher at Le Quy Don High School for the Gifted, Ho Chi Minh City.
 
 ## License
 

@@ -325,10 +325,8 @@ Các trường dưới đây đang phối hợp với NSTU với vai trò đối
 
 <table>
   <tr>
-    <td align="center" valign="top" width="180">
-      <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Logo Trường THCS Vũng Tàu" width="112"><br>
-      <sub><b>Trường THCS Vũng Tàu</b><br>Đã hoàn thành kiểm thử; giáo viên thực hiện và cho phép</sub>
-    </td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Logo Trường THPT Chuyên Lê Quý Đôn" width="112"><br><sub><b>Trường THPT Chuyên Lê Quý Đôn</b><br>Đã xác nhận hợp tác</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="Logo Trường Phổ thông Năng khiếu, ĐHQG-HCM" width="112"><br><sub><b>Trường Phổ thông Năng khiếu, ĐHQG-HCM</b><br>Đã xác nhận hợp tác</sub></td>
   </tr>
 </table>
 
@@ -336,11 +334,7 @@ Các trường dưới đây đang phối hợp với NSTU với vai trò đối
 
 <table>
   <tr>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Logo Trường THCS Võ Trường Toản" width="112"><br><sub><b>Trường THCS Võ Trường Toản</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Logo Trường THPT Đinh Tiên Hoàng" width="112"><br><sub><b>Trường THPT Đinh Tiên Hoàng</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Logo Trường THPT Chuyên Lê Quý Đôn" width="112"><br><sub><b>Trường THPT Chuyên Lê Quý Đôn</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="Logo PTNK ĐHQG-HCM" width="112"><br><sub><b>PTNK, ĐHQG-HCM</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ben-cat-high-school.png" alt="Logo Trường THPT Bến Cát" width="112"><br><sub><b>Trường THPT Bến Cát</b><br>Đang xem xét; chưa xác nhận đối tác</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Logo Trường THPT Đinh Tiên Hoàng" width="112"><br><sub><b>Trường THPT Đinh Tiên Hoàng</b><br>Đang xác minh tình trạng hợp tác</sub></td>
   </tr>
 </table>
 
@@ -368,20 +362,30 @@ Trước khi triển khai production:
 
 1. Đặt server và client trong cùng VLAN hoặc subnet tin cậy ở lần triển khai
    đầu tiên.
-2. Nên dùng managed switch hoặc router khi có thể. IGMP snooping và một IGMP
+2. Nên reserve IP server ổn định bên ngoài DHCP pool. Giữ router/gateway ở `.1`
+   và dùng địa chỉ khác như `.10` cho máy giáo viên.
+3. Nên dùng managed switch hoặc router khi có thể. IGMP snooping và một IGMP
    querier chỉ bắt buộc cho thử nghiệm H.264/multicast liên tục trong tương
    lai; đường snapshot được hỗ trợ dùng kết nối TCP xác thực thông thường.
-3. Không expose trực tiếp control/video traffic của NSTU ra Internet.
-4. Ưu tiên Ethernet có dây. Nếu thử nghiệm bằng Wi-Fi, tắt AP client isolation
+4. Không expose trực tiếp control/video traffic của NSTU ra Internet.
+5. Ưu tiên Ethernet có dây. Nếu thử nghiệm bằng Wi-Fi, tắt AP client isolation
    và kiểm tra switch/AP đáp ứng được lưu lượng snapshot TCP dự kiến.
-5. Với triển khai chỉ dùng snapshot, switch thông thường là đủ nếu đáp ứng số
+6. Với triển khai chỉ dùng snapshot, switch thông thường là đủ nếu đáp ứng số
    client và dung lượng uplink đã đo. Không bật multicast chỉ để discovery hoạt
    động. Nếu sau này bật thử nghiệm H.264 tùy chọn, phải kiểm tra riêng IGMP
    snooping, querier, flooding và unicast fallback.
-6. Luôn bật Windows Firewall. TCP `47001` là control và snapshot port đã xác
-   thực bắt buộc. UDP `47000` dành cho continuous video tùy chọn trong tương
-   lai và nên đóng nếu chưa bật tính năng. Chỉ mở rule cho VLAN phòng học và
-   executable cần thiết; không expose rule rộng ra Internet.
+7. Luôn bật Windows Firewall. TCP `47001` là control và snapshot port đã xác
+   thực bắt buộc; UDP `47001` dùng để tìm lại địa chỉ server có xác thực trong
+   cùng VLAN. UDP `47000` dành cho continuous video tùy chọn trong tương lai và
+   nên đóng nếu chưa bật tính năng. Chỉ mở rule cho VLAN phòng học và executable
+   cần thiết; không expose rule rộng ra Internet.
+
+Sau khi enroll, client chỉ xem IPv4 server đã lưu là cache. Nếu endpoint đó lỗi,
+client broadcast yêu cầu discovery được xác thực bằng PSK trong cùng VLAN, thực
+hiện mutual TCP handshake với candidate rồi mới lưu địa chỉ mới. Router có thể
+dùng MAC server cho DHCP reservation, nhưng NSTU không xem IP hoặc MAC là bằng
+chứng danh tính server. Broadcast recovery không đi xuyên router, vì vậy các
+VLAN tách biệt vẫn cần địa chỉ ổn định hoặc routing được quản lý.
 
 Multicast qua nhiều VLAN không thuộc triển khai snapshot được hỗ trợ. Nếu thử
 continuous video trong tương lai, phải cấu hình multicast routing có chủ đích
@@ -403,16 +407,19 @@ Get-FileHash .\nstu-*-setup.exe -Algorithm SHA256
 1. Tải `nstu-<version>-setup.exe` từ pre-release mới nhất.
 2. Chạy installer hợp nhất, chọn **Install for Server** và chấp nhận UAC nếu
    Windows yêu cầu.
-3. Khởi động:
+3. Nếu muốn dùng ngay mà không đăng xuất, hãy mở server một lần:
 
    ```powershell
    & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
    ```
 
-Server không được đăng ký thành Windows service và mặc định không tự chạy khi
-Windows khởi động; kỹ thuật viên mở thủ công hoặc tạo shortcut/task do trường
-quản lý trên máy giáo viên. Helper diagnostics đi kèm installer có thể chạy lại
-để kiểm tra phần cứng và mạng khi máy đang ở trạng thái thawed.
+Installer đăng ký `NSTU Server` là ứng dụng startup toàn máy. `nstu-server.exe`
+tự mở trong session tương tác của giáo viên mỗi khi người dùng đăng nhập
+Windows; server vẫn là ứng dụng desktop, không phải Windows service chạy trong
+Session 0. Minimize hoặc đóng cửa sổ chỉ đưa server xuống notification area.
+Chọn **Exit** sẽ dừng server cho tới khi mở thủ công hoặc đăng nhập Windows lần
+sau. Helper diagnostics đi kèm installer có thể chạy lại để kiểm tra phần cứng
+và mạng khi máy đang ở trạng thái thawed.
 
 Để gỡ server, dùng **Installed apps** của Windows hoặc server uninstaller.
 Lần gọi đầu chỉ stage việc gỡ và yêu cầu restart; không xóa service, process hay
@@ -504,7 +511,7 @@ Quy trình enrollment hiện dùng command line và phải thực hiện khi má
 thawed, trong PowerShell chạy bằng quyền Administrator. Chạy cùng installer hợp
 nhất trên mỗi máy, chọn Server cho máy giáo viên và Client cho từng máy học
 sinh. Đặt các máy trong cùng VLAN tin cậy và cho phép TCP port `47001` giữa
-client với server.
+client với server, đồng thời cho phép UDP `47001` để tìm lại endpoint.
 
 Các lệnh dưới đây dùng script được đóng gói cùng installer. Installer đầy đủ
 đặt script tại `C:\Program Files\NSTU\docs\deployment`; file tải riêng
@@ -662,6 +669,8 @@ thích license permissive; dự án không chấp nhận GPL dependency.
   cung cấp thiết bị kiểm thử và review đảm bảo chất lượng cho output cuối.
 - **Lê Anh Tuấn (`ssdarealest`)**: chịu trách nhiệm quản lý dự án, hỗ trợ pháp
   lý, xây dựng ý tưởng, quản lý tiến trình và phát triển dự án.
+- **Nguyễn Thị Hồng Quyên**: giáo viên môn Tin học tại Trường THPT Chuyên Lê
+  Quý Đôn, Thành phố Hồ Chí Minh.
 
 ## Bản quyền
 

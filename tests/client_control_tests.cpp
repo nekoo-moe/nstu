@@ -6,6 +6,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -30,7 +31,7 @@ int main() {
     nstu::net::WinsockRuntime winsock;
     assert(winsock.ready());
     nstu::client::ClientRuntimeConfig client_config;
-    client_config.server_address = "127.0.0.1";
+    client_config.server_address = "192.0.2.1";
     client_config.client_id.fill(std::byte{0});
     for (std::size_t index = 0; index < client_config.client_id.size(); ++index) {
         client_config.client_id[index] = static_cast<std::byte>(index + 21);
@@ -59,6 +60,12 @@ int main() {
     std::atomic_bool lock_received = false;
     std::atomic_bool snapshot_sent = false;
     std::atomic_bool session_succeeded = false;
+    std::atomic_bool discovered_loopback = false;
+    std::atomic<std::uint16_t> discovered_port = 0;
+    nstu::client::ClientConnectionOptions connection_options;
+    connection_options.connect_timeout_ms = 100;
+    connection_options.discovery.timeout = std::chrono::milliseconds(500);
+    connection_options.discovery.target_addresses = {"127.0.0.1"};
     std::thread client([&] {
         std::string client_error;
         const bool result = nstu::client::run_client_control_session(
@@ -90,7 +97,12 @@ int main() {
                     nstu::protocol::CommandType::snapshot_frame,
                     nstu::control::encode_snapshot_frame(frame)};
             },
-            &client_error);
+            &client_error,
+            [&](const nstu::discovery::ServerEndpoint& endpoint) {
+                discovered_loopback = endpoint.address == "127.0.0.1";
+                discovered_port = endpoint.port;
+            },
+            connection_options);
         session_succeeded = result;
     });
     assert(wait_until([&] {
@@ -107,6 +119,36 @@ int main() {
     assert(wait_until([&] { return lock_received.load(); }));
     client.join();
     assert(session_succeeded.load());
+    assert(discovered_loopback.load());
+    assert(discovered_port.load() == server.local_port());
+
+    auto rejected_config = client_config;
+    rejected_config.server_address = "127.0.0.1";
+    rejected_config.pre_shared_key[0] ^= static_cast<std::byte>(0x5a);
+    nstu::client::ClientConnectionOptions rejected_options;
+    rejected_options.connect_timeout_ms = 100;
+    rejected_options.discovery.timeout = std::chrono::milliseconds(250);
+    rejected_options.discovery.target_addresses = {"127.0.0.1"};
+    std::atomic_bool unverified_endpoint_observed = false;
+    std::stop_source rejected_stop_source;
+    std::string rejected_error;
+    const bool rejected = nstu::client::run_client_control_session(
+        rejected_config, rejected_stop_source.get_token(),
+        [] {
+            nstu::control::ClientStatusReport status;
+            status.hostname = "REJECTED-PC";
+            return status;
+        },
+        [](const nstu::control::AuthenticatedCommand&) {}, {}, &rejected_error,
+        [&](const nstu::discovery::ServerEndpoint&) {
+            unverified_endpoint_observed = true;
+        },
+        rejected_options);
+    assert(!rejected);
+    assert(!rejected_error.empty());
+    assert(!unverified_endpoint_observed.load());
+    nstu::client::clear_client_runtime_config(rejected_config);
+
     server.stop();
     nstu::client::clear_client_runtime_config(client_config);
     return 0;

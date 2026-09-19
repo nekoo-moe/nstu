@@ -3,6 +3,7 @@ add_library(nstu_common STATIC
     src/control_channel.cpp
     src/control_messages.cpp
     src/deployment.cpp
+    src/discovery.cpp
     src/exam_control.cpp
     src/exam_sync.cpp
     src/answer_journal.cpp
@@ -34,5 +35,6 @@ nstu_enable_warnings(nstu_common)
 
 if(WIN32)
     target_link_libraries(nstu_common PUBLIC
-        advapi32 bcrypt crypt32 fwpuclnt gdi32 ole32 windowscodecs ws2_32)
+        advapi32 bcrypt crypt32 fwpuclnt gdi32 iphlpapi ole32 windowscodecs
+        ws2_32)
 endif()

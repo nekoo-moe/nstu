@@ -48,10 +48,49 @@ máy đang thawed rồi cho installer restart Windows. Cách này giữ tương 
 với phần mềm đóng băng hiện có; boot check của client chỉ quan sát trạng thái
 sau đó.
 
+### Địa chỉ ổn định và tự phục hồi
+
+Nên cấp DHCP reservation hoặc IP tĩnh ngoài DHCP pool cho máy giáo viên. Một
+sơ đồ dễ quản trị là giữ router/gateway ở `.1` và dành địa chỉ như `.10` cho
+NSTU Server; không gán địa chỉ gateway cho server. Đây vẫn là cấu hình production
+đơn giản và dễ chẩn đoán nhất.
+
+Sau khi provision có xác thực, `nstu-service` chỉ xem IP server đã lưu là cache.
+Nếu kết nối TCP hoặc mutual authentication thất bại, client gửi UDP discovery
+được xác thực bằng HMAC trên chính control port, kiểm tra response bằng PSK đã
+enroll, hoàn tất mutual TCP handshake rồi mới lưu IPv4 mới bằng DPAPI phạm vi
+machine. Service cũng cập nhật địa chỉ registry không chứa secret cho diagnostics
+sau đăng nhập. NSTU không tin hoặc dùng địa chỉ MAC của server làm yếu tố xác
+thực.
+
+Cho phép **TCP và UDP `47001`** inbound tới executable NSTU Server, chỉ từ VLAN
+phòng máy được quản lý. TCP mang control và snapshot; UDP `47001` chỉ dùng cho
+trao đổi tìm lại endpoint có giới hạn. UDP `47000` vẫn dành cho đường video liên
+tục đang trì hoãn và nên đóng khi không thử nghiệm tính năng đó.
+
+Broadcast IPv4 không đi xuyên router. Hai phòng máy trong cùng VLAN có thể tìm
+cùng server đã enroll; nếu khác VLAN thì phải dùng IP reservation ổn định hoặc
+DNS/cấu hình thủ công do quản trị viên quản lý cho tới khi có relay xác thực.
+Khi router, switch, DHCP hoặc server không hoạt động, client vẫn giữ enrollment
+và retry có jitter nhưng control phòng học sẽ offline. Khi mất kết nối, trạng
+thái exam, lock, broadcast, annotation và remote control tạm thời được dọn thay
+vì bị giữ vô thời hạn.
+
+Installer vẫn cần địa chỉ đang truy cập được cho TCP preflight ban đầu; discovery
+chỉ hoạt động sau khi enrollment một lần đã cài PSK cho client.
+
 Với server, diagnostics kiểm tra display, link mạng và encoder H.264 phần cứng
 trước khi cài file server và data root được bảo vệ. UWF được báo là không áp
 dụng cho role server vì dữ liệu server phải bền vững. Chạy qualification UWF
 bằng `--target=client` trên image client riêng.
+
+Installer server đồng thời tạo giá trị startup toàn máy `NSTU Server` tại
+`HKLM\Software\Microsoft\Windows\CurrentVersion\Run`. Vì vậy ứng dụng desktop
+server tự chạy trong session tương tác của giáo viên ở mỗi lần đăng nhập
+Windows; nó không được cài thành service trong Session 0. Đóng hoặc thu nhỏ cửa
+sổ chính vẫn giữ tiến trình trong khay hệ thống. Chọn **Exit** sẽ dừng server cho
+tới khi mở thủ công hoặc đăng nhập lần sau. Unified uninstaller xóa giá trị
+startup này.
 
 ## Diagnostics tích hợp
 

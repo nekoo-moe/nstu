@@ -12,6 +12,8 @@
 namespace nstu::client {
 
 struct ClientRuntimeConfig {
+    // Last mutually authenticated endpoint; it is a reconnect cache, not a
+    // server identity credential.
     std::string server_address;
     std::uint16_t server_port = 47001;
     security::ClientId client_id{};

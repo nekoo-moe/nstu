@@ -15,6 +15,7 @@ required rows.
 | 50-client soak | At least 8 hours, reconnect/lock/chat/snapshot/annotation/broadcast cycles, no crash or unbounded memory growth | Pending | |
 | CPU/RAM/network | `collect-benchmarks.ps1` CSV at 5, 7, and 10 second snapshot intervals plus server/client hardware specification | Pending | |
 | Snapshot network | 50-client authenticated TCP control/snapshot run with measured switch uplink capacity, reconnects, and no sustained queue growth | Pending | |
+| Server address recovery | Change the enrolled server IPv4 address on the same VLAN; verify authenticated UDP discovery, mutual TCP revalidation, atomic client cache update, transient-control cleanup, and jittered recovery for 50 clients | Pending | Automated loopback and wrong-key/tamper/replay tests are included; physical VLAN evidence is still required |
 | Windows matrix | Supported Windows 10/11 builds, setup-check results, clean install, upgrade, reboot, uninstall | Pending | |
 | Intel driver matrix | Supported GPU models and driver versions, capture/encode/device-loss recovery | Pending | |
 | Deep Freeze | Every supported edition/version, Thawed install/enroll/upgrade/uninstall and Frozen operation | Pending | |

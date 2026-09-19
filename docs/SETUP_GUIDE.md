@@ -50,11 +50,51 @@ Freeze. Install while the machine is thawed, then allow the installer to
 restart Windows. This preserves compatibility with existing freeze software;
 the client boot check only observes the resulting state.
 
+### Stable addressing and automatic recovery
+
+Give the teacher server a DHCP reservation or static address outside the DHCP
+pool. A practical layout keeps the router/gateway at `.1` and reserves an
+address such as `.10` for NSTU; do not assign the server the gateway address.
+This remains the simplest and most diagnosable production configuration.
+
+After authenticated provisioning, `nstu-service` treats the stored server IP
+as a cache. If TCP connection or mutual authentication fails, the client sends
+an HMAC-authenticated UDP discovery request on the configured control port,
+verifies the response with its enrollment PSK, completes the normal mutual TCP
+handshake, and only then stores the new IPv4 address using machine-scope DPAPI.
+It also refreshes the non-secret registry address used by login diagnostics.
+No server MAC address is trusted or used as an authentication factor.
+
+Allow inbound **TCP and UDP `47001`** to the NSTU server executable from the
+managed classroom VLAN. TCP carries control and snapshots; UDP `47001` is only
+the bounded endpoint-recovery exchange. UDP `47000` remains reserved for the
+deferred continuous-video path and should stay closed when that feature is not
+being tested.
+
+IPv4 broadcast discovery does not cross a router. Two labs in one VLAN can find
+the same enrolled server; separate VLANs must use a stable reserved address or
+managed DNS/manual configuration until an authenticated relay is implemented.
+If the router, switch, DHCP service, or server is unavailable, clients retain
+their enrollment and retry with jitter, but classroom control remains offline.
+Transient lock, exam, broadcast, annotation, and remote-control state is cleared
+on disconnect rather than left active indefinitely.
+
+The installer still needs a currently reachable address for its initial TCP
+preflight, and discovery is unavailable until one-time authenticated enrollment
+has installed the client PSK.
+
 For a server, diagnostics check the display, network link, and hardware H.264
 encoder before the server files and protected data root are installed. UWF is
 reported as not applicable for the server role because server data is
 persistent. Run UWF qualification with `--target=client` on a separate client
 image.
+
+The server installer also creates the machine startup value `NSTU Server`
+under `HKLM\Software\Microsoft\Windows\CurrentVersion\Run`. The desktop server
+therefore starts in the interactive teacher session at each Windows sign-in;
+it is not installed as a Session 0 service. Closing or minimizing the main
+window leaves the tray process running. **Exit** stops it until a manual launch
+or the next sign-in. The unified uninstaller removes this startup value.
 
 ## Integrated diagnostics
 

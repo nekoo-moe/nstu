@@ -2,6 +2,7 @@
 
 #include "nstu/control_channel.hpp"
 #include "nstu/control_messages.hpp"
+#include "nstu/discovery.hpp"
 #include "nstu/enrollment.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
@@ -206,10 +207,21 @@ public:
             exam_journal_.close();
             return false;
         }
+        const auto control_port = dispatcher_.local_port();
+        if (!discovery_responder_.start(control_port, control_port, key_store_,
+                                        error)) {
+            dispatcher_.stop();
+            enrollment_authority_.reset();
+            exam_journal_.close();
+            security::secure_zero(config_.keyring_entropy);
+            config_ = {};
+            return false;
+        }
         return true;
     }
 
     void stop() noexcept {
+        discovery_responder_.stop();
         dispatcher_.stop();
         {
             std::scoped_lock lock(states_mutex_);
@@ -886,6 +898,7 @@ public:
     // This journal is server-owned and intentionally never placed under a
     // client freeze/UWF overlay. It remains authoritative across reconnects.
     exam::AnswerJournal exam_journal_;
+    discovery::AuthenticatedDiscoveryResponder discovery_responder_;
     net::IocpDispatcher dispatcher_;
     security::ReplayProtector replay_protector_;
     std::unique_ptr<security::EnrollmentAuthority> enrollment_authority_;

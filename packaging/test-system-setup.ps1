@@ -136,6 +136,26 @@ if ($Role -eq "Server") {
             $warnings.Add("The installed NSTU server is using TCP $ControlPort. Close it before launching the upgraded server.")
         }
     }
+    $udpDiscoveryConflict = $null
+    try {
+        $udpDiscoveryConflict = @(Get-NetUDPEndpoint -LocalPort $ControlPort `
+            -ErrorAction Stop)
+    } catch {
+        $warnings.Add((("Could not query UDP endpoints for discovery port {0}: {1}. " +
+            "The port conflict check could not be completed.") -f $ControlPort,
+            $_.Exception.Message))
+    }
+    if ($null -ne $udpDiscoveryConflict -and
+        $udpDiscoveryConflict.Count -gt 0) {
+        $unexpectedUdpDiscovery = @($udpDiscoveryConflict | Where-Object {
+            -not (Test-ExpectedServerProcess -ProcessId $_.OwningProcess)
+        })
+        if ($unexpectedUdpDiscovery.Count -gt 0) {
+            $failures.Add("UDP discovery port $ControlPort is already in use by another application.")
+        } else {
+            $warnings.Add("The installed NSTU server is using UDP $ControlPort. Close it before launching the upgraded server.")
+        }
+    }
     $udpConflict = $null
     try {
         $udpConflict = @(Get-NetUDPEndpoint -LocalPort $VideoPort `
@@ -155,15 +175,16 @@ if ($Role -eq "Server") {
             $warnings.Add("The installed NSTU server is using UDP $VideoPort. Close it before launching the upgraded server.")
         }
     }
-    $allowRules = @()
+    $allowPortFilters = @()
     $allowRulesQueryable = $true
     try {
-        $allowRules = @(Get-NetFirewallRule -Enabled True -Direction Inbound `
+        $allowPortFilters = @(Get-NetFirewallRule -Enabled True -Direction Inbound `
             -Action Allow -ErrorAction Stop | ForEach-Object {
                 $rule = $_
                 Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule `
                     -ErrorAction Stop | Where-Object {
                         ($_.Protocol -eq "TCP" -and $_.LocalPort -eq "$ControlPort") -or
+                        ($_.Protocol -eq "UDP" -and $_.LocalPort -eq "$ControlPort") -or
                         ($_.Protocol -eq "UDP" -and $_.LocalPort -eq "$VideoPort")
                     }
             })
@@ -172,8 +193,19 @@ if ($Role -eq "Server") {
         $warnings.Add(("Could not query inbound firewall port rules: {0}. " +
             "Verify the TCP/UDP allow rules manually." -f $_.Exception.Message))
     }
-    if ($allowRulesQueryable -and $allowRules.Count -eq 0) {
-        $warnings.Add("No enabled inbound allow rule was found for TCP $ControlPort or UDP $VideoPort. Add rules scoped to the classroom VLAN before deployment.")
+    if ($allowRulesQueryable) {
+        $hasTcpControlRule = @($allowPortFilters | Where-Object {
+            $_.Protocol -eq "TCP" -and $_.LocalPort -eq "$ControlPort"
+        }).Count -gt 0
+        $hasUdpDiscoveryRule = @($allowPortFilters | Where-Object {
+            $_.Protocol -eq "UDP" -and $_.LocalPort -eq "$ControlPort"
+        }).Count -gt 0
+        if (-not $hasTcpControlRule) {
+            $warnings.Add("No enabled inbound TCP $ControlPort allow rule was found. Add a rule scoped to the classroom VLAN and NSTU server executable.")
+        }
+        if (-not $hasUdpDiscoveryRule) {
+            $warnings.Add("No enabled inbound UDP $ControlPort discovery rule was found. Add a rule scoped to the classroom VLAN and NSTU server executable.")
+        }
     }
 }
 
