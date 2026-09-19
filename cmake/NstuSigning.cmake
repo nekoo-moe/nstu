@@ -21,13 +21,15 @@ endif()
 
 function(nstu_sign_target target)
     if(NSTU_ENABLE_SIGNING AND TARGET ${target})
-        add_custom_command(TARGET ${target} POST_BUILD
+        set(signing_target "nstu-sign-${target}")
+        add_custom_target(${signing_target} ALL
             COMMAND "${NSTU_SIGNTOOL_EXECUTABLE}" sign
                 /sha1 "${NSTU_SIGN_CERT_SHA1}"
                 /fd SHA256
                 /tr "${NSTU_SIGN_TIMESTAMP_URL}"
                 /td SHA256
                 "$<TARGET_FILE:${target}>"
+            DEPENDS ${target}
             VERBATIM
             COMMENT "Signing ${target}")
     endif()

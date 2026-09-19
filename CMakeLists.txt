@@ -217,7 +217,12 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         foreach(nstu_target IN ITEMS nstu-server nstu-service nstu-agent
                 nstu-provision nstu-diagnostics)
             if(TARGET ${nstu_target})
-                list(APPEND nstu_unified_dependencies ${nstu_target})
+                if(TARGET nstu-sign-${nstu_target})
+                    list(APPEND nstu_unified_dependencies
+                        nstu-sign-${nstu_target})
+                else()
+                    list(APPEND nstu_unified_dependencies ${nstu_target})
+                endif()
             endif()
         endforeach()
         add_custom_target(nstu-package-build
