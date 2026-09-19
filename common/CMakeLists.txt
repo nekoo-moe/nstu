@@ -16,6 +16,7 @@ add_library(nstu_common STATIC
     src/multicast.cpp
     src/network.cpp
     src/packet_loss.cpp
+    src/pairing.cpp
     src/protocol.cpp
     src/rate_limiter.cpp
     src/screen_snapshot.cpp

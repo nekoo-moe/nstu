@@ -103,6 +103,12 @@ if(WIN32)
     nstu_enable_test_assertions(nstu_discovery_tests)
     add_test(NAME nstu.discovery COMMAND nstu_discovery_tests)
 
+    add_executable(nstu_pairing_tests pairing_tests.cpp)
+    target_link_libraries(nstu_pairing_tests PRIVATE nstu_common)
+    nstu_enable_warnings(nstu_pairing_tests)
+    nstu_enable_test_assertions(nstu_pairing_tests)
+    add_test(NAME nstu.pairing COMMAND nstu_pairing_tests)
+
     add_executable(nstu_screen_snapshot_tests screen_snapshot_tests.cpp)
     target_link_libraries(nstu_screen_snapshot_tests PRIVATE nstu_common)
     nstu_enable_warnings(nstu_screen_snapshot_tests)
