@@ -90,7 +90,8 @@ enum class ConfirmationRole : std::uint16_t {
 
 // Identities are limited to printable ASCII so that the transcript has exactly
 // one encoding for a given pair of machines.
-[[nodiscard]] bool valid_transcript(const PairingTranscript& transcript) noexcept;
+[[nodiscard]] bool valid_transcript(
+    const PairingTranscript& transcript) noexcept;
 
 [[nodiscard]] std::optional<std::vector<std::byte>> encode_transcript(
     const PairingTranscript& transcript);
@@ -117,5 +118,76 @@ enum class ConfirmationRole : std::uint16_t {
     std::string_view uuid) noexcept;
 
 void secure_zero(PairingSecrets& secrets) noexcept;
+
+// Wire messages. These are the payloads of the pairing_* control commands;
+// the framing itself belongs to nstu::protocol.
+inline constexpr std::size_t kMaximumPairingMessageBytes = 1024;
+
+struct PairingHello {
+    std::uint16_t version = kPairingVersion;
+    KeyAgreement agreement = KeyAgreement::x25519;
+    std::string client_uuid;
+    std::string client_hostname;
+    std::vector<std::byte> client_public_key;
+    security::Nonce client_nonce{};
+};
+
+struct PairingOffer {
+    std::uint16_t version = kPairingVersion;
+    KeyAgreement agreement = KeyAgreement::x25519;
+    std::vector<std::byte> server_public_key;
+    security::Nonce server_nonce{};
+};
+
+struct PairingConfirm {
+    security::Sha256Digest client_tag{};
+};
+
+struct PairingAccept {
+    std::uint32_t key_id = 0;
+    security::Sha256Digest server_tag{};
+};
+
+enum class PairingRejectReason : std::uint16_t {
+    unspecified = 0,
+    operator_declined = 1,
+    timed_out = 2,
+    unavailable = 3,
+    protocol_error = 4,
+    confirmation_failed = 5,
+};
+
+[[nodiscard]] const char* pairing_reject_reason_text(
+    PairingRejectReason reason) noexcept;
+
+[[nodiscard]] std::vector<std::byte> encode_pairing_hello(
+    const PairingHello& hello);
+[[nodiscard]] std::optional<PairingHello> decode_pairing_hello(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_pairing_offer(
+    const PairingOffer& offer);
+[[nodiscard]] std::optional<PairingOffer> decode_pairing_offer(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_pairing_confirm(
+    const PairingConfirm& confirm);
+[[nodiscard]] std::optional<PairingConfirm> decode_pairing_confirm(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_pairing_accept(
+    const PairingAccept& accept);
+[[nodiscard]] std::optional<PairingAccept> decode_pairing_accept(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_pairing_reject(
+    PairingRejectReason reason);
+[[nodiscard]] std::optional<PairingRejectReason> decode_pairing_reject(
+    std::span<const std::byte> payload);
+
+// Both sides must build the transcript the same way or the codes diverge for
+// a reason no operator can diagnose. This is that one way.
+[[nodiscard]] std::optional<PairingTranscript> make_transcript(
+    const PairingHello& hello, const PairingOffer& offer);
 
 } // namespace nstu::pairing

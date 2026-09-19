@@ -178,6 +178,54 @@ int main() {
     assert(endpoints[0].address == "127.0.0.1");
     assert(endpoints[0].port == control_port);
 
+    // Pairing discovery. A machine that has never enrolled holds no key, so
+    // the beacon is the only thing it can see - and only while the operator
+    // has the enrollment window open.
+    auto pairing_options = options;
+    assert(!responder.pairing_beacon_enabled());
+    const auto closed_window =
+        nstu::discovery::discover_pairing_candidates(pairing_options, &error);
+    assert(closed_window.empty());
+    assert(error == "no NSTU server answered the pairing probe");
+
+    // A blank display name leaves the window closed rather than advertising an
+    // anonymous server.
+    responder.set_pairing_beacon(true, "");
+    assert(!responder.pairing_beacon_enabled());
+
+    responder.set_pairing_beacon(true, "Lab A\tRoom 201");
+    assert(responder.pairing_beacon_enabled());
+    const auto candidates =
+        nstu::discovery::discover_pairing_candidates(pairing_options, &error);
+    assert(error.empty());
+    assert(candidates.size() == 1);
+    assert(candidates[0].address == "127.0.0.1");
+    assert(candidates[0].port == control_port);
+    // Control characters never reach the selection menu.
+    assert(candidates[0].server_name == "Lab A?Room 201");
+
+    const std::string long_name(
+        nstu::discovery::kMaximumServerNameBytes + 40, 'N');
+    responder.set_pairing_beacon(true, long_name);
+    const auto truncated =
+        nstu::discovery::discover_pairing_candidates(pairing_options, &error);
+    assert(truncated.size() == 1);
+    assert(truncated[0].server_name.size() ==
+           nstu::discovery::kMaximumServerNameBytes);
+
+    // An open pairing window does not disturb the authenticated sweep.
+    const auto still_authenticated =
+        nstu::discovery::discover_authenticated_servers(client_id, key_id, key,
+                                                        options, &error);
+    assert(still_authenticated.size() == 1);
+    assert(still_authenticated[0].port == control_port);
+
+    responder.set_pairing_beacon(false, "Lab A");
+    assert(!responder.pairing_beacon_enabled());
+    const auto after_close =
+        nstu::discovery::discover_pairing_candidates(pairing_options, &error);
+    assert(after_close.empty());
+
     responder.stop();
     assert(!responder.running());
     assert(responder.local_port() == 0);

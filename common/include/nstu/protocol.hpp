@@ -62,6 +62,16 @@ enum class CommandType : std::uint16_t {
     // start/stop request over the existing control channel.
     exam_start = 36,
     exam_stop = 37,
+    // Verified pairing. An unenrolled client opens the exchange; the server
+    // answers with its ephemeral key, both sides show the same six-digit code,
+    // and the teacher approves or refuses it in the server UI. These frames
+    // are unauthenticated by construction - that is what pairing establishes -
+    // so they are only accepted before a connection reaches auth_hello.
+    pairing_hello = 38,
+    pairing_offer = 39,
+    pairing_confirm = 40,
+    pairing_accept = 41,
+    pairing_reject = 42,
 };
 
 enum class ConnectionRole : std::uint8_t {

@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace nstu::discovery {
@@ -89,6 +90,27 @@ struct ClientDiscoveryOptions {
     const ClientDiscoveryOptions& options = {},
     std::string* error = nullptr);
 
+inline constexpr std::size_t kMaximumServerNameBytes = 64;
+inline constexpr std::size_t kPairingProbeBytes = 80;
+inline constexpr std::size_t kMaximumDiscoveryDatagramBytes = 256;
+
+// A machine that has never paired holds no key, so there is nothing for it to
+// authenticate with and nothing for it to check the reply against. This sweep
+// therefore produces candidates only - the name and port are hints for the
+// selection menu, not claims. Trust arrives afterwards, from the pairing code
+// the operator compares on the two screens.
+struct PairingCandidate {
+    std::string address;
+    std::uint16_t port = 0;
+    std::string server_name;
+
+    [[nodiscard]] bool operator==(const PairingCandidate&) const noexcept =
+        default;
+};
+
+[[nodiscard]] std::vector<PairingCandidate> discover_pairing_candidates(
+    const ClientDiscoveryOptions& options = {}, std::string* error = nullptr);
+
 class AuthenticatedDiscoveryResponder {
 public:
     AuthenticatedDiscoveryResponder();
@@ -103,6 +125,12 @@ public:
                              const security::KeyStore& key_store,
                              std::string* error = nullptr);
     void stop() noexcept;
+
+    // Answers unauthenticated pairing probes with a display name and the
+    // control port. Off until the operator opens the enrollment window, so an
+    // unenrolled machine cannot fingerprint the server the rest of the time.
+    void set_pairing_beacon(bool enabled, std::string_view server_name);
+    [[nodiscard]] bool pairing_beacon_enabled() const noexcept;
 
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::uint16_t local_port() const noexcept;

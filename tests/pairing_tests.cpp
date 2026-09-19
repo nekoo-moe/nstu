@@ -48,8 +48,8 @@ std::vector<std::byte> must_agree(const EphemeralKeyPair& own,
     return std::move(*secret);
 }
 
-PairingTranscript make_transcript(const EphemeralKeyPair& client,
-                                  const EphemeralKeyPair& server) {
+PairingTranscript make_key_transcript(const EphemeralKeyPair& client,
+                                      const EphemeralKeyPair& server) {
     PairingTranscript transcript;
     transcript.agreement = client.agreement();
     transcript.client_uuid = "4C4C4544-0037-5A10-8043-B7C04F565432";
@@ -78,7 +78,7 @@ void test_matched_transcripts_agree() {
     const auto server_secret = must_agree(server, client);
     assert(client_secret == server_secret);
 
-    const auto transcript = make_transcript(client, server);
+    const auto transcript = make_key_transcript(client, server);
     const auto client_view =
         nstu::pairing::derive_pairing_secrets(client_secret, transcript);
     const auto server_view =
@@ -109,8 +109,10 @@ void test_man_in_the_middle_diverges() {
     const auto server_secret = must_agree(server, attacker_to_server);
     assert(client_secret != server_secret);
 
-    PairingTranscript client_view = make_transcript(client, attacker_to_client);
-    PairingTranscript server_view = make_transcript(attacker_to_server, server);
+    PairingTranscript client_view =
+        make_key_transcript(client, attacker_to_client);
+    PairingTranscript server_view =
+        make_key_transcript(attacker_to_server, server);
 
     const auto client_secrets =
         nstu::pairing::derive_pairing_secrets(client_secret, client_view);
@@ -130,7 +132,7 @@ void test_transcript_binds_public_keys() {
     const auto impostor = must_generate();
     const auto secret = must_agree(client, server);
 
-    const auto honest = make_transcript(client, server);
+    const auto honest = make_key_transcript(client, server);
     PairingTranscript swapped = honest;
     swapped.server_public_key = to_vector(impostor.public_key());
 
@@ -148,7 +150,7 @@ void test_transcript_binds_identity_and_nonces() {
     const auto client = must_generate();
     const auto server = must_generate();
     const auto secret = must_agree(client, server);
-    const auto honest = make_transcript(client, server);
+    const auto honest = make_key_transcript(client, server);
     const auto baseline = nstu::pairing::derive_pairing_secrets(secret, honest);
     assert(baseline.has_value());
 
@@ -181,7 +183,7 @@ void test_confirmation_tags() {
     const auto client = must_generate();
     const auto server = must_generate();
     const auto secret = must_agree(client, server);
-    const auto transcript = make_transcript(client, server);
+    const auto transcript = make_key_transcript(client, server);
     const auto secrets =
         nstu::pairing::derive_pairing_secrets(secret, transcript);
     assert(secrets.has_value());
@@ -224,7 +226,7 @@ void test_confirmation_tags() {
 void test_transcript_validation() {
     const auto client = must_generate();
     const auto server = must_generate();
-    const auto valid = make_transcript(client, server);
+    const auto valid = make_key_transcript(client, server);
     assert(nstu::pairing::valid_transcript(valid));
     assert(nstu::pairing::encode_transcript(valid).has_value());
 
@@ -273,7 +275,7 @@ void test_transcript_encoding_is_unambiguous() {
     const auto client = must_generate();
     const auto server = must_generate();
 
-    PairingTranscript left = make_transcript(client, server);
+    PairingTranscript left = make_key_transcript(client, server);
     left.client_uuid = "AB";
     left.client_hostname = "CDE";
 
@@ -364,11 +366,156 @@ void test_client_id_from_uuid() {
                 .has_value());
 }
 
-void test_secure_zero_clears_secrets() {
+nstu::pairing::PairingHello make_hello(const EphemeralKeyPair& client) {
+    nstu::pairing::PairingHello hello;
+    hello.agreement = client.agreement();
+    hello.client_uuid = "4C4C4544-0037-5A10-8043-B7C04F565432";
+    hello.client_hostname = "LAB-PC-07";
+    hello.client_public_key = to_vector(client.public_key());
+    hello.client_nonce = make_nonce(0x11);
+    return hello;
+}
+
+nstu::pairing::PairingOffer make_offer(const EphemeralKeyPair& server) {
+    nstu::pairing::PairingOffer offer;
+    offer.agreement = server.agreement();
+    offer.server_public_key = to_vector(server.public_key());
+    offer.server_nonce = make_nonce(0x71);
+    return offer;
+}
+
+void test_wire_messages_round_trip() {
     const auto client = must_generate();
     const auto server = must_generate();
+
+    const auto hello = make_hello(client);
+    const auto hello_wire = nstu::pairing::encode_pairing_hello(hello);
+    assert(!hello_wire.empty());
+    assert(hello_wire.size() <= nstu::pairing::kMaximumPairingMessageBytes);
+    const auto decoded_hello = nstu::pairing::decode_pairing_hello(hello_wire);
+    assert(decoded_hello.has_value());
+    assert(decoded_hello->version == hello.version);
+    assert(decoded_hello->agreement == hello.agreement);
+    assert(decoded_hello->client_uuid == hello.client_uuid);
+    assert(decoded_hello->client_hostname == hello.client_hostname);
+    assert(decoded_hello->client_public_key == hello.client_public_key);
+    assert(decoded_hello->client_nonce == hello.client_nonce);
+
+    const auto offer = make_offer(server);
+    const auto offer_wire = nstu::pairing::encode_pairing_offer(offer);
+    assert(!offer_wire.empty());
+    const auto decoded_offer = nstu::pairing::decode_pairing_offer(offer_wire);
+    assert(decoded_offer.has_value());
+    assert(decoded_offer->server_public_key == offer.server_public_key);
+    assert(decoded_offer->server_nonce == offer.server_nonce);
+
+    nstu::pairing::PairingConfirm confirm;
+    confirm.client_tag = make_nonce(0x31);
+    const auto confirm_wire = nstu::pairing::encode_pairing_confirm(confirm);
+    const auto decoded_confirm =
+        nstu::pairing::decode_pairing_confirm(confirm_wire);
+    assert(decoded_confirm.has_value());
+    assert(decoded_confirm->client_tag == confirm.client_tag);
+
+    nstu::pairing::PairingAccept accept;
+    accept.key_id = 0x2ca5f001u;
+    accept.server_tag = make_nonce(0x41);
+    const auto accept_wire = nstu::pairing::encode_pairing_accept(accept);
+    assert(!accept_wire.empty());
+    const auto decoded_accept =
+        nstu::pairing::decode_pairing_accept(accept_wire);
+    assert(decoded_accept.has_value());
+    assert(decoded_accept->key_id == accept.key_id);
+    assert(decoded_accept->server_tag == accept.server_tag);
+
+    const auto reject_wire = nstu::pairing::encode_pairing_reject(
+        nstu::pairing::PairingRejectReason::operator_declined);
+    const auto decoded_reject =
+        nstu::pairing::decode_pairing_reject(reject_wire);
+    assert(decoded_reject.has_value());
+    assert(*decoded_reject ==
+           nstu::pairing::PairingRejectReason::operator_declined);
+}
+
+void test_wire_messages_reject_malformed_input() {
+    const auto client = must_generate();
+    const auto hello = make_hello(client);
+    const auto wire = nstu::pairing::encode_pairing_hello(hello);
+
+    // Truncation, trailing junk and an oversized payload are all refused.
+    assert(!nstu::pairing::decode_pairing_hello(
+                std::span<const std::byte>(wire).first(wire.size() - 1))
+                .has_value());
+    auto padded = wire;
+    padded.push_back(std::byte{0});
+    assert(!nstu::pairing::decode_pairing_hello(padded).has_value());
+    const std::vector<std::byte> oversized(
+        nstu::pairing::kMaximumPairingMessageBytes + 1, std::byte{0});
+    assert(!nstu::pairing::decode_pairing_hello(oversized).has_value());
+    assert(!nstu::pairing::decode_pairing_hello({}).has_value());
+
+    // A length prefix that runs past the end of the buffer must not read out
+    // of bounds; it is simply rejected.
+    auto overlong_uuid = wire;
+    overlong_uuid[4] = std::byte{0xff};
+    overlong_uuid[5] = std::byte{0x00};
+    assert(!nstu::pairing::decode_pairing_hello(overlong_uuid).has_value());
+
+    // Encoding refuses to emit a message the peer would have to reject.
+    nstu::pairing::PairingHello anonymous = hello;
+    anonymous.client_uuid.clear();
+    assert(nstu::pairing::encode_pairing_hello(anonymous).empty());
+    nstu::pairing::PairingHello zero_nonce = hello;
+    zero_nonce.client_nonce = nstu::security::Nonce{};
+    assert(nstu::pairing::encode_pairing_hello(zero_nonce).empty());
+    nstu::pairing::PairingHello unknown_curve = hello;
+    unknown_curve.agreement = static_cast<KeyAgreement>(0x4242);
+    assert(nstu::pairing::encode_pairing_hello(unknown_curve).empty());
+
+    nstu::pairing::PairingAccept unkeyed;
+    unkeyed.key_id = 0;
+    assert(nstu::pairing::encode_pairing_accept(unkeyed).empty());
+    assert(!nstu::pairing::decode_pairing_confirm({}).has_value());
+    assert(!nstu::pairing::decode_pairing_accept({}).has_value());
+
+    const std::vector<std::byte> unknown_reason{std::byte{0xff},
+                                                std::byte{0xff}};
+    assert(!nstu::pairing::decode_pairing_reject(unknown_reason).has_value());
+}
+
+// The transcript both sides derive from must come out of the same builder, or
+// the codes diverge for a reason no operator could diagnose.
+void test_make_transcript_matches_manual_build() {
+    const auto client = must_generate();
+    const auto server = must_generate();
+    const auto hello = make_hello(client);
+    const auto offer = make_offer(server);
+
+    const auto built = nstu::pairing::make_transcript(hello, offer);
+    assert(built.has_value());
+    const auto expected = make_key_transcript(client, server);
+    const auto built_encoded = nstu::pairing::encode_transcript(*built);
+    const auto expected_encoded = nstu::pairing::encode_transcript(expected);
+    assert(built_encoded.has_value() && expected_encoded.has_value());
+    assert(*built_encoded == *expected_encoded);
+
+    // A curve or version disagreement is caught here rather than surfacing as
+    // an unexplained code mismatch.
+    auto mismatched = offer;
+    mismatched.agreement = hello.agreement == KeyAgreement::x25519
+                               ? KeyAgreement::nist_p256
+                               : KeyAgreement::x25519;
+    assert(!nstu::pairing::make_transcript(hello, mismatched).has_value());
+
+    auto downgraded = offer;
+    downgraded.version = static_cast<std::uint16_t>(hello.version + 1);
+    assert(!nstu::pairing::make_transcript(hello, downgraded).has_value());
+}
+
+void test_secure_zero_clears_secrets() {    const auto client = must_generate();
+    const auto server = must_generate();
     const auto secret = must_agree(client, server);
-    const auto transcript = make_transcript(client, server);
+    const auto transcript = make_key_transcript(client, server);
     auto secrets = nstu::pairing::derive_pairing_secrets(secret, transcript);
     assert(secrets.has_value());
 
@@ -397,6 +544,9 @@ int main() {
     test_agree_rejects_malformed_peer_keys();
     test_hkdf_separates_labels();
     test_client_id_from_uuid();
+    test_wire_messages_round_trip();
+    test_wire_messages_reject_malformed_input();
+    test_make_transcript_matches_manual_build();
     test_secure_zero_clears_secrets();
     return 0;
 }

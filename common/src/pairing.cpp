@@ -77,6 +77,58 @@ void append_bytes(std::vector<std::byte>& output,
     output.insert(output.end(), bytes.begin(), bytes.end());
 }
 
+template <typename T>
+bool read_le(std::span<const std::byte> input, std::size_t& offset,
+             T& value) {
+    static_assert(std::is_unsigned_v<T>);
+    if (offset + sizeof(T) > input.size()) {
+        return false;
+    }
+    value = 0;
+    for (std::size_t index = 0; index < sizeof(T); ++index) {
+        value |= static_cast<T>(std::to_integer<unsigned int>(input[offset++]))
+                 << (index * 8u);
+    }
+    return true;
+}
+
+template <std::size_t Extent>
+bool read_array(std::span<const std::byte> input, std::size_t& offset,
+                std::array<std::byte, Extent>& value) {
+    if (offset + Extent > input.size()) {
+        return false;
+    }
+    std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(offset), Extent,
+                value.begin());
+    offset += Extent;
+    return true;
+}
+
+bool read_blob(std::span<const std::byte> input, std::size_t& offset,
+               std::vector<std::byte>& value) {
+    std::uint16_t length = 0;
+    if (!read_le(input, offset, length) ||
+        offset + length > input.size()) {
+        return false;
+    }
+    const auto begin = input.begin() + static_cast<std::ptrdiff_t>(offset);
+    value.assign(begin, begin + length);
+    offset += length;
+    return true;
+}
+
+bool read_text(std::span<const std::byte> input, std::size_t& offset,
+               std::string& value) {
+    std::uint16_t length = 0;
+    if (!read_le(input, offset, length) ||
+        offset + length > input.size()) {
+        return false;
+    }
+    value.assign(reinterpret_cast<const char*>(input.data() + offset), length);
+    offset += length;
+    return true;
+}
+
 template <typename Range>
 bool any_nonzero(const Range& values) noexcept {
     return std::any_of(values.begin(), values.end(),
@@ -498,6 +550,195 @@ void secure_zero(PairingSecrets& secrets) noexcept {
                       secrets.short_authentication_string.size()}));
         secrets.short_authentication_string.clear();
     }
+}
+
+const char* pairing_reject_reason_text(PairingRejectReason reason) noexcept {
+    switch (reason) {
+    case PairingRejectReason::operator_declined:
+        return "the teacher declined this machine";
+    case PairingRejectReason::timed_out:
+        return "the pairing request expired before it was answered";
+    case PairingRejectReason::unavailable:
+        return "the server is not accepting pairings right now";
+    case PairingRejectReason::protocol_error:
+        return "the pairing exchange was malformed";
+    case PairingRejectReason::confirmation_failed:
+        return "the pairing confirmation did not match";
+    case PairingRejectReason::unspecified:
+        break;
+    }
+    return "the pairing was refused";
+}
+
+std::vector<std::byte> encode_pairing_hello(const PairingHello& hello) {
+    if (!valid_identity(hello.client_uuid) ||
+        !valid_identity(hello.client_hostname) ||
+        !valid_public_key(hello.client_public_key) ||
+        !known_agreement(hello.agreement) || hello.version == 0 ||
+        !any_nonzero(hello.client_nonce)) {
+        return {};
+    }
+    std::vector<std::byte> wire;
+    append_le(wire, hello.version);
+    append_le(wire, static_cast<std::uint16_t>(hello.agreement));
+    append_le(wire, static_cast<std::uint16_t>(hello.client_uuid.size()));
+    append_bytes(wire, as_bytes(hello.client_uuid));
+    append_le(wire, static_cast<std::uint16_t>(hello.client_hostname.size()));
+    append_bytes(wire, as_bytes(hello.client_hostname));
+    append_le(wire,
+              static_cast<std::uint16_t>(hello.client_public_key.size()));
+    append_bytes(wire, hello.client_public_key);
+    append_bytes(wire, hello.client_nonce);
+    return wire;
+}
+
+std::optional<PairingHello> decode_pairing_hello(
+    std::span<const std::byte> payload) {
+    if (payload.size() > kMaximumPairingMessageBytes) {
+        return std::nullopt;
+    }
+    std::size_t offset = 0;
+    PairingHello hello;
+    std::uint16_t agreement = 0;
+    if (!read_le(payload, offset, hello.version) ||
+        !read_le(payload, offset, agreement) ||
+        !read_text(payload, offset, hello.client_uuid) ||
+        !read_text(payload, offset, hello.client_hostname) ||
+        !read_blob(payload, offset, hello.client_public_key) ||
+        !read_array(payload, offset, hello.client_nonce) ||
+        offset != payload.size()) {
+        return std::nullopt;
+    }
+    hello.agreement = static_cast<KeyAgreement>(agreement);
+    if (hello.version == 0 || !known_agreement(hello.agreement) ||
+        !valid_identity(hello.client_uuid) ||
+        !valid_identity(hello.client_hostname) ||
+        !valid_public_key(hello.client_public_key) ||
+        !any_nonzero(hello.client_nonce)) {
+        return std::nullopt;
+    }
+    return hello;
+}
+
+std::vector<std::byte> encode_pairing_offer(const PairingOffer& offer) {
+    if (!valid_public_key(offer.server_public_key) ||
+        !known_agreement(offer.agreement) || offer.version == 0 ||
+        !any_nonzero(offer.server_nonce)) {
+        return {};
+    }
+    std::vector<std::byte> wire;
+    append_le(wire, offer.version);
+    append_le(wire, static_cast<std::uint16_t>(offer.agreement));
+    append_le(wire,
+              static_cast<std::uint16_t>(offer.server_public_key.size()));
+    append_bytes(wire, offer.server_public_key);
+    append_bytes(wire, offer.server_nonce);
+    return wire;
+}
+
+std::optional<PairingOffer> decode_pairing_offer(
+    std::span<const std::byte> payload) {
+    if (payload.size() > kMaximumPairingMessageBytes) {
+        return std::nullopt;
+    }
+    std::size_t offset = 0;
+    PairingOffer offer;
+    std::uint16_t agreement = 0;
+    if (!read_le(payload, offset, offer.version) ||
+        !read_le(payload, offset, agreement) ||
+        !read_blob(payload, offset, offer.server_public_key) ||
+        !read_array(payload, offset, offer.server_nonce) ||
+        offset != payload.size()) {
+        return std::nullopt;
+    }
+    offer.agreement = static_cast<KeyAgreement>(agreement);
+    if (offer.version == 0 || !known_agreement(offer.agreement) ||
+        !valid_public_key(offer.server_public_key) ||
+        !any_nonzero(offer.server_nonce)) {
+        return std::nullopt;
+    }
+    return offer;
+}
+
+std::vector<std::byte> encode_pairing_confirm(const PairingConfirm& confirm) {
+    std::vector<std::byte> wire;
+    append_bytes(wire, confirm.client_tag);
+    return wire;
+}
+
+std::optional<PairingConfirm> decode_pairing_confirm(
+    std::span<const std::byte> payload) {
+    if (payload.size() != security::kSha256Bytes) {
+        return std::nullopt;
+    }
+    PairingConfirm confirm;
+    std::copy(payload.begin(), payload.end(), confirm.client_tag.begin());
+    return confirm;
+}
+
+std::vector<std::byte> encode_pairing_accept(const PairingAccept& accept) {
+    if (accept.key_id == 0) {
+        return {};
+    }
+    std::vector<std::byte> wire;
+    append_le(wire, accept.key_id);
+    append_bytes(wire, accept.server_tag);
+    return wire;
+}
+
+std::optional<PairingAccept> decode_pairing_accept(
+    std::span<const std::byte> payload) {
+    if (payload.size() != sizeof(std::uint32_t) + security::kSha256Bytes) {
+        return std::nullopt;
+    }
+    std::size_t offset = 0;
+    PairingAccept accept;
+    if (!read_le(payload, offset, accept.key_id) ||
+        !read_array(payload, offset, accept.server_tag) ||
+        accept.key_id == 0) {
+        return std::nullopt;
+    }
+    return accept;
+}
+
+std::vector<std::byte> encode_pairing_reject(PairingRejectReason reason) {
+    std::vector<std::byte> wire;
+    append_le(wire, static_cast<std::uint16_t>(reason));
+    return wire;
+}
+
+std::optional<PairingRejectReason> decode_pairing_reject(
+    std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    std::uint16_t reason = 0;
+    if (payload.size() != sizeof(std::uint16_t) ||
+        !read_le(payload, offset, reason) ||
+        reason > static_cast<std::uint16_t>(
+                     PairingRejectReason::confirmation_failed)) {
+        return std::nullopt;
+    }
+    return static_cast<PairingRejectReason>(reason);
+}
+
+std::optional<PairingTranscript> make_transcript(const PairingHello& hello,
+                                                 const PairingOffer& offer) {
+    if (hello.version != offer.version ||
+        hello.agreement != offer.agreement) {
+        return std::nullopt;
+    }
+    PairingTranscript transcript;
+    transcript.version = hello.version;
+    transcript.agreement = hello.agreement;
+    transcript.client_uuid = hello.client_uuid;
+    transcript.client_hostname = hello.client_hostname;
+    transcript.client_public_key = hello.client_public_key;
+    transcript.server_public_key = offer.server_public_key;
+    transcript.client_nonce = hello.client_nonce;
+    transcript.server_nonce = offer.server_nonce;
+    if (!valid_transcript(transcript)) {
+        return std::nullopt;
+    }
+    return transcript;
 }
 
 } // namespace nstu::pairing

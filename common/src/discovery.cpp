@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <stop_token>
 #include <string_view>
 #include <system_error>
@@ -36,6 +37,30 @@ static_assert(kDiscoveryPacketBytes ==
                   security::kNonceBytes + sizeof(std::uint64_t) +
                   security::kSha256Bytes);
 inline constexpr std::size_t kMaximumDiscoveryTargets = 32;
+
+// Pairing probes ride the same UDP port but carry their own magic, because
+// they are a different trust model: no key exists yet on either side, so the
+// trailing digest is an integrity and format check, never authentication.
+inline constexpr std::array<std::byte, 4> kPairingMagic{
+    static_cast<std::byte>('N'), static_cast<std::byte>('S'),
+    static_cast<std::byte>('T'), static_cast<std::byte>('P')};
+
+enum class PairingPacketKind : std::uint16_t {
+    probe = 1,
+    beacon = 2,
+};
+
+struct PairingProbe {
+    security::Nonce client_nonce{};
+    std::uint64_t unix_time_seconds = 0;
+};
+
+struct PairingBeacon {
+    security::Nonce client_nonce{};
+    std::uint64_t unix_time_seconds = 0;
+    std::uint16_t control_port = 0;
+    std::string server_name;
+};
 
 enum class PacketKind : std::uint16_t {
     request = 1,
@@ -189,6 +214,187 @@ std::uint64_t unix_seconds_now() noexcept {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
                                           .count());
+}
+
+std::string sanitize_server_name(std::string_view name) {
+    std::string sanitized;
+    sanitized.reserve(std::min(name.size(), kMaximumServerNameBytes));
+    for (const char character : name) {
+        if (sanitized.size() == kMaximumServerNameBytes) {
+            break;
+        }
+        const auto code = static_cast<unsigned char>(character);
+        sanitized.push_back(code >= 0x20u && code < 0x7fu
+                                ? character
+                                : '?');
+    }
+    return sanitized;
+}
+
+std::vector<std::byte> pairing_digest_message(std::string_view domain,
+                                              PairingPacketKind kind,
+                                              const PairingBeacon& fields) {
+    std::vector<std::byte> message;
+    message.insert(message.end(),
+                   reinterpret_cast<const std::byte*>(domain.data()),
+                   reinterpret_cast<const std::byte*>(domain.data() +
+                                                      domain.size()));
+    append_le(message, kDiscoveryVersion);
+    append_le(message, static_cast<std::uint16_t>(kind));
+    message.insert(message.end(), fields.client_nonce.begin(),
+                   fields.client_nonce.end());
+    append_le(message, fields.unix_time_seconds);
+    append_le(message, fields.control_port);
+    append_le(message, static_cast<std::uint16_t>(fields.server_name.size()));
+    message.insert(
+        message.end(),
+        reinterpret_cast<const std::byte*>(fields.server_name.data()),
+        reinterpret_cast<const std::byte*>(fields.server_name.data() +
+                                           fields.server_name.size()));
+    return message;
+}
+
+bool is_pairing_datagram(std::span<const std::byte> wire) noexcept {
+    return wire.size() >= kPairingMagic.size() &&
+           std::equal(kPairingMagic.begin(), kPairingMagic.end(),
+                      wire.begin());
+}
+
+std::vector<std::byte> encode_pairing_probe(const PairingProbe& probe) {
+    if (probe.unix_time_seconds == 0 || !any_nonzero(probe.client_nonce)) {
+        return {};
+    }
+    PairingBeacon fields;
+    fields.client_nonce = probe.client_nonce;
+    fields.unix_time_seconds = probe.unix_time_seconds;
+    const auto digest = security::sha256(pairing_digest_message(
+        "NSTU-PAIRING-PROBE-V1", PairingPacketKind::probe, fields));
+    if (!digest) {
+        return {};
+    }
+    std::vector<std::byte> wire;
+    wire.reserve(kPairingProbeBytes);
+    wire.insert(wire.end(), kPairingMagic.begin(), kPairingMagic.end());
+    append_le(wire, kDiscoveryVersion);
+    append_le(wire, static_cast<std::uint16_t>(PairingPacketKind::probe));
+    wire.insert(wire.end(), probe.client_nonce.begin(),
+                probe.client_nonce.end());
+    append_le(wire, probe.unix_time_seconds);
+    wire.insert(wire.end(), digest->begin(), digest->end());
+    return wire.size() == kPairingProbeBytes ? wire
+                                             : std::vector<std::byte>{};
+}
+
+std::optional<PairingProbe> decode_pairing_probe(
+    std::span<const std::byte> wire) {
+    if (wire.size() != kPairingProbeBytes || !is_pairing_datagram(wire)) {
+        return std::nullopt;
+    }
+    std::size_t offset = kPairingMagic.size();
+    std::uint16_t version = 0;
+    std::uint16_t kind = 0;
+    PairingProbe probe;
+    if (!read_le(wire, offset, version) || version != kDiscoveryVersion ||
+        !read_le(wire, offset, kind) ||
+        kind != static_cast<std::uint16_t>(PairingPacketKind::probe)) {
+        return std::nullopt;
+    }
+    std::copy_n(wire.begin() + static_cast<std::ptrdiff_t>(offset),
+                probe.client_nonce.size(), probe.client_nonce.begin());
+    offset += probe.client_nonce.size();
+    if (!read_le(wire, offset, probe.unix_time_seconds) ||
+        probe.unix_time_seconds == 0 || !any_nonzero(probe.client_nonce)) {
+        return std::nullopt;
+    }
+    PairingBeacon fields;
+    fields.client_nonce = probe.client_nonce;
+    fields.unix_time_seconds = probe.unix_time_seconds;
+    const auto digest = security::sha256(pairing_digest_message(
+        "NSTU-PAIRING-PROBE-V1", PairingPacketKind::probe, fields));
+    if (!digest ||
+        !std::equal(digest->begin(), digest->end(),
+                    wire.begin() + static_cast<std::ptrdiff_t>(offset))) {
+        return std::nullopt;
+    }
+    return probe;
+}
+
+std::vector<std::byte> encode_pairing_beacon(const PairingBeacon& beacon) {
+    if (beacon.unix_time_seconds == 0 || beacon.control_port == 0 ||
+        !any_nonzero(beacon.client_nonce) ||
+        beacon.server_name.size() > kMaximumServerNameBytes) {
+        return {};
+    }
+    const auto digest = security::sha256(pairing_digest_message(
+        "NSTU-PAIRING-BEACON-V1", PairingPacketKind::beacon, beacon));
+    if (!digest) {
+        return {};
+    }
+    std::vector<std::byte> wire;
+    wire.insert(wire.end(), kPairingMagic.begin(), kPairingMagic.end());
+    append_le(wire, kDiscoveryVersion);
+    append_le(wire, static_cast<std::uint16_t>(PairingPacketKind::beacon));
+    wire.insert(wire.end(), beacon.client_nonce.begin(),
+                beacon.client_nonce.end());
+    append_le(wire, beacon.unix_time_seconds);
+    append_le(wire, beacon.control_port);
+    append_le(wire, static_cast<std::uint16_t>(beacon.server_name.size()));
+    wire.insert(
+        wire.end(),
+        reinterpret_cast<const std::byte*>(beacon.server_name.data()),
+        reinterpret_cast<const std::byte*>(beacon.server_name.data() +
+                                           beacon.server_name.size()));
+    wire.insert(wire.end(), digest->begin(), digest->end());
+    return wire.size() <= kMaximumDiscoveryDatagramBytes
+               ? wire
+               : std::vector<std::byte>{};
+}
+
+std::optional<PairingBeacon> decode_pairing_beacon(
+    std::span<const std::byte> wire) {
+    constexpr std::size_t kFixedBytes = 4 + 2 + 2 + security::kNonceBytes + 8 +
+                                        2 + 2 + security::kSha256Bytes;
+    if (wire.size() < kFixedBytes ||
+        wire.size() > kMaximumDiscoveryDatagramBytes ||
+        !is_pairing_datagram(wire)) {
+        return std::nullopt;
+    }
+    std::size_t offset = kPairingMagic.size();
+    std::uint16_t version = 0;
+    std::uint16_t kind = 0;
+    PairingBeacon beacon;
+    if (!read_le(wire, offset, version) || version != kDiscoveryVersion ||
+        !read_le(wire, offset, kind) ||
+        kind != static_cast<std::uint16_t>(PairingPacketKind::beacon)) {
+        return std::nullopt;
+    }
+    std::copy_n(wire.begin() + static_cast<std::ptrdiff_t>(offset),
+                beacon.client_nonce.size(), beacon.client_nonce.begin());
+    offset += beacon.client_nonce.size();
+    std::uint16_t name_bytes = 0;
+    if (!read_le(wire, offset, beacon.unix_time_seconds) ||
+        !read_le(wire, offset, beacon.control_port) ||
+        !read_le(wire, offset, name_bytes) ||
+        name_bytes > kMaximumServerNameBytes ||
+        wire.size() != offset + name_bytes + security::kSha256Bytes ||
+        beacon.unix_time_seconds == 0 || beacon.control_port == 0 ||
+        !any_nonzero(beacon.client_nonce)) {
+        return std::nullopt;
+    }
+    beacon.server_name.assign(
+        reinterpret_cast<const char*>(wire.data() + offset), name_bytes);
+    if (beacon.server_name != sanitize_server_name(beacon.server_name)) {
+        return std::nullopt;
+    }
+    offset += name_bytes;
+    const auto digest = security::sha256(pairing_digest_message(
+        "NSTU-PAIRING-BEACON-V1", PairingPacketKind::beacon, beacon));
+    if (!digest ||
+        !std::equal(digest->begin(), digest->end(),
+                    wire.begin() + static_cast<std::ptrdiff_t>(offset))) {
+        return std::nullopt;
+    }
+    return beacon;
 }
 
 #if defined(_WIN32)
@@ -689,6 +895,147 @@ std::vector<ServerEndpoint> discover_authenticated_servers(
 #endif
 }
 
+std::vector<PairingCandidate> discover_pairing_candidates(
+    const ClientDiscoveryOptions& options, std::string* error) {
+#if defined(_WIN32)
+    net::WinsockRuntime winsock;
+    if (!winsock.ready()) {
+        set_error(error, "Winsock initialization failed");
+        return {};
+    }
+    if (options.discovery_port == 0 || options.maximum_endpoints == 0) {
+        set_error(error, "invalid pairing discovery configuration");
+        return {};
+    }
+    PairingProbe probe;
+    probe.unix_time_seconds = unix_seconds_now();
+    if (!security::generate_random(probe.client_nonce)) {
+        set_error(error, "pairing probe nonce generation failed");
+        return {};
+    }
+    const auto wire = encode_pairing_probe(probe);
+    if (wire.size() != kPairingProbeBytes) {
+        set_error(error, "pairing probe encoding failed");
+        return {};
+    }
+    UniqueSocket socket(::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
+    if (!socket.valid()) {
+        set_winsock_error(error, "UDP pairing socket creation");
+        return {};
+    }
+    if (!disable_udp_connection_reset(socket.get(), error)) {
+        return {};
+    }
+    const BOOL broadcast = TRUE;
+    if (setsockopt(socket.get(), SOL_SOCKET, SO_BROADCAST,
+                   reinterpret_cast<const char*>(&broadcast),
+                   sizeof(broadcast)) == SOCKET_ERROR) {
+        set_winsock_error(error, "UDP pairing broadcast setup");
+        return {};
+    }
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_port = 0;
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(socket.get(), reinterpret_cast<const sockaddr*>(&local),
+             sizeof(local)) == SOCKET_ERROR) {
+        set_winsock_error(error, "UDP pairing bind");
+        return {};
+    }
+    auto targets = discovery_targets(options, error);
+    if (targets.empty()) {
+        if (error != nullptr && error->empty()) {
+            set_error(error, "no IPv4 discovery target is available");
+        }
+        return {};
+    }
+    bool sent = false;
+    for (const auto& target : targets) {
+        const int result = sendto(
+            socket.get(), reinterpret_cast<const char*>(wire.data()),
+            static_cast<int>(wire.size()), 0,
+            reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+        sent = sent || result == static_cast<int>(wire.size());
+    }
+    if (!sent) {
+        set_winsock_error(error, "UDP pairing probe send");
+        return {};
+    }
+
+    const auto timeout = std::clamp(options.timeout,
+                                    std::chrono::milliseconds(100),
+                                    std::chrono::milliseconds(5000));
+    const auto candidate_limit =
+        std::clamp<std::size_t>(options.maximum_endpoints, 1, 32);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::vector<PairingCandidate> candidates;
+    std::unordered_set<std::string> seen;
+    std::array<std::byte, kMaximumDiscoveryDatagramBytes> buffer{};
+    while (std::chrono::steady_clock::now() < deadline &&
+           candidates.size() < candidate_limit) {
+        const auto remaining = std::chrono::duration_cast<
+            std::chrono::milliseconds>(deadline -
+                                      std::chrono::steady_clock::now());
+        const auto remaining_count = std::max<std::int64_t>(
+            remaining.count(), 1);
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(socket.get(), &readable);
+        timeval wait{
+            static_cast<long>(remaining_count / 1000),
+            static_cast<long>((remaining_count % 1000) * 1000),
+        };
+        const int ready = select(0, &readable, nullptr, nullptr, &wait);
+        if (ready == 0) {
+            break;
+        }
+        if (ready == SOCKET_ERROR) {
+            set_winsock_error(error, "UDP pairing wait");
+            return {};
+        }
+        sockaddr_in source{};
+        int source_bytes = sizeof(source);
+        const int received = recvfrom(
+            socket.get(), reinterpret_cast<char*>(buffer.data()),
+            static_cast<int>(buffer.size()), 0,
+            reinterpret_cast<sockaddr*>(&source), &source_bytes);
+        if (received <= 0 || source.sin_family != AF_INET ||
+            ntohs(source.sin_port) != options.discovery_port) {
+            continue;
+        }
+        const std::span<const std::byte> datagram{
+            buffer.data(), static_cast<std::size_t>(received)};
+        const auto beacon = decode_pairing_beacon(datagram);
+        // The nonce echo only pairs the reply with this sweep; it proves
+        // nothing about who sent it, which is why the operator still has to
+        // compare the code afterwards.
+        if (!beacon || beacon->client_nonce != probe.client_nonce) {
+            continue;
+        }
+        const auto address = address_text(source);
+        if (!address) {
+            continue;
+        }
+        const auto lookup = *address + ":" +
+                            std::to_string(beacon->control_port);
+        if (seen.insert(lookup).second) {
+            candidates.push_back(
+                {*address, beacon->control_port, beacon->server_name});
+        }
+    }
+    if (candidates.empty()) {
+        set_error(error, "no NSTU server answered the pairing probe");
+    } else if (error != nullptr) {
+        error->clear();
+    }
+    return candidates;
+#else
+    (void)options;
+    set_error(error, "pairing discovery requires Windows");
+    return {};
+#endif
+}
+
 class AuthenticatedDiscoveryResponder::Impl {
 public:
     Impl()
@@ -793,10 +1140,65 @@ public:
         return local_port_.load();
     }
 
+    void set_pairing_beacon(bool enabled, std::string_view server_name) {
+        auto sanitized = sanitize_server_name(server_name);
+        std::scoped_lock lock(beacon_mutex_);
+        beacon_name_ = std::move(sanitized);
+        beacon_enabled_ = enabled && !beacon_name_.empty();
+    }
+
+    [[nodiscard]] bool pairing_beacon_enabled() const noexcept {
+        std::scoped_lock lock(beacon_mutex_);
+        return beacon_enabled_;
+    }
+
 private:
 #if defined(_WIN32)
+    // Unauthenticated by design: the peer has no key yet. The reply discloses
+    // only the display name and control port, and only while the operator has
+    // the enrollment window open.
+    void answer_pairing_probe(std::span<const std::byte> datagram,
+                              const sockaddr_in& source, int source_bytes,
+                              const std::string& source_text) noexcept {
+        const auto probe = decode_pairing_probe(datagram);
+        if (!probe) {
+            rate_limiter_.record_failure(source_text);
+            return;
+        }
+        const auto now = unix_seconds_now();
+        if (!time_is_valid(probe->unix_time_seconds, now,
+                           std::chrono::seconds(120))) {
+            rate_limiter_.record_failure(source_text);
+            return;
+        }
+        PairingBeacon beacon;
+        beacon.client_nonce = probe->client_nonce;
+        beacon.unix_time_seconds = now;
+        beacon.control_port = control_port_;
+        {
+            std::scoped_lock lock(beacon_mutex_);
+            if (!beacon_enabled_) {
+                // A well-formed probe against a closed window is not an
+                // attack; stay silent rather than penalising the source.
+                return;
+            }
+            beacon.server_name = beacon_name_;
+        }
+        const auto wire = encode_pairing_beacon(beacon);
+        if (wire.empty()) {
+            return;
+        }
+        const int sent = sendto(
+            socket_, reinterpret_cast<const char*>(wire.data()),
+            static_cast<int>(wire.size()), 0,
+            reinterpret_cast<const sockaddr*>(&source), source_bytes);
+        if (sent == static_cast<int>(wire.size())) {
+            rate_limiter_.record_success(source_text);
+        }
+    }
+
     void run(std::stop_token stop_token) noexcept {
-        std::array<std::byte, kDiscoveryPacketBytes> buffer{};
+        std::array<std::byte, kMaximumDiscoveryDatagramBytes> buffer{};
         while (!stop_token.stop_requested()) {
             fd_set readable;
             FD_ZERO(&readable);
@@ -822,11 +1224,22 @@ private:
             if (!source_text || !rate_limiter_.allow(*source_text)) {
                 continue;
             }
-            if (received != static_cast<int>(buffer.size())) {
+            if (received <= 0) {
                 rate_limiter_.record_failure(*source_text);
                 continue;
             }
-            const auto request = decode_request(buffer);
+            const std::span<const std::byte> datagram{
+                buffer.data(), static_cast<std::size_t>(received)};
+            if (is_pairing_datagram(datagram)) {
+                answer_pairing_probe(datagram, source, source_bytes,
+                                     *source_text);
+                continue;
+            }
+            if (received != static_cast<int>(kDiscoveryPacketBytes)) {
+                rate_limiter_.record_failure(*source_text);
+                continue;
+            }
+            const auto request = decode_request(datagram);
             if (!request || key_store_ == nullptr) {
                 rate_limiter_.record_failure(*source_text);
                 continue;
@@ -881,6 +1294,9 @@ private:
     const security::KeyStore* key_store_ = nullptr;
     security::HandshakeRateLimiter rate_limiter_;
     security::ReplayProtector replay_protector_;
+    mutable std::mutex beacon_mutex_;
+    std::string beacon_name_;
+    bool beacon_enabled_ = false;
     std::jthread worker_;
     std::atomic_bool running_{false};
     std::atomic<std::uint16_t> local_port_{0};
@@ -902,6 +1318,15 @@ bool AuthenticatedDiscoveryResponder::start(
 }
 
 void AuthenticatedDiscoveryResponder::stop() noexcept { impl_->stop(); }
+
+void AuthenticatedDiscoveryResponder::set_pairing_beacon(
+    bool enabled, std::string_view server_name) {
+    impl_->set_pairing_beacon(enabled, server_name);
+}
+
+bool AuthenticatedDiscoveryResponder::pairing_beacon_enabled() const noexcept {
+    return impl_->pairing_beacon_enabled();
+}
 
 bool AuthenticatedDiscoveryResponder::running() const noexcept {
     return impl_->running();
