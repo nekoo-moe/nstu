@@ -427,6 +427,7 @@ struct DashboardState {
     int annotation_thickness = 4;
     std::chrono::steady_clock::time_point next_host_snapshot{};
     std::string control_status;
+    std::string pairing_status;
     std::string startup_error;
     std::string telemetry_report_preview;
     bool telemetry_report_requested = false;
@@ -2282,7 +2283,151 @@ void draw_telemetry_report_popup(DashboardState& state,
     ImGui::EndPopup();
 }
 
-void draw_menu_strip(DashboardState& state, bool has_clients) {
+// The computer name is the only label a teacher reliably recognises in a
+// selection menu. The beacon sanitizes it again before it reaches the wire.
+std::string local_server_name() {
+    char name[MAX_COMPUTERNAME_LENGTH + 1]{};
+    DWORD length = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameA(name, &length) && length > 0) {
+        return std::string(name, length);
+    }
+    return "NSTU";
+}
+
+// Six digits compared out loud across a room are easier to read in two groups.
+std::string grouped_code(const std::string& code) {
+    return code.size() == 6 ? code.substr(0, 3) + " " + code.substr(3) : code;
+}
+
+// The operator's half of verified pairing. By the time a row appears here the
+// key exchange is done and the client has already proved it derived the same
+// secret, so what is left is the one thing arithmetic cannot settle: whether
+// the machine on the other end of that exchange is the machine the teacher is
+// standing next to. Comparing the six digits answers it, and nothing turns
+// into a key without it.
+void draw_pairing_requests(DashboardState& state,
+                           nstu::server::ServerControlPlane& control_plane) {
+    ImGui::TextUnformatted(tr(state,
+        "New computers can find this server while this window is open.",
+        "Máy mới có thể tìm thấy máy "
+        "chủ này khi cửa sổ này đang mở."));
+    ImGui::TextDisabled("%s", tr(state,
+        "Approve only if the code matches the one shown on that computer.",
+        "Chỉ duyệt khi mã trùng với mã "
+        "hiển thị trên máy đó."));
+    ImGui::Separator();
+    const auto pending = control_plane.pending_pairings();
+    if (pending.empty()) {
+        ImGui::Dummy({656.0f, 8.0f});
+        ImGui::TextDisabled("%s", tr(state, "Waiting for computers...",
+                                     "Đang chờ máy..."));
+        ImGui::Dummy({656.0f, 8.0f});
+    } else if (ImGui::BeginTable("pairing-requests", 4,
+                                 ImGuiTableFlags_RowBg |
+                                     ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn(tr(state, "Computer", "Máy"),
+                                ImGuiTableColumnFlags_WidthFixed, 300.0f);
+        ImGui::TableSetupColumn(tr(state, "Code", "Mã"),
+                                ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn(tr(state, "Time left", "Còn lại"),
+                                ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("##pairing-actions",
+                                ImGuiTableColumnFlags_WidthFixed, 176.0f);
+        ImGui::TableHeadersRow();
+        for (const auto& request : pending) {
+            push_client_id(request.pairing_id);
+            ImGui::TableNextRow(0, 46.0f);
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(request.hostname.c_str());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", request.address.c_str());
+            }
+            ImGui::TextDisabled("%s", request.client_uuid.c_str());
+            ImGui::TableSetColumnIndex(1);
+            if (g_heading_font != nullptr) {
+                ImGui::PushFont(g_heading_font);
+            }
+            ImGui::TextUnformatted(
+                grouped_code(request.short_authentication_string).c_str());
+            if (g_heading_font != nullptr) {
+                ImGui::PopFont();
+            }
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%u s",
+                        static_cast<unsigned>(request.seconds_remaining));
+            ImGui::TableSetColumnIndex(3);
+            std::string error;
+            if (ImGui::Button(tr(state, "Approve", "Duyệt"),
+                              {84.0f, 30.0f})) {
+                if (control_plane.approve_pairing(request.pairing_id,
+                                                  &error)) {
+                    state.pairing_status = request.hostname + " " +
+                        tr(state, "is now enrolled.",
+                           "đã được ghép "
+                           "nối.");
+                } else {
+                    record_operation_failure("Pairing",
+                                             "Approve request failed", error);
+                    state.pairing_status = error;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(tr(state, "Reject", "Từ chối"),
+                              {84.0f, 30.0f})) {
+                if (control_plane.reject_pairing(request.pairing_id, &error)) {
+                    state.pairing_status = request.hostname + " " +
+                        tr(state, "was turned away.",
+                           "đã bị từ chối.");
+                } else {
+                    record_operation_failure("Pairing",
+                                             "Reject request failed", error);
+                    state.pairing_status = error;
+                }
+            }
+            pop_client_id();
+        }
+        ImGui::EndTable();
+    }
+    if (!state.pairing_status.empty()) {
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", state.pairing_status.c_str());
+    }
+}
+
+void draw_pairing_popup(DashboardState& state,
+                        nstu::server::ServerControlPlane& control_plane) {
+    constexpr float button_width = 140.0f;
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - 242.0f);
+    if (ImGui::Button(tr(state, "Add computers", "Thêm máy"),
+                      {button_width, 28.0f})) {
+        state.pairing_status.clear();
+        control_plane.set_pairing_window(true, local_server_name());
+        ImGui::OpenPopup("pairing-popup");
+    }
+    bool staying_open = true;
+    if (ImGui::BeginPopupModal(
+            tr(state, "Add computers###pairing-popup",
+               "Thêm máy###pairing-popup"),
+            &staying_open, ImGuiWindowFlags_AlwaysAutoResize)) {
+        draw_pairing_requests(state, control_plane);
+        ImGui::Separator();
+        if (ImGui::Button(tr(state, "Done", "Xong"), {110.0f, 30.0f})) {
+            staying_open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    // The beacon must not outlive the dialog. Leaving this screen is how the
+    // operator says they have stopped watching for new machines, so anything
+    // still waiting on an answer is turned away rather than carried over.
+    if (!staying_open || (!ImGui::IsPopupOpen("pairing-popup") &&
+                          control_plane.pairing_window_open())) {
+        control_plane.set_pairing_window(false);
+    }
+}
+
+void draw_menu_strip(DashboardState& state, bool has_clients,
+                     nstu::server::ServerControlPlane& control_plane) {
     if (!ImGui::BeginChild("menu-strip", {0, 31.0f}, false,
                            ImGuiWindowFlags_NoScrollbar)) {
         ImGui::EndChild();
@@ -2308,6 +2453,7 @@ void draw_menu_strip(DashboardState& state, bool has_clients) {
         state.view = DashboardView::selected_client;
     }
     ImGui::EndDisabled();
+    draw_pairing_popup(state, control_plane);
     draw_diagnostics_popup(state);
     draw_preferences(state);
     ImGui::EndChild();
@@ -2579,7 +2725,7 @@ void draw_dashboard_shell(
     const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
-    draw_menu_strip(state, !clients.empty());
+    draw_menu_strip(state, !clients.empty(), control_plane);
     draw_telemetry_report_popup(state, clients.size());
     draw_ribbon(clients, selected_client, state, control_plane);
     draw_workspace_toolbar(clients, state);
@@ -2729,6 +2875,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                          ImGuiWindowFlags_NoBringToFrontOnFocus);
 
         const auto clients = registry.snapshot();
+        // Requests the teacher never answered clear themselves rather
+        // than sitting in the list until the window is closed.
+        control_plane.expire_pending_pairings();
         const auto now = std::chrono::steady_clock::now();
         if (dashboard.broadcast_enabled &&
             now >= dashboard.next_host_snapshot) {
