@@ -10,6 +10,7 @@ add_library(nstu_client_platform STATIC
     src/exam_profile.cpp
     src/named_pipe.cpp
     src/session.cpp
+    src/service_install.cpp
 )
 target_include_directories(nstu_client_platform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(nstu_client_platform PUBLIC cxx_std_20)

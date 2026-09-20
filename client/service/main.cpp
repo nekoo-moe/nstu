@@ -9,6 +9,7 @@
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
 #include "nstu/session.hpp"
+#include "nstu/service_install.hpp"
 #include "nstu/setup/diagnostics.hpp"
 #include "nstu/setup/uwf.hpp"
 
@@ -1653,23 +1654,37 @@ int main(int argc, char** argv) {
     if (argc > 1) {
         const std::string_view argument(
             argc == 2 && argv[1] != nullptr ? argv[1] : "");
-        if (argument != "--thaw-local") {
-            std::fputs("usage: nstu-service [--thaw-local]\n", stderr);
+        std::string error;
+        bool succeeded = false;
+        const char* success = nullptr;
+        if (argument == "--install") {
+            const auto root = nstu::deployment::data_root(&error);
+            succeeded = !root.empty() &&
+                nstu::deployment::ensure_data_root(root, &error) &&
+                nstu::client::install_service(&error);
+            success = "nstu-service: service registered; restart Windows to activate\n";
+        } else if (argument == "--uninstall") {
+            succeeded = nstu::client::uninstall_service(&error);
+            success = "nstu-service: service registration removed\n";
+        } else if (argument == "--thaw-local") {
+            succeeded = nstu::client::thaw_locally(&error);
+            success = "nstu-service: managed mode cleared on this computer\n";
+        } else {
+            std::fputs(
+                "usage: nstu-service [--install|--uninstall|--thaw-local]\n",
+                stderr);
             return 2;
         }
-        std::string error;
-        if (!nstu::client::thaw_locally(&error)) {
+        if (!succeeded) {
             std::fputs(("nstu-service: " +
-                        (error.empty() ? std::string("managed mode could not "
-                                                    "be cleared")
+                        (error.empty() ? std::string("operation failed")
                                        : error) +
                         "\n")
                            .c_str(),
                        stderr);
             return 1;
         }
-        std::fputs("nstu-service: managed mode cleared on this computer\n",
-                   stdout);
+        std::fputs(success, stdout);
         return 0;
     }
     SERVICE_TABLE_ENTRYW table[] = {
