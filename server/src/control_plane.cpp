@@ -7,6 +7,7 @@
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
 #include "nstu/keyring.hpp"
+#include "nstu/pairing.hpp"
 
 #include <windows.h>
 
@@ -22,6 +23,13 @@
 
 namespace nstu::server {
 namespace {
+
+// A pairing request occupies a socket and a slot until the teacher answers it,
+// so both are bounded. The window is long enough to walk to the machine and
+// read the code off its screen, short enough that a forgotten request clears
+// itself.
+inline constexpr std::size_t kMaximumPendingPairings = 16;
+inline constexpr std::chrono::seconds kPairingApprovalWindow{180};
 
 void set_error(std::string* error, const char* message) {
     if (error != nullptr) {
@@ -113,6 +121,11 @@ public:
         enrollment,
         enrollment_complete,
         probe_complete,
+        // Verified pairing runs on the same pre-authentication path as legacy
+        // enrollment, but it takes two extra round trips and a human in the
+        // middle of them.
+        pairing_offered,
+        pairing_pending,
         auth_hello,
         auth_proof,
         authenticated,
@@ -137,8 +150,33 @@ public:
         security::ControlSequenceGuard receive_sequence;
         std::uint64_t send_sequence = 0;
         std::uint64_t handshake_request_id = 0;
+        std::uint64_t pairing_id = 0;
+        // Written by whichever thread answers the operator, read by the I/O
+        // thread, so it deliberately does not live under `mutex`.
+        std::atomic_bool pairing_settled = false;
         std::atomic<std::uint64_t> registry_id = 0;
         std::mutex mutex;
+    };
+
+    // Held between the client's confirmation tag and the operator's answer.
+    // The secrets are the only copy of the key that approval would install, so
+    // dropping the record is the same thing as refusing the request.
+    struct PendingPairingRecord {
+        ~PendingPairingRecord() { pairing::secure_zero(secrets); }
+        PendingPairingRecord() = default;
+        PendingPairingRecord(PendingPairingRecord&&) = default;
+        PendingPairingRecord& operator=(PendingPairingRecord&&) = default;
+        PendingPairingRecord(const PendingPairingRecord&) = delete;
+        PendingPairingRecord& operator=(const PendingPairingRecord&) = delete;
+
+        std::uint64_t pairing_id = 0;
+        net::ConnectionId connection_id = 0;
+        std::uint64_t request_id = 0;
+        std::string address;
+        pairing::PairingTranscript transcript;
+        pairing::PairingSecrets secrets;
+        std::chrono::steady_clock::time_point expires_at{};
+        bool client_confirmed = false;
     };
 
     // The server is the authority for which exam session a client may
@@ -223,6 +261,11 @@ public:
     void stop() noexcept {
         discovery_responder_.stop();
         dispatcher_.stop();
+        {
+            std::scoped_lock lock(pairing_mutex_);
+            pending_pairings_.clear();
+            pairing_window_open_ = false;
+        }
         {
             std::scoped_lock lock(states_mutex_);
             states_.clear();
@@ -403,6 +446,174 @@ public:
         return client_connections_.size();
     }
 
+    void set_pairing_window(bool open, std::string_view server_name) {
+        discovery_responder_.set_pairing_beacon(open, server_name);
+        std::vector<AbandonedPairing> abandoned;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            pairing_window_open_ = open;
+            if (open) {
+                return;
+            }
+            abandoned.reserve(pending_pairings_.size());
+            for (const auto& [pairing_id, record] : pending_pairings_) {
+                (void)pairing_id;
+                abandoned.push_back(AbandonedPairing{
+                    .connection_id = record.connection_id,
+                    .request_id = record.request_id,
+                });
+            }
+            pending_pairings_.clear();
+        }
+        // Closing the window refuses everything it admitted; a request the
+        // teacher never answered must not survive into the next session.
+        refuse_abandoned(abandoned,
+                         pairing::PairingRejectReason::unavailable);
+    }
+
+    bool pairing_window_open() const noexcept {
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        return pairing_window_open_;
+    }
+
+    std::vector<PendingPairing> pending_pairings() const {
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<PendingPairing> visible;
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        visible.reserve(pending_pairings_.size());
+        for (const auto& [pairing_id, record] : pending_pairings_) {
+            if (!record.client_confirmed || record.expires_at <= now) {
+                continue;
+            }
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::seconds>(record.expires_at - now);
+            visible.push_back(PendingPairing{
+                .pairing_id = pairing_id,
+                .client_uuid = record.transcript.client_uuid,
+                .hostname = record.transcript.client_hostname,
+                .address = record.address,
+                .short_authentication_string =
+                    record.secrets.short_authentication_string,
+                .seconds_remaining =
+                    static_cast<std::uint32_t>(remaining.count()),
+            });
+        }
+        std::sort(visible.begin(), visible.end(),
+                  [](const PendingPairing& left, const PendingPairing& right) {
+                      return left.pairing_id < right.pairing_id;
+                  });
+        return visible;
+    }
+
+    bool approve_pairing(std::uint64_t pairing_id, std::string* error) {
+        PendingPairingRecord record;
+        std::vector<AbandonedPairing> expired;
+        bool found_record = false;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            expired = take_expired_locked(std::chrono::steady_clock::now());
+            const auto found = pending_pairings_.find(pairing_id);
+            found_record = found != pending_pairings_.end() &&
+                           found->second.client_confirmed;
+            if (found_record) {
+                record = std::move(found->second);
+                pending_pairings_.erase(found);
+            }
+        }
+        refuse_abandoned(expired, pairing::PairingRejectReason::timed_out);
+        if (!found_record) {
+            set_error(error, "pairing request is no longer pending");
+            return false;
+        }
+        const auto client_id =
+            pairing::client_id_from_uuid(record.transcript.client_uuid);
+        if (!client_id) {
+            set_error(error, "client UUID is not a usable identity");
+            return false;
+        }
+        const auto server_tag = pairing::confirmation_tag(
+            record.secrets, record.transcript,
+            pairing::ConfirmationRole::server);
+        if (!server_tag) {
+            set_error(error, "pairing confirmation tag could not be computed");
+            return false;
+        }
+        // Rotate rather than enroll: a machine that is re-imaged and pairs
+        // again keeps one identity and its previous key stops working.
+        auto previous = key_store_.snapshot();
+        const auto key_id = key_store_.rotate(
+            *client_id, record.secrets.enrolled_key, error);
+        if (!key_id) {
+            for (auto& entry : previous) {
+                security::secure_zero(entry.key);
+            }
+            return false;
+        }
+        std::string keyring_error;
+        if (!config_.keyring_path.empty() &&
+            !security::save_keyring(key_store_, config_.keyring_path,
+                                    config_.keyring_entropy, &keyring_error)) {
+            (void)key_store_.replace(previous, nullptr);
+            for (auto& entry : previous) {
+                security::secure_zero(entry.key);
+            }
+            set_error(error, "paired key could not be persisted");
+            return false;
+        }
+        for (auto& entry : previous) {
+            security::secure_zero(entry.key);
+        }
+        const pairing::PairingAccept accept{
+            .key_id = *key_id,
+            .server_tag = *server_tag,
+        };
+        const auto payload = pairing::encode_pairing_accept(accept);
+        if (payload.empty()) {
+            set_error(error, "pairing acceptance encoding failed");
+            return false;
+        }
+        const auto wire = plain_frame(protocol::CommandType::pairing_accept,
+                                      record.request_id, payload);
+        settle_pairing_connection(record.connection_id);
+        if (!dispatcher_.send(record.connection_id, wire, nullptr)) {
+            set_error(error,
+                      "client disconnected before it could be told the result");
+            return false;
+        }
+        dispatcher_.record_handshake_success(record.connection_id);
+        return true;
+    }
+
+    bool reject_pairing(std::uint64_t pairing_id, std::string* error) {
+        net::ConnectionId connection_id = 0;
+        std::uint64_t request_id = 0;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            const auto found = pending_pairings_.find(pairing_id);
+            if (found == pending_pairings_.end()) {
+                set_error(error, "pairing request is no longer pending");
+                return false;
+            }
+            connection_id = found->second.connection_id;
+            request_id = found->second.request_id;
+            pending_pairings_.erase(found);
+        }
+        send_pairing_reject(connection_id, request_id,
+                            pairing::PairingRejectReason::operator_declined);
+        settle_pairing_connection(connection_id);
+        return true;
+    }
+
+    std::size_t expire_pending_pairings() {
+        std::vector<AbandonedPairing> expired;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            expired = take_expired_locked(std::chrono::steady_clock::now());
+        }
+        refuse_abandoned(expired, pairing::PairingRejectReason::timed_out);
+        return expired.size();
+    }
+
 private:
     bool send_authenticated_locked(ConnectionState& state,
                                     protocol::CommandType type,
@@ -553,7 +764,16 @@ private:
     bool process_frame(ConnectionState& state,
                        const protocol::TcpFrame& frame) {
         if (state.stage == Stage::enrollment) {
+            if (frame.envelope.type == protocol::CommandType::pairing_hello) {
+                return process_pairing_hello(state, frame);
+            }
             return process_enrollment(state, frame);
+        }
+        if (state.stage == Stage::pairing_offered) {
+            return process_pairing_confirm(state, frame);
+        }
+        if (state.stage == Stage::pairing_pending) {
+            return process_pairing_wait(state, frame);
         }
         if (state.stage == Stage::enrollment_complete ||
             state.stage == Stage::probe_complete) {
@@ -571,6 +791,262 @@ private:
         }
         fail_handshake(state, "unexpected control-plane state");
         return false;
+    }
+
+    // Refusing a request means closing its connection, and closing a
+    // connection calls back into on_disconnected, which wants pairing_mutex_.
+    // So the decision is made under the lock and acted on after it is dropped.
+    struct AbandonedPairing {
+        net::ConnectionId connection_id = 0;
+        std::uint64_t request_id = 0;
+    };
+
+    void send_pairing_reject(net::ConnectionId connection_id,
+                             std::uint64_t request_id,
+                             pairing::PairingRejectReason reason) {
+        const auto payload = pairing::encode_pairing_reject(reason);
+        if (payload.empty()) {
+            return;
+        }
+        const auto wire = plain_frame(protocol::CommandType::pairing_reject,
+                                      request_id, payload);
+        (void)dispatcher_.send(connection_id, wire, nullptr);
+    }
+
+    // The client is telling us who it claims to be and offering an ephemeral
+    // public key. Nothing is trusted here; the exchange only exists so both
+    // machines can compute the same six-digit code for a human to compare.
+    bool process_pairing_hello(ConnectionState& state,
+                               const protocol::TcpFrame& frame) {
+        const auto hello = pairing::decode_pairing_hello(frame.payload);
+        if (!hello) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::protocol_error,
+                "invalid pairing hello");
+        }
+        auto key_pair = pairing::EphemeralKeyPair::generate(nullptr);
+        if (!key_pair || key_pair->agreement() != hello->agreement) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::protocol_error,
+                "pairing key agreement is unavailable");
+        }
+        pairing::PairingOffer offer;
+        offer.agreement = key_pair->agreement();
+        const auto public_key = key_pair->public_key();
+        offer.server_public_key.assign(public_key.begin(), public_key.end());
+        if (!security::generate_random(offer.server_nonce)) {
+            return refuse_pairing(state, frame.envelope.request_id,
+                                  pairing::PairingRejectReason::unspecified,
+                                  "pairing nonce generation failed");
+        }
+        auto transcript = pairing::make_transcript(*hello, offer);
+        if (!transcript) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::protocol_error,
+                "pairing transcript is malformed");
+        }
+        auto shared = key_pair->agree(hello->client_public_key, nullptr);
+        if (!shared) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::protocol_error,
+                "pairing key agreement rejected the peer key");
+        }
+        auto secrets = pairing::derive_pairing_secrets(*shared, *transcript);
+        security::secure_zero(*shared);
+        if (!secrets) {
+            return refuse_pairing(state, frame.envelope.request_id,
+                                  pairing::PairingRejectReason::unspecified,
+                                  "pairing key derivation failed");
+        }
+        const auto offer_payload = pairing::encode_pairing_offer(offer);
+        if (offer_payload.empty()) {
+            pairing::secure_zero(*secrets);
+            fail_handshake(state, "pairing offer encoding failed");
+            return false;
+        }
+
+        std::uint64_t pairing_id = 0;
+        std::vector<AbandonedPairing> expired;
+        const char* refusal = nullptr;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            expired = take_expired_locked(std::chrono::steady_clock::now());
+            if (!pairing_window_open_) {
+                refusal = "pairing window is closed";
+            } else if (pending_pairings_.size() >= kMaximumPendingPairings) {
+                refusal = "too many pairing requests are pending";
+            } else {
+                pairing_id = next_pairing_id_++;
+                PendingPairingRecord record;
+                record.pairing_id = pairing_id;
+                record.connection_id = state.connection_id;
+                record.request_id = frame.envelope.request_id;
+                record.address = state.source;
+                record.transcript = std::move(*transcript);
+                record.secrets = std::move(*secrets);
+                record.expires_at =
+                    std::chrono::steady_clock::now() + kPairingApprovalWindow;
+                pending_pairings_.emplace(pairing_id, std::move(record));
+            }
+        }
+        refuse_abandoned(expired, pairing::PairingRejectReason::timed_out);
+        // Moving a PairingSecrets copies its digests, so the local copy still
+        // holds key material whether or not the record was stored.
+        pairing::secure_zero(*secrets);
+        if (refusal != nullptr) {
+            return refuse_pairing(state, frame.envelope.request_id,
+                                  pairing::PairingRejectReason::unavailable,
+                                  refusal);
+        }
+
+        const auto wire = plain_frame(protocol::CommandType::pairing_offer,
+                                      frame.envelope.request_id, offer_payload);
+        if (!dispatcher_.send(state.connection_id, wire, nullptr)) {
+            drop_pending_pairing(pairing_id);
+            return false;
+        }
+        state.pairing_id = pairing_id;
+        state.handshake_request_id = frame.envelope.request_id;
+        state.stage = Stage::pairing_offered;
+        return true;
+    }
+
+    // The client's tag proves it derived the same secret from the same
+    // transcript. That is not proof of identity - a man in the middle can do
+    // it too - but it does mean only requests that got that far are worth
+    // showing to the teacher.
+    bool process_pairing_confirm(ConnectionState& state,
+                                 const protocol::TcpFrame& frame) {
+        if (frame.envelope.type == protocol::CommandType::heartbeat) {
+            return answer_pairing_heartbeat(state, frame);
+        }
+        if (frame.envelope.type != protocol::CommandType::pairing_confirm ||
+            frame.envelope.request_id != state.handshake_request_id) {
+            fail_handshake(state, "expected pairing confirmation");
+            return false;
+        }
+        const auto confirm = pairing::decode_pairing_confirm(frame.payload);
+        bool verified = false;
+        bool found_record = false;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            const auto found = pending_pairings_.find(state.pairing_id);
+            found_record = found != pending_pairings_.end();
+            if (found_record) {
+                verified = confirm.has_value() &&
+                           pairing::verify_confirmation_tag(
+                               found->second.secrets, found->second.transcript,
+                               pairing::ConfirmationRole::client,
+                               confirm->client_tag);
+                if (verified) {
+                    found->second.client_confirmed = true;
+                    found->second.expires_at =
+                        std::chrono::steady_clock::now() +
+                        kPairingApprovalWindow;
+                } else {
+                    pending_pairings_.erase(found);
+                }
+            }
+        }
+        if (!found_record) {
+            fail_handshake(state, "pairing request is no longer pending");
+            return false;
+        }
+        if (!verified) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::confirmation_failed,
+                "pairing confirmation did not verify");
+        }
+        state.stage = Stage::pairing_pending;
+        return true;
+    }
+
+    // Waiting on a human. The dispatcher closes idle connections after fifteen
+    // seconds, so the client keeps this one alive with heartbeats rather than
+    // the server holding the timeout open for anything that connects.
+    bool process_pairing_wait(ConnectionState& state,
+                              const protocol::TcpFrame& frame) {
+        if (state.pairing_settled.load()) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+        if (frame.envelope.type != protocol::CommandType::heartbeat) {
+            fail_handshake(state, "unexpected frame while pairing is pending");
+            return false;
+        }
+        return answer_pairing_heartbeat(state, frame);
+    }
+
+    bool answer_pairing_heartbeat(ConnectionState& state,
+                                  const protocol::TcpFrame& frame) {
+        if (!frame.payload.empty()) {
+            fail_handshake(state, "invalid pairing heartbeat");
+            return false;
+        }
+        const auto wire = plain_frame(protocol::CommandType::heartbeat,
+                                      frame.envelope.request_id, {});
+        return dispatcher_.send(state.connection_id, wire, nullptr);
+    }
+
+    // Tells the client why before closing, so the machine in front of the
+    // student can say something more useful than "connection lost". Must not
+    // be called while pairing_mutex_ is held.
+    bool refuse_pairing(ConnectionState& state, std::uint64_t request_id,
+                        pairing::PairingRejectReason reason,
+                        const char* detail) {
+        send_pairing_reject(state.connection_id, request_id, reason);
+        fail_handshake(state, detail);
+        return false;
+    }
+
+    void refuse_abandoned(const std::vector<AbandonedPairing>& abandoned,
+                          pairing::PairingRejectReason reason) {
+        for (const auto& entry : abandoned) {
+            send_pairing_reject(entry.connection_id, entry.request_id, reason);
+            settle_pairing_connection(entry.connection_id);
+        }
+    }
+
+    void drop_pending_pairing(std::uint64_t pairing_id) {
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        pending_pairings_.erase(pairing_id);
+    }
+
+    void drop_pending_pairings_for(net::ConnectionId connection_id) {
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        std::erase_if(pending_pairings_, [connection_id](const auto& entry) {
+            return entry.second.connection_id == connection_id;
+        });
+    }
+
+    void settle_pairing_connection(net::ConnectionId connection_id) {
+        const auto state = state_for_connection(connection_id);
+        if (state) {
+            state->pairing_settled.store(true);
+        }
+    }
+
+    std::vector<AbandonedPairing> take_expired_locked(
+        std::chrono::steady_clock::time_point now) {
+        std::vector<AbandonedPairing> expired;
+        for (auto entry = pending_pairings_.begin();
+             entry != pending_pairings_.end();) {
+            if (entry->second.expires_at > now) {
+                ++entry;
+                continue;
+            }
+            expired.push_back(AbandonedPairing{
+                .connection_id = entry->second.connection_id,
+                .request_id = entry->second.request_id,
+            });
+            entry = pending_pairings_.erase(entry);
+        }
+        return expired;
     }
 
     bool process_enrollment(ConnectionState& state,
@@ -889,6 +1365,7 @@ private:
             (void)registry_.set_status(registry_id,
                                        ClientStatus::offline);
         }
+        drop_pending_pairings_for(id);
     }
 
 public:
@@ -903,6 +1380,10 @@ public:
     security::ReplayProtector replay_protector_;
     std::unique_ptr<security::EnrollmentAuthority> enrollment_authority_;
     std::mutex enrollment_mutex_;
+    mutable std::mutex pairing_mutex_;
+    std::unordered_map<std::uint64_t, PendingPairingRecord> pending_pairings_;
+    bool pairing_window_open_ = false;
+    std::uint64_t next_pairing_id_ = 1;
     mutable std::mutex states_mutex_;
     mutable std::mutex exam_contexts_mutex_;
     std::unordered_map<net::ConnectionId,
@@ -925,6 +1406,33 @@ bool ServerControlPlane::start(ServerControlPlaneConfig config,
 }
 
 void ServerControlPlane::stop() noexcept { impl_->stop(); }
+
+void ServerControlPlane::set_pairing_window(bool open,
+                                            std::string_view server_name) {
+    impl_->set_pairing_window(open, server_name);
+}
+
+bool ServerControlPlane::pairing_window_open() const noexcept {
+    return impl_->pairing_window_open();
+}
+
+std::vector<PendingPairing> ServerControlPlane::pending_pairings() const {
+    return impl_->pending_pairings();
+}
+
+bool ServerControlPlane::approve_pairing(std::uint64_t pairing_id,
+                                         std::string* error) {
+    return impl_->approve_pairing(pairing_id, error);
+}
+
+bool ServerControlPlane::reject_pairing(std::uint64_t pairing_id,
+                                        std::string* error) {
+    return impl_->reject_pairing(pairing_id, error);
+}
+
+std::size_t ServerControlPlane::expire_pending_pairings() {
+    return impl_->expire_pending_pairings();
+}
 
 bool ServerControlPlane::send_command(std::uint64_t client_id,
                                       protocol::CommandType type,

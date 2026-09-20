@@ -29,6 +29,18 @@ struct ServerControlPlaneConfig {
     std::size_t maximum_clients = 512;
 };
 
+// One client waiting for the teacher to approve it. The six-digit code is the
+// whole security story: the operator only approves when it matches what the
+// client machine is showing, which is what rules out a man in the middle.
+struct PendingPairing {
+    std::uint64_t pairing_id = 0;
+    std::string client_uuid;
+    std::string hostname;
+    std::string address;
+    std::string short_authentication_string;
+    std::uint32_t seconds_remaining = 0;
+};
+
 class ServerControlPlane {
 public:
     ServerControlPlane(ClientRegistry& registry,
@@ -86,6 +98,20 @@ public:
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::uint16_t local_port() const noexcept;
     [[nodiscard]] std::size_t authenticated_client_count() const noexcept;
+
+    // Verified pairing. Nothing here happens without the operator: the beacon
+    // that lets an unenrolled machine find this server is off until the window
+    // is opened, and a pending request only becomes a key when approve is
+    // called with the code matching the client screen.
+    void set_pairing_window(bool open, std::string_view server_name = {});
+    [[nodiscard]] bool pairing_window_open() const noexcept;
+    [[nodiscard]] std::vector<PendingPairing> pending_pairings() const;
+    [[nodiscard]] bool approve_pairing(std::uint64_t pairing_id,
+                                       std::string* error = nullptr);
+    [[nodiscard]] bool reject_pairing(std::uint64_t pairing_id,
+                                      std::string* error = nullptr);
+    // Drops requests the operator left unanswered. Safe to call every frame.
+    std::size_t expire_pending_pairings();
 
 private:
     class Impl;

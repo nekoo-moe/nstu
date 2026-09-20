@@ -166,6 +166,15 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_enrollment_transport_tests)
     add_test(NAME nstu.enrollment_transport
         COMMAND nstu_enrollment_transport_tests)
+
+    add_executable(nstu_pairing_transport_tests
+        pairing_transport_tests.cpp)
+    target_link_libraries(nstu_pairing_transport_tests PRIVATE
+        nstu_server_state)
+    nstu_enable_warnings(nstu_pairing_transport_tests)
+    nstu_enable_test_assertions(nstu_pairing_transport_tests)
+    add_test(NAME nstu.pairing_transport
+        COMMAND nstu_pairing_transport_tests)
 endif()
 
 if(TARGET nstu_client_platform)
