@@ -23,6 +23,9 @@ Var AddressLabel
 Var AddressInput
 Var PortLabel
 Var PortInput
+Var UwfCheckbox
+Var UwfNotice
+Var EnableUwf
 Var AfterRestart
 Var PreflightReport
 Var PostInstallReport
@@ -41,6 +44,7 @@ Function .onInit
   SetRegView 64
   StrCpy $Role "Client"
   StrCpy $ServerPort "47001"
+  StrCpy $EnableUwf "0"
   StrCpy $PreflightReport "$TEMP\\NSTU-installer-preflight.json"
   StrCpy $PostInstallReport "$TEMP\\NSTU-client-post-install.json"
   ${GetParameters} $0
@@ -64,6 +68,8 @@ Function RoleServerClicked
   ShowWindow $AddressInput ${SW_HIDE}
   ShowWindow $PortLabel ${SW_HIDE}
   ShowWindow $PortInput ${SW_HIDE}
+  ShowWindow $UwfCheckbox ${SW_HIDE}
+  ShowWindow $UwfNotice ${SW_HIDE}
 FunctionEnd
 
 Function RoleClientClicked
@@ -72,6 +78,8 @@ Function RoleClientClicked
   ShowWindow $AddressInput ${SW_SHOW}
   ShowWindow $PortLabel ${SW_SHOW}
   ShowWindow $PortInput ${SW_SHOW}
+  ShowWindow $UwfCheckbox ${SW_SHOW}
+  ShowWindow $UwfNotice ${SW_SHOW}
 FunctionEnd
 
 Function RolePageCreate
@@ -99,10 +107,14 @@ Function RolePageCreate
   Pop $PortInput
   ${NSD_SetText} $AddressInput $ServerAddress
   ${NSD_SetText} $PortInput $ServerPort
-  ${NSD_CreateLabel} 0 154u 100% 36u "The client preflight checks the server before installation. A Windows restart is required after client installation and before any uninstall changes are made."
+  ${NSD_CreateCheckbox} 0 146u 100% 18u "Enable reboot-to-restore (Education/Enterprise only)"
+  Pop $UwfCheckbox
+  ${NSD_CreateLabel} 18u 168u 95% 34u "Requires passing readiness checks, persistent NSTU exclusions, and a recovery checkpoint you have verified. UWF is armed only after enrollment."
+  Pop $UwfNotice
+  ${NSD_CreateLabel} 0 208u 100% 36u "The client preflight checks the server before installation. A Windows restart is required after client installation and before any uninstall changes are made."
   Pop $0
 !if ${INTERNAL_TEST_BUILD}
-  ${NSD_CreateLabel} 0 196u 100% 30u "INTERNAL VM TEST: RAM capacity failures are warnings. CPU details are informational in every build. Do not deploy this build to a school or production machine."
+  ${NSD_CreateLabel} 0 248u 100% 30u "INTERNAL VM TEST: RAM capacity failures are warnings. CPU details are informational in every build. Do not deploy this build to a school or production machine."
   Pop $0
 !endif
   StrCmp $Role "Server" nstu_role_page_server nstu_role_page_client
@@ -125,6 +137,13 @@ Function RolePageLeave
     StrCpy $Role "Client"
     ${NSD_GetText} $AddressInput $ServerAddress
     ${NSD_GetText} $PortInput $ServerPort
+    ${NSD_GetState} $UwfCheckbox $EnableUwf
+    ${If} $EnableUwf == ${BST_CHECKED}
+      MessageBox MB_YESNO|MB_ICONEXCLAMATION "Confirm that you created or verified a recovery checkpoint. If readiness passes, this computer will show a 60-second countdown and restart automatically. Continue with reboot-to-restore enabled?" IDYES nstu_uwf_confirmed IDNO nstu_uwf_not_confirmed
+nstu_uwf_not_confirmed:
+      Abort
+nstu_uwf_confirmed:
+    ${EndIf}
     ${If} $ServerAddress == ""
       MessageBox MB_ICONSTOP|MB_OK "Enter the server IP address before continuing."
       Abort
@@ -246,6 +265,11 @@ Section -Client
   WriteRegStr HKLM "Software\\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
   WriteRegStr HKLM "Software\\NSTU" "ServerAddress" "$ServerAddress"
   WriteRegDWORD HKLM "Software\\NSTU" "ServerPort" $ServerPort
+  ${If} $EnableUwf == ${BST_CHECKED}
+    WriteRegDWORD HKLM "Software\\NSTU" "UwfConfigureRequested" 1
+  ${Else}
+    WriteRegDWORD HKLM "Software\\NSTU" "UwfConfigureRequested" 0
+  ${EndIf}
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "DisplayName" "NSTU Client@NSTU_INSTALLER_ROLE_SUFFIX@"
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "NSTU Diagnostics" '"$INSTDIR\\diagnostics\\nstu-diagnostics.exe" --target=client --boot-check --auto-close --log="$R0\\NSTU\\boot-check.log"'

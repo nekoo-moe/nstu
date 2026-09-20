@@ -3,6 +3,7 @@
 #include "nstu/client_control.hpp"
 #include "nstu/client_freeze.hpp"
 #include "nstu/client_pairing.hpp"
+#include "nstu/client_uwf_request.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/deployment.hpp"
 #include "nstu/exam_control.hpp"
@@ -12,6 +13,7 @@
 #include "nstu/setup/uwf.hpp"
 
 #include <windows.h>
+#include <reason.h>
 #include <wtsapi32.h>
 
 #include <algorithm>
@@ -822,7 +824,54 @@ void queue_uwf_report(nstu::control::UwfConfigureReport report) {
     }
 }
 
-void configure_uwf_async(bool checkpoint_acknowledged) {
+bool schedule_uwf_restart() noexcept {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+        return false;
+    }
+    TOKEN_PRIVILEGES requested{};
+    requested.PrivilegeCount = 1;
+    if (!LookupPrivilegeValueW(nullptr, L"SeShutdownPrivilege",
+                               &requested.Privileges[0].Luid)) {
+        CloseHandle(token);
+        return false;
+    }
+    requested.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    TOKEN_PRIVILEGES previous{};
+    DWORD previous_bytes = sizeof(previous);
+    SetLastError(ERROR_SUCCESS);
+    const bool enabled =
+        AdjustTokenPrivileges(token, FALSE, &requested, sizeof(previous),
+                              &previous, &previous_bytes) != FALSE &&
+        GetLastError() == ERROR_SUCCESS;
+    bool scheduled = false;
+    if (enabled) {
+        // Visible countdown, no forced app close. The operator can cancel with
+        // `shutdown /a` during the minute if work still needs saving.
+        // Sources:
+        // https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-initiatesystemshutdownexw
+        // https://learn.microsoft.com/en-us/windows/win32/shutdown/system-shutdown-reason-codes
+        scheduled = InitiateSystemShutdownExW(
+            nullptr,
+            const_cast<wchar_t*>(
+                L"NSTU reboot-to-restore setup completed. Save work; this "
+                L"computer will restart in 60 seconds."),
+            60, FALSE, TRUE,
+            SHTDN_REASON_MAJOR_APPLICATION |
+                SHTDN_REASON_MINOR_INSTALLATION |
+                SHTDN_REASON_FLAG_PLANNED) != FALSE;
+        if (previous.PrivilegeCount != 0) {
+            (void)AdjustTokenPrivileges(token, FALSE, &previous, 0, nullptr,
+                                        nullptr);
+        }
+    }
+    CloseHandle(token);
+    return scheduled;
+}
+
+void configure_uwf_async(bool checkpoint_acknowledged,
+                         bool clear_installer_request = false) {
     bool expected = false;
     if (!g_uwf_configuring.compare_exchange_strong(expected, true)) {
         queue_uwf_report({
@@ -844,43 +893,65 @@ void configure_uwf_async(bool checkpoint_acknowledged) {
             server_port = g_server_port;
         }
         g_uwf_worker = std::thread([
-            checkpoint_acknowledged, server_address = std::move(server_address),
-            server_port] {
+            checkpoint_acknowledged, clear_installer_request,
+            server_address = std::move(server_address), server_port] {
             struct BusyGuard {
                 ~BusyGuard() { g_uwf_configuring = false; }
             } guard;
-            bool readiness_passed = true;
-            nstu::setup::DiagnosticOptions options;
-            options.role = nstu::setup::DiagnosticRole::client;
-            options.boot_check = true;
-            options.server_address.assign(server_address.begin(),
-                                          server_address.end());
-            options.server_port = server_port;
-            nstu::setup::run_startup_diagnostics(
-                options, {}, [&](nstu::setup::DiagnosticResult result) {
-                    if (result.severity ==
-                        nstu::setup::DiagnosticSeverity::failure) {
-                        readiness_passed = false;
-                    }
+            try {
+                bool readiness_passed = true;
+                nstu::setup::DiagnosticOptions options;
+                options.role = nstu::setup::DiagnosticRole::client;
+                options.boot_check = true;
+                options.server_address.assign(server_address.begin(),
+                                              server_address.end());
+                options.server_port = server_port;
+                nstu::setup::run_startup_diagnostics(
+                    options, {}, [&](nstu::setup::DiagnosticResult result) {
+                        if (result.severity ==
+                            nstu::setup::DiagnosticSeverity::failure) {
+                            readiness_passed = false;
+                        }
+                    });
+                const auto data_root = nstu::deployment::data_root(nullptr);
+                const auto result = nstu::setup::configure_uwf({
+                    .data_root = data_root,
+                    .diagnostic_readiness_passed = readiness_passed,
+                    .checkpoint_acknowledged = checkpoint_acknowledged,
                 });
-            const auto data_root = nstu::deployment::data_root(nullptr);
-            const auto result = nstu::setup::configure_uwf({
-                .data_root = data_root,
-                .diagnostic_readiness_passed = readiness_passed,
-                .checkpoint_acknowledged = checkpoint_acknowledged,
-            });
-            std::string detail = result.detail;
-            if (detail.empty()) detail = "UWF configuration failed";
-            detail.resize(std::min(detail.size(),
-                                   nstu::control::kMaximumUwfDetailBytes));
-            queue_uwf_report({
-                .outcome = wire_uwf_outcome(result.outcome),
-                .reboot_required = result.reboot_required,
-                .data_exclusion_ready = result.data_exclusion_added,
-                .registry_exclusion_ready =
-                    result.registry_exclusion_added,
-                .detail = std::move(detail),
-            });
+                std::string detail = result.detail;
+                if (detail.empty()) detail = "UWF configuration failed";
+                if (result.reboot_required) {
+                    detail = schedule_uwf_restart()
+                        ? "UWF is ready; restart scheduled in 60 seconds"
+                        : "UWF is ready; automatic restart failed, restart manually";
+                }
+                detail.resize(std::min(
+                    detail.size(), nstu::control::kMaximumUwfDetailBytes));
+                queue_uwf_report({
+                    .outcome = wire_uwf_outcome(result.outcome),
+                    .reboot_required = result.reboot_required,
+                    .data_exclusion_ready = result.data_exclusion_added,
+                    .registry_exclusion_ready =
+                        result.registry_exclusion_added,
+                    .detail = std::move(detail),
+                });
+            } catch (...) {
+                queue_uwf_report({
+                    .outcome = nstu::control::UwfConfigureOutcome::failed,
+                    .detail = "UWF configuration failed unexpectedly",
+                });
+            }
+            if (clear_installer_request) {
+                std::string clear_error;
+                if (!nstu::client::set_uwf_configuration_requested(
+                        false, {}, &clear_error)) {
+                    OutputDebugStringA(
+                        ("NSTU UWF installer request was not cleared: " +
+                         clear_error + "\n")
+                            .c_str());
+                }
+            }
         });
     } catch (...) {
         g_uwf_configuring = false;
@@ -1253,6 +1324,18 @@ void remote_control_loop(std::stop_token stop_token) {
             std::string ignored_error;
             const auto endpoint_observer =
                 [&](const nstu::discovery::ServerEndpoint& endpoint) {
+                    // The observer runs only after mutual authentication. An
+                    // installer request therefore cannot mutate UWF merely
+                    // because a config file names an unreachable or spoofed
+                    // endpoint.
+                    {
+                        std::scoped_lock endpoint_lock(g_server_endpoint_mutex);
+                        g_server_address = endpoint.address;
+                        g_server_port = endpoint.port;
+                    }
+                    if (nstu::client::uwf_configuration_requested()) {
+                        configure_uwf_async(true, true);
+                    }
                     if (endpoint.address == config.server_address &&
                         endpoint.port == config.server_port) {
                         return;

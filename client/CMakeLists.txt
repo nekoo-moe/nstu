@@ -4,6 +4,7 @@ add_library(nstu_client_platform STATIC
     src/client_control.cpp
     src/client_freeze.cpp
     src/client_pairing.cpp
+    src/client_uwf_request.cpp
     src/exam_bridge.cpp
     src/exam_host.cpp
     src/exam_profile.cpp

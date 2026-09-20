@@ -1529,8 +1529,8 @@ void draw_selected_client(
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped("%s", tr(
             state,
-            "This runs full client readiness checks, preserves NSTU data and registry state, then arms Unified Write Filter for the next restart. Create or verify a recovery checkpoint before continuing.",
-            "Thao tác này chạy đầy đủ kiểm tra sẵn sàng, giữ lại dữ liệu và registry NSTU, rồi chuẩn bị Unified Write Filter cho lần khởi động tiếp theo. Hãy tạo hoặc xác minh điểm khôi phục trước khi tiếp tục."));
+            "This runs full client readiness checks, preserves NSTU data and registry state, then arms Unified Write Filter for the next restart. Create or verify a recovery checkpoint before continuing. A successful setup shows a 60-second countdown and restarts the client automatically.",
+            "Thao tác này chạy đầy đủ kiểm tra sẵn sàng, giữ lại dữ liệu và registry NSTU, rồi chuẩn bị Unified Write Filter cho lần khởi động tiếp theo. Hãy tạo hoặc xác minh điểm khôi phục trước khi tiếp tục. Khi thiết lập thành công, máy client sẽ hiển thị đếm ngược 60 giây rồi tự khởi động lại."));
         if (ImGui::Button(tr(state, "I verified the checkpoint; enable",
                              "Đã xác minh điểm khôi phục; bật"))) {
             std::string error;

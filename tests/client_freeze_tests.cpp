@@ -3,6 +3,7 @@
 // The flag round trip runs against the per-user hive so an unelevated test
 // runner proves the same code path the service uses under HKLM.
 #include "nstu/client_freeze.hpp"
+#include "nstu/client_uwf_request.hpp"
 #include "nstu/control_messages.hpp"
 
 #include <windows.h>
@@ -81,6 +82,30 @@ int main() {
     nstu::client::FreezeLocation absent = location;
     absent.subkey += L"\\missing";
     assert(!nstu::client::machine_frozen(absent));
+
+    nstu::client::UwfRequestLocation uwf_location;
+    uwf_location.per_user = true;
+    uwf_location.subkey = location.subkey;
+    assert(!nstu::client::uwf_configuration_requested(uwf_location));
+    assert(nstu::client::set_uwf_configuration_requested(
+        true, uwf_location, &error));
+    assert(nstu::client::uwf_configuration_requested(uwf_location));
+    assert(nstu::client::set_uwf_configuration_requested(
+        false, uwf_location, &error));
+    assert(!nstu::client::uwf_configuration_requested(uwf_location));
+    {
+        HKEY key = nullptr;
+        assert(RegOpenKeyExW(HKEY_CURRENT_USER, uwf_location.subkey.c_str(), 0,
+                             KEY_SET_VALUE | KEY_WOW64_64KEY,
+                             &key) == ERROR_SUCCESS);
+        const DWORD malformed_request = 2;
+        assert(RegSetValueExW(
+                   key, uwf_location.value.c_str(), 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&malformed_request),
+                   sizeof(malformed_request)) == ERROR_SUCCESS);
+        RegCloseKey(key);
+    }
+    assert(!nstu::client::uwf_configuration_requested(uwf_location));
 
     remove_test_key(location);
     assert(!nstu::client::machine_frozen(location));
