@@ -72,6 +72,11 @@ enum class CommandType : std::uint16_t {
     pairing_confirm = 40,
     pairing_accept = 41,
     pairing_reject = 42,
+    // Managed mode. The server asks a client to hold itself frozen or to let
+    // go; the client answers with what it actually is now, which is not
+    // always what it was asked to be.
+    freeze_set = 43,
+    freeze_report = 44,
 };
 
 enum class ConnectionRole : std::uint8_t {

@@ -83,6 +83,12 @@ struct VideoGroupKeyMessage {
 [[nodiscard]] std::optional<OverlayStroke> decode_overlay_stroke(
     std::span<const std::byte> payload);
 
+// Managed mode, one byte either way. `freeze_set` carries what the server
+// wants; `freeze_report` carries what the client turned out to be.
+[[nodiscard]] std::vector<std::byte> encode_freeze_state(bool frozen);
+[[nodiscard]] std::optional<bool> decode_freeze_state(
+    std::span<const std::byte> payload);
+
 [[nodiscard]] std::vector<std::byte> encode_video_group_key(
     const VideoGroupKeyMessage& message);
 [[nodiscard]] std::optional<VideoGroupKeyMessage> decode_video_group_key(

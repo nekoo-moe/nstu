@@ -1,6 +1,7 @@
 #include "nstu/agent_protocol.hpp"
 #include "nstu/client_config.hpp"
 #include "nstu/client_control.hpp"
+#include "nstu/client_freeze.hpp"
 #include "nstu/client_pairing.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/deployment.hpp"
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -29,10 +31,14 @@
 
 namespace {
 
-constexpr wchar_t kServiceName[] = L"nstu-service";
+constexpr const wchar_t* kServiceName = nstu::client::kManagedServiceName;
 constexpr DWORD kServiceControlLock = 128;
 constexpr DWORD kServiceControlUnlock = 129;
+constexpr DWORD kServiceControlReloadFreeze =
+    static_cast<DWORD>(nstu::client::kFreezeReloadControl);
 SERVICE_STATUS_HANDLE g_status_handle = nullptr;
+std::mutex g_service_status_mutex;
+DWORD g_service_state = SERVICE_STOPPED;
 HANDLE g_stop_event = nullptr;
 std::filesystem::path g_agent_path;
 std::mutex g_agent_path_mutex;
@@ -58,6 +64,10 @@ std::mutex g_exam_outbox_state_mutex;
 bool g_exam_outbox_ready = false;
 std::atomic_bool g_stop_requested = false;
 std::atomic_bool g_agent_connected = false;
+// Managed mode as this service currently believes it to be. The registry
+// value is the source of truth; this is the copy the control handler can
+// consult without touching the registry on every SCM callback.
+std::atomic_bool g_frozen = false;
 std::atomic_bool g_agent_locked = false;
 std::atomic_bool g_agent_streaming = false;
 std::atomic<std::uint8_t> g_agent_stream_fps = 0;
@@ -90,6 +100,12 @@ constexpr auto kPairingSweepInterval = std::chrono::seconds(10);
 // Long enough for somebody to read a short list and point at a name.
 constexpr auto kPairingSelectionTimeout = std::chrono::seconds(120);
 constexpr auto kPairingSelectionSlice = std::chrono::milliseconds(200);
+
+void report_status(DWORD state, DWORD error = NO_ERROR);
+void refresh_running_status();
+void reload_local_freeze_state();
+bool apply_remote_freeze_state(bool frozen, std::string* error);
+bool begin_service_stop();
 
 void update_diagnostic_endpoint_cache(
     const nstu::discovery::ServerEndpoint& endpoint) noexcept {
@@ -961,6 +977,31 @@ void handle_server_command(
              command.payload});
         break;
     }
+    case nstu::protocol::CommandType::freeze_set: {
+        const auto requested =
+            nstu::control::decode_freeze_state(command.payload);
+        if (!requested) {
+            break;
+        }
+        std::string freeze_error;
+        const bool applied =
+            apply_remote_freeze_state(*requested, &freeze_error);
+        if (!applied) {
+            OutputDebugStringA(("NSTU managed mode not applied: " +
+                                (freeze_error.empty()
+                                     ? std::string("registry write failed")
+                                     : freeze_error) +
+                                "\n")
+                                   .c_str());
+        }
+        // What this machine is now, not what it was asked to be. A teacher
+        // whose freeze did not take has to see that here rather than find out
+        // when a student stops the service.
+        queue_outbound_message(
+            nstu::protocol::CommandType::freeze_report,
+            nstu::control::encode_freeze_state(g_frozen.load()));
+        break;
+    }
     case nstu::protocol::CommandType::exam_state_response:
         if (const auto response =
                 nstu::exam::decode_state_response(command.payload);
@@ -1087,6 +1128,11 @@ void remote_control_loop(std::stop_token stop_token) {
             // Replay validated browser events that arrived before the
             // service finished opening its identity-bound outbox.
             drain_exam_ingress();
+            // A teacher reconnecting sees managed mode as the machine has it,
+            // not as the server last remembered it.
+            queue_outbound_message(
+                nstu::protocol::CommandType::freeze_report,
+                nstu::control::encode_freeze_state(g_frozen.load()));
             std::string ignored_error;
             const auto endpoint_observer =
                 [&](const nstu::discovery::ServerEndpoint& endpoint) {
@@ -1188,24 +1234,89 @@ void agent_supervisor_loop(std::stop_token stop_token) {
     }
 }
 
-void report_status(DWORD state, DWORD error = NO_ERROR) {
+void publish_status(DWORD state, DWORD error) {
     SERVICE_STATUS status{};
     status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     status.dwCurrentState = state;
     status.dwWin32ExitCode = error;
-    status.dwControlsAccepted = state == SERVICE_RUNNING
-                                    ? SERVICE_ACCEPT_STOP |
-                                          SERVICE_ACCEPT_SESSIONCHANGE
-                                    : 0;
-    g_status_handle && SetServiceStatus(g_status_handle, &status);
+    // A frozen machine does not advertise stop at all, so Services and
+    // `sc stop` grey it out rather than appearing to work and then failing.
+    const DWORD running_controls = SERVICE_ACCEPT_SESSIONCHANGE |
+        (g_frozen.load() ? 0u : static_cast<DWORD>(SERVICE_ACCEPT_STOP));
+    status.dwControlsAccepted =
+        state == SERVICE_RUNNING ? running_controls : 0;
+    if (g_status_handle != nullptr) {
+        SetServiceStatus(g_status_handle, &status);
+    }
+}
+
+void report_status(DWORD state, DWORD error) {
+    std::scoped_lock lock(g_service_status_mutex);
+    g_service_state = state;
+    publish_status(state, error);
+}
+
+void refresh_running_status() {
+    std::scoped_lock lock(g_service_status_mutex);
+    // A freeze reply can race an SCM stop. Never move the service from
+    // STOP_PENDING back to RUNNING merely to update accepted controls.
+    if (g_service_state == SERVICE_RUNNING) {
+        publish_status(SERVICE_RUNNING, NO_ERROR);
+    }
+}
+
+void reload_local_freeze_state() {
+    std::scoped_lock lock(g_service_status_mutex);
+    g_frozen = nstu::client::machine_frozen();
+    if (g_service_state == SERVICE_RUNNING) {
+        publish_status(SERVICE_RUNNING, NO_ERROR);
+    }
+}
+
+bool apply_remote_freeze_state(bool frozen, std::string* error) {
+    std::scoped_lock lock(g_service_status_mutex);
+    if (g_service_state != SERVICE_RUNNING) {
+        if (error != nullptr) {
+            *error = "service is stopping";
+        }
+        return false;
+    }
+    // Serialize persistence with the SCM stop decision. Once this write
+    // succeeds, no stop can slip through before g_frozen is enforced.
+    if (!nstu::client::set_machine_frozen(frozen, {}, error)) {
+        return false;
+    }
+    g_frozen = frozen;
+    publish_status(SERVICE_RUNNING, NO_ERROR);
+    return true;
+}
+
+bool begin_service_stop() {
+    std::scoped_lock lock(g_service_status_mutex);
+    if (g_frozen.load() || g_service_state != SERVICE_RUNNING) {
+        return false;
+    }
+    g_service_state = SERVICE_STOP_PENDING;
+    publish_status(SERVICE_STOP_PENDING, NO_ERROR);
+    return true;
 }
 
 DWORD WINAPI control_handler(DWORD control, DWORD event_type, void*, void*) {
     if (control == SERVICE_CONTROL_STOP && g_stop_event != nullptr) {
-        report_status(SERVICE_STOP_PENDING);
+        if (!begin_service_stop()) {
+            // Refused out loud rather than ignored: whoever asked gets an
+            // error they can act on - clear managed mode from the server,
+            // or run `nstu-service.exe --thaw-local` elevated.
+            refresh_running_status();
+            return static_cast<DWORD>(ERROR_ACCESS_DENIED);
+        }
         g_stop_requested = true;
         SetEvent(g_stop_event);
         wake_pipe_listener();
+    } else if (control == kServiceControlReloadFreeze) {
+        // A local thaw writes the registry and then sends this, so the stop
+        // verb comes back without waiting for a restart.
+        reload_local_freeze_state();
     } else if (control == kServiceControlLock) {
         set_desired_lock(true);
     } else if (control == kServiceControlUnlock) {
@@ -1230,6 +1341,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
         report_status(SERVICE_STOPPED, GetLastError());
         return;
     }
+    g_frozen = nstu::client::machine_frozen();
     report_status(SERVICE_START_PENDING);
     wchar_t executable[MAX_PATH]{};
     GetModuleFileNameW(nullptr, executable, MAX_PATH);
@@ -1316,7 +1428,33 @@ void WINAPI service_main(DWORD, wchar_t**) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // The only command line this service takes. Managed mode has to be
+    // undoable on the machine itself, by someone who is already an
+    // administrator, or it would be a lock with no key for a school whose
+    // server has been reinstalled.
+    if (argc > 1) {
+        const std::string_view argument(
+            argc == 2 && argv[1] != nullptr ? argv[1] : "");
+        if (argument != "--thaw-local") {
+            std::fputs("usage: nstu-service [--thaw-local]\n", stderr);
+            return 2;
+        }
+        std::string error;
+        if (!nstu::client::thaw_locally(&error)) {
+            std::fputs(("nstu-service: " +
+                        (error.empty() ? std::string("managed mode could not "
+                                                    "be cleared")
+                                       : error) +
+                        "\n")
+                           .c_str(),
+                       stderr);
+            return 1;
+        }
+        std::fputs("nstu-service: managed mode cleared on this computer\n",
+                   stdout);
+        return 0;
+    }
     SERVICE_TABLE_ENTRYW table[] = {
         {const_cast<wchar_t*>(kServiceName), service_main},
         {nullptr, nullptr},

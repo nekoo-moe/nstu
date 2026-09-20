@@ -169,6 +169,20 @@ std::optional<std::uint16_t> decode_snapshot_schedule(
     return interval_seconds;
 }
 
+std::vector<std::byte> encode_freeze_state(bool frozen) {
+    return {static_cast<std::byte>(frozen ? 1 : 0)};
+}
+
+std::optional<bool> decode_freeze_state(std::span<const std::byte> payload) {
+    if (payload.size() != 1) {
+        return std::nullopt;
+    }
+    const auto value = std::to_integer<std::uint8_t>(payload[0]);
+    // Anything other than the two states this has is a sender that does not
+    // agree with us about what the message means, which is not a third state.
+    return value <= 1 ? std::optional{value != 0} : std::nullopt;
+}
+
 std::vector<std::byte> encode_snapshot_frame(const SnapshotFrame& frame) {
     if (frame.width == 0 || frame.height == 0 ||
         frame.width > kMaximumSnapshotWidth ||
