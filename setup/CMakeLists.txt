@@ -2,6 +2,7 @@ add_library(nstu_setup_diagnostics STATIC
     src/diagnostics.cpp
     src/hardware_scan.cpp
     src/driver_scan.cpp
+    src/uwf.cpp
 )
 target_include_directories(nstu_setup_diagnostics PUBLIC include)
 target_compile_definitions(nstu_setup_diagnostics PUBLIC

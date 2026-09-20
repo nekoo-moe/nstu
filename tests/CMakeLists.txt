@@ -122,6 +122,12 @@ if(WIN32)
         nstu_enable_test_assertions(nstu_diagnostics_tests)
         add_test(NAME nstu.diagnostics COMMAND nstu_diagnostics_tests)
 
+        add_executable(nstu_uwf_tests uwf_tests.cpp)
+        target_link_libraries(nstu_uwf_tests PRIVATE nstu_setup_diagnostics)
+        nstu_enable_warnings(nstu_uwf_tests)
+        nstu_enable_test_assertions(nstu_uwf_tests)
+        add_test(NAME nstu.uwf COMMAND nstu_uwf_tests)
+
         add_executable(nstu_diagnostics_startup_tests diagnostics_startup_tests.cpp)
         target_link_libraries(nstu_diagnostics_startup_tests PRIVATE nstu_setup_diagnostics)
         nstu_enable_warnings(nstu_diagnostics_startup_tests)
