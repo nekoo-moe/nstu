@@ -1,6 +1,7 @@
 #include "nstu/agent_protocol.hpp"
 #include "nstu/client_config.hpp"
 #include "nstu/client_control.hpp"
+#include "nstu/client_pairing.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/deployment.hpp"
 #include "nstu/exam_control.hpp"
@@ -14,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <map>
@@ -65,12 +67,29 @@ std::atomic_bool g_agent_viewing_broadcast = false;
 std::atomic_bool g_desired_locked = false;
 std::mutex g_agent_launch_mutex;
 std::chrono::steady_clock::time_point g_next_agent_launch{};
+// Pairing state. Only the control loop runs an attempt, but the answer
+// to the selection menu arrives on the pipe thread, so the handoff is
+// guarded.
+std::mutex g_pairing_mutex;
+std::condition_variable g_pairing_signal;
+std::optional<std::uint16_t> g_pairing_selection;
+std::size_t g_pairing_choice_count = 0;
+std::chrono::steady_clock::time_point g_next_pairing_sweep{};
 constexpr std::size_t kMaximumQueuedAgentMessages = 256;
 constexpr std::size_t kMaximumQueuedOutboundMessages = 32;
 constexpr std::size_t kMaximumQueuedExamIngress = 64;
 constexpr auto kExamTransientRetryDelay = std::chrono::seconds(2);
 constexpr auto kExamRejectedRetryDelay = std::chrono::seconds(30);
 constexpr auto kExamAckTimeout = std::chrono::seconds(5);
+// An unenrolled machine sweeps the LAN until it finds a server. Doing
+// that on the reconnect cadence would put a broadcast from every machine
+// in a lab on the wire every few seconds at bell time, which is noise
+// nobody benefits from: a teacher opening the pairing window is not in a
+// hurry.
+constexpr auto kPairingSweepInterval = std::chrono::seconds(10);
+// Long enough for somebody to read a short list and point at a name.
+constexpr auto kPairingSelectionTimeout = std::chrono::seconds(120);
+constexpr auto kPairingSelectionSlice = std::chrono::milliseconds(200);
 
 void update_diagnostic_endpoint_cache(
     const nstu::discovery::ServerEndpoint& endpoint) noexcept {
@@ -484,6 +503,77 @@ void queue_agent_message(nstu::client::AgentMessage message) {
     g_agent_queue.push_back(std::move(message));
 }
 
+void queue_pairing_status(nstu::client::PairingOutcome outcome,
+                          std::string_view detail) {
+    nstu::client::AgentPairingStatus status;
+    status.outcome = static_cast<std::uint8_t>(outcome);
+    status.detail = detail.empty()
+        ? std::string(nstu::client::pairing_outcome_text(outcome))
+        : std::string(detail.substr(
+              0, std::min(detail.size(),
+                          nstu::client::kMaximumPairingTextBytes)));
+    auto payload = nstu::client::encode_agent_pairing_status(status);
+    if (payload.empty()) {
+        // The detail is whatever the failing layer wrote, so it can carry
+        // characters the codec will not put on a screen. The outcome
+        // still has to reach the agent, so fall back to the sentence that
+        // goes with it.
+        status.detail = nstu::client::pairing_outcome_text(outcome);
+        payload = nstu::client::encode_agent_pairing_status(status);
+    }
+    if (!payload.empty()) {
+        queue_agent_message(
+            {nstu::client::AgentMessageType::pairing_status,
+             std::move(payload)});
+    }
+}
+
+void open_pairing_menu(std::size_t choices) {
+    std::scoped_lock lock(g_pairing_mutex);
+    g_pairing_choice_count = choices;
+    g_pairing_selection.reset();
+}
+
+// An index for a menu nobody is showing, or one past its end, is dropped
+// rather than trusted. The agent runs as the interactive user, and this
+// is the service deciding which server it is about to hand an identity.
+void record_pairing_selection(std::span<const std::byte> payload) {
+    const auto index =
+        nstu::client::decode_agent_pairing_selection(payload);
+    std::scoped_lock lock(g_pairing_mutex);
+    if (!index || *index >= g_pairing_choice_count) {
+        return;
+    }
+    g_pairing_selection = *index;
+    g_pairing_signal.notify_all();
+}
+
+void cancel_pairing_menu() {
+    std::scoped_lock lock(g_pairing_mutex);
+    g_pairing_choice_count = 0;
+    g_pairing_selection.reset();
+    g_pairing_signal.notify_all();
+}
+
+std::optional<std::uint16_t> await_pairing_selection(
+    const std::stop_token& stop_token) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + kPairingSelectionTimeout;
+    std::unique_lock lock(g_pairing_mutex);
+    while (!g_pairing_selection && !stop_token.stop_requested() &&
+           g_agent_connected.load() &&
+           std::chrono::steady_clock::now() < deadline) {
+        // A desktop that goes away mid-menu never signals the condition
+        // variable, so the wait is sliced rather than left to a wake-up
+        // that may never arrive.
+        g_pairing_signal.wait_for(lock, kPairingSelectionSlice);
+    }
+    auto selection = g_pairing_selection;
+    g_pairing_selection.reset();
+    g_pairing_choice_count = 0;
+    return selection;
+}
+
 void set_desired_lock(bool locked) {
     g_desired_locked = locked;
     queue_agent_message({locked ? nstu::client::AgentMessageType::lock
@@ -605,6 +695,9 @@ void agent_pipe_loop() {
                            nstu::client::AgentMessageType::exam_answer_event) {
                     (void)queue_exam_event_payload(message->payload);
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::pairing_select) {
+                    record_pairing_selection(message->payload);
+                } else if (message->type ==
                            nstu::client::AgentMessageType::exam_state_request) {
                     const auto request =
                         nstu::exam::decode_state_request(message->payload);
@@ -619,6 +712,7 @@ void agent_pipe_loop() {
             Sleep(25);
         }
         g_agent_connected = false;
+        cancel_pairing_menu();
         pipe.close();
         if (!g_stop_requested.load()) {
             // A replacement agent must never inherit an active exam from a
@@ -881,6 +975,101 @@ void handle_server_command(
     }
 }
 
+// One whole pairing attempt for a machine that holds no key yet. Nothing
+// here grants anything by itself: the operator at the server decides, and
+// the person at this machine has to be able to read the same six digits,
+// which is why an attempt is not started at all when no agent is on the
+// desktop to show them. Returns true only once a usable identity is on
+// disk.
+bool attempt_pairing(const std::stop_token& stop_token,
+                     const std::filesystem::path& path,
+                     std::span<const std::byte> entropy) {
+    if (!g_agent_connected.load()) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < g_next_pairing_sweep) {
+        return false;
+    }
+    g_next_pairing_sweep = now + kPairingSweepInterval;
+    auto candidates = nstu::discovery::discover_pairing_candidates();
+    if (candidates.empty() || stop_token.stop_requested()) {
+        return false;
+    }
+    if (candidates.size() > nstu::client::kMaximumPairingChoices) {
+        candidates.resize(nstu::client::kMaximumPairingChoices);
+    }
+    // One server on the LAN is the ordinary classroom, and asking a
+    // student to pick the only name on a list teaches them nothing. The
+    // approval on the far side is what makes this safe to skip, not the
+    // menu.
+    std::size_t chosen = 0;
+    if (candidates.size() > 1) {
+        std::vector<nstu::client::AgentPairingChoice> choices;
+        choices.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+            choices.push_back({candidate.server_name, candidate.address,
+                               candidate.port});
+        }
+        auto payload =
+            nstu::client::encode_agent_pairing_choices(choices);
+        if (payload.empty()) {
+            return false;
+        }
+        open_pairing_menu(candidates.size());
+        queue_agent_message(
+            {nstu::client::AgentMessageType::pairing_choices,
+             std::move(payload)});
+        const auto selection = await_pairing_selection(stop_token);
+        if (!selection) {
+            return false;
+        }
+        chosen = *selection;
+    }
+
+    std::string identity_error;
+    const auto uuid = nstu::client::machine_uuid(&identity_error);
+    if (uuid.empty()) {
+        queue_pairing_status(nstu::client::PairingOutcome::failed,
+                             identity_error);
+        return false;
+    }
+    std::string error;
+    auto result = nstu::client::pair_with_server(
+        candidates[chosen], uuid, nstu::client::machine_hostname(),
+        [](const std::string& code, const std::string& server_name) {
+            auto payload = nstu::client::encode_agent_pairing_code(
+                {code, server_name});
+            if (!payload.empty()) {
+                queue_agent_message(
+                    {nstu::client::AgentMessageType::pairing_code,
+                     std::move(payload)});
+            }
+        },
+        stop_token, {}, &error);
+    if (result.outcome != nstu::client::PairingOutcome::enrolled) {
+        nstu::client::clear_client_runtime_config(result.config);
+        queue_pairing_status(result.outcome, error);
+        return false;
+    }
+    std::string save_error;
+    const bool saved = nstu::client::save_client_runtime_config(
+        result.config, path.wstring(), entropy, &save_error);
+    nstu::client::clear_client_runtime_config(result.config);
+    if (!saved) {
+        // The server has recorded a key this machine can no longer
+        // produce, so claiming success would leave a computer that looks
+        // enrolled and never connects. Saying it failed is also what gets
+        // it paired again, and the server replaces the key for the same
+        // identity rather than accumulating one.
+        queue_pairing_status(nstu::client::PairingOutcome::failed,
+                             save_error);
+        return false;
+    }
+    queue_pairing_status(nstu::client::PairingOutcome::enrolled, {});
+    return true;
+}
+
 void remote_control_loop(std::stop_token stop_token) {
     const auto path = client_config_path();
     if (path.empty()) {
@@ -940,6 +1129,10 @@ void remote_control_loop(std::stop_token stop_token) {
                 {nstu::client::AgentMessageType::overlay_clear, {}});
             queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
             nstu::client::clear_client_runtime_config(config);
+        } else if (attempt_pairing(stop_token, path, entropy)) {
+            // A machine that just earned an identity should use it now
+            // rather than sit out the reconnect delay first.
+            continue;
         }
         std::array<std::byte, 2> jitter_bytes{};
         const bool have_jitter = nstu::security::generate_random(jitter_bytes);
