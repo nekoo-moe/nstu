@@ -224,31 +224,53 @@ public:
         dispatcher_config.idle_timeout = std::chrono::seconds(15);
         dispatcher_config.accept_depth = std::clamp<std::size_t>(
             config_.maximum_clients / 8, 8, 64);
-        net::IocpDispatcherCallbacks callbacks;
-        callbacks.on_connected = [this](net::ConnectionId id,
+        const auto callbacks = [this] {
+            net::IocpDispatcherCallbacks value;
+            value.on_connected = [this](net::ConnectionId id,
                                         const std::string& source) {
-            auto state = std::make_shared<ConnectionState>();
-            state->connection_id = id;
-            state->source = source;
-            std::scoped_lock lock(states_mutex_);
-            states_.emplace(id, std::move(state));
-        };
-        callbacks.on_bytes = [this](net::ConnectionId id,
+                auto state = std::make_shared<ConnectionState>();
+                state->connection_id = id;
+                state->source = source;
+                std::scoped_lock lock(states_mutex_);
+                states_.emplace(id, std::move(state));
+            };
+            value.on_bytes = [this](net::ConnectionId id,
                                     std::vector<std::byte> bytes) {
-            on_bytes(id, std::move(bytes));
+                on_bytes(id, std::move(bytes));
+            };
+            value.on_disconnected = [this](net::ConnectionId id) {
+                on_disconnected(id);
+            };
+            return value;
         };
-        callbacks.on_disconnected = [this](net::ConnectionId id) {
-            on_disconnected(id);
-        };
-        if (!dispatcher_.start(dispatcher_config, std::move(callbacks), error)) {
-            enrollment_authority_.reset();
-            exam_journal_.close();
-            return false;
-        }
-        const auto control_port = dispatcher_.local_port();
-        if (!discovery_responder_.start(control_port, control_port, key_store_,
-                                        error)) {
+
+        // Production uses one configured TCP/UDP port. Tests and embedders may
+        // request port zero; Windows chooses TCP and UDP ephemeral ports from
+        // different exclusion ranges, so a TCP-selected number can be denied
+        // to UDP with WSAEACCES. Retry the pair rather than making a valid
+        // ephemeral request fail depending on host networking configuration.
+        constexpr int maximum_ephemeral_attempts = 32;
+        const int attempts = config_.port == 0 ? maximum_ephemeral_attempts : 1;
+        bool started = false;
+        std::string start_error;
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            start_error.clear();
+            if (!dispatcher_.start(dispatcher_config, callbacks(),
+                                   &start_error)) {
+                break;
+            }
+            const auto control_port = dispatcher_.local_port();
+            if (discovery_responder_.start(control_port, control_port,
+                                           key_store_, &start_error)) {
+                started = true;
+                break;
+            }
             dispatcher_.stop();
+        }
+        if (!started) {
+            set_error(error, start_error.empty()
+                                 ? "server control plane could not bind"
+                                 : start_error.c_str());
             enrollment_authority_.reset();
             exam_journal_.close();
             security::secure_zero(config_.keyring_entropy);
