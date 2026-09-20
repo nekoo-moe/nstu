@@ -420,6 +420,8 @@ struct DashboardState {
     ImVec2 remote_pointer_last{};
     std::array<char, 64> remote_keyboard_input{};
     bool annotation_enabled = false;
+    bool uwf_confirmation_open = false;
+    std::uint64_t uwf_confirmation_client_id = 0;
     bool annotation_dragging = false;
     ImVec2 previous_annotation_point{};
     AnnotationTool annotation_tool = AnnotationTool::pen;
@@ -1504,6 +1506,52 @@ void draw_selected_client(
             state,
             "Blocks service stop and uninstall until disabled here or by a local administrator.",
             "Chặn dừng dịch vụ và gỡ cài đặt cho đến khi tắt tại đây hoặc bởi quản trị viên cục bộ."));
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Enable reboot-to-restore",
+                         "Bật khôi phục sau reboot"))) {
+        state.uwf_confirmation_client_id = selected_client->id;
+        state.uwf_confirmation_open = true;
+        ImGui::OpenPopup("uwf-confirmation");
+    }
+    if (selected_client->uwf_reported) {
+        ImGui::TextWrapped("%s", selected_client->uwf_detail.c_str());
+        if (selected_client->uwf_reboot_required) {
+            ImGui::TextColored(
+                g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
+                            : ImVec4{0.63f, 0.36f, 0.02f, 1.0f},
+                "%s", tr(state, "Restart required to apply UWF.",
+                          "Cần khởi động lại để áp dụng UWF."));
+        }
+    }
+    if (state.uwf_confirmation_open &&
+        ImGui::BeginPopupModal("uwf-confirmation", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", tr(
+            state,
+            "This runs full client readiness checks, preserves NSTU data and registry state, then arms Unified Write Filter for the next restart. Create or verify a recovery checkpoint before continuing.",
+            "Thao tác này chạy đầy đủ kiểm tra sẵn sàng, giữ lại dữ liệu và registry NSTU, rồi chuẩn bị Unified Write Filter cho lần khởi động tiếp theo. Hãy tạo hoặc xác minh điểm khôi phục trước khi tiếp tục."));
+        if (ImGui::Button(tr(state, "I verified the checkpoint; enable",
+                             "Đã xác minh điểm khôi phục; bật"))) {
+            std::string error;
+            const bool sent = control_plane.configure_uwf(
+                state.uwf_confirmation_client_id, true, &error);
+            state.control_status = sent
+                ? tr(state, "UWF readiness request sent.",
+                     "Đã gửi yêu cầu kiểm tra và bật UWF.")
+                : error;
+            if (!sent) {
+                record_operation_failure("UWF", "UWF command failed", error);
+            }
+            state.uwf_confirmation_open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr(state, "Cancel", "Hủy"))) {
+            state.uwf_confirmation_open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 
     char latency[32]{};

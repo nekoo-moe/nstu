@@ -146,6 +146,21 @@ int main() {
         return !snapshot.empty() && !snapshot[0].frozen;
     }));
 
+    assert(control_plane.configure_uwf(registry_id, true, &error));
+    const auto uwf_command = channel.receive(&error);
+    assert(uwf_command.has_value());
+    assert(uwf_command->envelope.type ==
+           nstu::protocol::CommandType::uwf_configure);
+    assert(nstu::control::decode_uwf_configure_request(
+               uwf_command->payload) == true);
+    assert(channel.send(nstu::protocol::CommandType::uwf_report, 4,
+                        uwf_report_payload, &error));
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() && snapshot[0].uwf_reported &&
+               snapshot[0].uwf_reboot_required;
+    }));
+
     assert(control_plane.set_snapshots(registry_id, true, 7, &error));
     const auto snapshots = channel.receive(&error);
     assert(snapshots.has_value());
@@ -244,7 +259,7 @@ int main() {
 
     status.locked = true;
     const auto locked_payload = nstu::control::encode_status_report(status);
-    assert(channel.send(nstu::protocol::CommandType::status_report, 4,
+    assert(channel.send(nstu::protocol::CommandType::status_report, 5,
                         locked_payload, &error));
     assert(wait_until([&] {
         const auto snapshot = registry.snapshot();

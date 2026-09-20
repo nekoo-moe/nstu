@@ -61,6 +61,9 @@ public:
                                   std::string* error = nullptr);
     [[nodiscard]] bool set_frozen(std::uint64_t client_id, bool frozen,
                                   std::string* error = nullptr);
+    [[nodiscard]] bool configure_uwf(
+        std::uint64_t client_id, bool checkpoint_acknowledged,
+        std::string* error = nullptr);
     [[nodiscard]] bool set_streaming(std::uint64_t client_id, bool enabled,
                                      std::uint8_t frames_per_second,
                                      std::string* error = nullptr);

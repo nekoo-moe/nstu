@@ -14,6 +14,14 @@ void ClientRegistry::upsert(ClientRecord record) {
         // status refresh must not erase it while that report is in
         // flight, especially just after reconnect.
         record.frozen = existing->second.frozen;
+        record.uwf_reported = existing->second.uwf_reported;
+        record.uwf_outcome = existing->second.uwf_outcome;
+        record.uwf_reboot_required = existing->second.uwf_reboot_required;
+        record.uwf_data_exclusion_ready =
+            existing->second.uwf_data_exclusion_ready;
+        record.uwf_registry_exclusion_ready =
+            existing->second.uwf_registry_exclusion_ready;
+        record.uwf_detail = existing->second.uwf_detail;
     }
     if (existing != clients_.end() &&
         (!record.snapshot_jpeg || record.snapshot_jpeg->empty())) {
@@ -44,6 +52,24 @@ bool ClientRegistry::set_frozen(std::uint64_t id, bool frozen) {
         return false;
     }
     found->second.frozen = frozen;
+    found->second.last_seen = std::chrono::steady_clock::now();
+    return true;
+}
+
+bool ClientRegistry::set_uwf_report(
+    std::uint64_t id, const control::UwfConfigureReport& report) {
+    std::scoped_lock lock(mutex_);
+    const auto found = clients_.find(id);
+    if (found == clients_.end()) {
+        return false;
+    }
+    found->second.uwf_reported = true;
+    found->second.uwf_outcome = report.outcome;
+    found->second.uwf_reboot_required = report.reboot_required;
+    found->second.uwf_data_exclusion_ready = report.data_exclusion_ready;
+    found->second.uwf_registry_exclusion_ready =
+        report.registry_exclusion_ready;
+    found->second.uwf_detail = report.detail;
     found->second.last_seen = std::chrono::steady_clock::now();
     return true;
 }

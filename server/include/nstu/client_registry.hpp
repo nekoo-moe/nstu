@@ -36,6 +36,13 @@ struct ClientRecord {
     // Last state reported by the client after it applied (or failed to
     // apply) the authenticated managed-mode command.
     bool frozen = false;
+    bool uwf_reported = false;
+    control::UwfConfigureOutcome uwf_outcome =
+        control::UwfConfigureOutcome::failed;
+    bool uwf_reboot_required = false;
+    bool uwf_data_exclusion_ready = false;
+    bool uwf_registry_exclusion_ready = false;
+    std::string uwf_detail;
     std::uint8_t frames_per_second = 0;
     std::uint16_t snapshot_interval_seconds = 0;
     std::uint16_t snapshot_width = 0;
@@ -56,6 +63,8 @@ public:
     [[nodiscard]] bool set_status(std::uint64_t id, ClientStatus status);
     [[nodiscard]] bool touch(std::uint64_t id);
     [[nodiscard]] bool set_frozen(std::uint64_t id, bool frozen);
+    [[nodiscard]] bool set_uwf_report(
+        std::uint64_t id, const control::UwfConfigureReport& report);
     [[nodiscard]] bool update_snapshot(
         std::uint64_t id, const control::SnapshotFrame& frame);
     [[nodiscard]] bool update_health(std::uint64_t id, std::uint32_t latency_ms,

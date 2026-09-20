@@ -1248,6 +1248,16 @@ private:
             (void)registry_.touch(state.registry_id.load());
             return true;
         }
+        if (command->envelope.type == protocol::CommandType::uwf_report) {
+            const auto report =
+                control::decode_uwf_configure_report(command->payload);
+            if (!report || !registry_.set_uwf_report(
+                               state.registry_id.load(), *report)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
         if (command->envelope.type ==
             protocol::CommandType::freeze_report) {
             const auto frozen =
@@ -1485,6 +1495,15 @@ bool ServerControlPlane::set_frozen(std::uint64_t client_id, bool frozen,
                                     std::string* error) {
     const auto payload = control::encode_freeze_state(frozen);
     return send_command(client_id, protocol::CommandType::freeze_set,
+                        payload, error);
+}
+
+bool ServerControlPlane::configure_uwf(
+    std::uint64_t client_id, bool checkpoint_acknowledged,
+    std::string* error) {
+    const auto payload =
+        control::encode_uwf_configure_request(checkpoint_acknowledged);
+    return send_command(client_id, protocol::CommandType::uwf_configure,
                         payload, error);
 }
 

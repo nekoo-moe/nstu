@@ -15,6 +15,7 @@ int main() {
         .hostname = "LAB-PC-01",
         .address = "192.168.1.101",
         .status = nstu::server::ClientStatus::online,
+        .uwf_detail = {},
         .snapshot_jpeg = {},
         .last_seen = now,
     });
@@ -28,6 +29,7 @@ int main() {
         .hostname = "LAB-PC-01",
         .address = "192.168.1.101",
         .status = nstu::server::ClientStatus::online,
+        .uwf_detail = {},
         .snapshot_jpeg = {},
         .last_seen = now,
     });
@@ -35,6 +37,17 @@ int main() {
     assert(registry.set_frozen(1, false));
     assert(!registry.snapshot()[0].frozen);
     assert(!registry.set_frozen(99, true));
+    const nstu::control::UwfConfigureReport uwf_report{
+        .outcome = nstu::control::UwfConfigureOutcome::armed,
+        .reboot_required = true,
+        .data_exclusion_ready = true,
+        .registry_exclusion_ready = true,
+        .detail = "UWF is armed",
+    };
+    assert(registry.set_uwf_report(1, uwf_report));
+    assert(registry.snapshot()[0].uwf_reported);
+    assert(registry.snapshot()[0].uwf_reboot_required);
+    assert(!registry.set_uwf_report(99, uwf_report));
 
     nstu::control::SnapshotFrame frame;
     frame.width = 320;
