@@ -102,6 +102,7 @@ std::atomic_bool g_snapshotting = false;
 std::atomic<std::uint16_t> g_snapshot_interval_seconds = 0;
 std::atomic_bool g_viewing_broadcast = false;
 std::atomic_bool g_remote_control_active = false;
+std::atomic_bool g_managed = false;
 std::mutex g_annotation_mutex;
 std::vector<nstu::control::OverlayStroke> g_annotation_strokes;
 std::mutex g_broadcast_mutex;
@@ -848,6 +849,16 @@ void pipe_control_loop(HWND overlay) {
                                      nstu::client::AgentMessageType::exam_start),
                                  0);
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::managed_state) {
+                    if (const auto managed =
+                            nstu::control::decode_freeze_state(
+                                message->payload)) {
+                        SendMessageW(
+                            overlay, kAgentCommandMessage,
+                            static_cast<WPARAM>(message->type),
+                            static_cast<LPARAM>(*managed));
+                    }
+                } else if (message->type ==
                            nstu::client::AgentMessageType::pairing_choices) {
                     if (auto choices =
                             nstu::client::decode_agent_pairing_choices(
@@ -1357,6 +1368,18 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             g_locked = false;
             ShowWindow(window, SW_HIDE);
             restore_control_window_order();
+        } else if (type ==
+                       nstu::client::AgentMessageType::managed_state) {
+            g_managed = lparam != 0;
+            NOTIFYICONDATAW tray{};
+            tray.cbSize = sizeof(tray);
+            tray.hWnd = window;
+            tray.uID = kTrayId;
+            tray.uFlags = NIF_TIP;
+            lstrcpyW(tray.szTip, g_managed.load()
+                                      ? L"NSTU client - Managed"
+                                      : L"NSTU client");
+            Shell_NotifyIconW(NIM_MODIFY, &tray);
         } else if (type == nstu::client::AgentMessageType::chat && lparam != 0) {
             if (exam_host_engaged()) {
                 g_exam_host.enforce_foreground();

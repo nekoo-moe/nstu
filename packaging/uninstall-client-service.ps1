@@ -266,6 +266,24 @@ $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "NSTU client uninstallation requires Administrator privileges."
 }
+$nstuKey = $null
+try {
+    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $nstuKey = $baseKey.OpenSubKey("Software\NSTU", $false)
+        if ($null -ne $nstuKey -and
+            [int]$nstuKey.GetValue("Frozen", 0) -ne 0) {
+            throw "This NSTU client is in Managed mode. Disable Managed mode from the server, or run nstu-service.exe --thaw-local from an elevated command prompt, before uninstalling."
+        }
+    } finally {
+        if ($null -ne $nstuKey) { $nstuKey.Dispose() }
+        $baseKey.Dispose()
+    }
+} catch {
+    throw $_
+}
 if (-not $AfterRestart) {
     throw "NSTU client removal must be staged by the unified uninstaller and completed after Windows restarts."
 }

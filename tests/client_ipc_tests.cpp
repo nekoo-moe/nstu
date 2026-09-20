@@ -1,5 +1,6 @@
 #include "nstu/agent_protocol.hpp"
 #include "nstu/client_config.hpp"
+#include "nstu/control_messages.hpp"
 
 #include <windows.h>
 #include <wtsapi32.h>
@@ -98,6 +99,19 @@ int main() {
     assert(decoded_status->frames_per_second == 10);
     assert(decoded_status->snapshot_interval_seconds == 7);
     assert(decoded_status->session_id == 7);
+    const nstu::client::AgentMessage managed_message{
+        nstu::client::AgentMessageType::managed_state,
+        nstu::control::encode_freeze_state(true)};
+    const auto managed_wire =
+        nstu::client::encode_agent_message(managed_message);
+    const auto decoded_managed =
+        nstu::client::decode_agent_message(managed_wire);
+    assert(decoded_managed.has_value());
+    assert(decoded_managed->type ==
+           nstu::client::AgentMessageType::managed_state);
+    assert(nstu::control::decode_freeze_state(
+               decoded_managed->payload) == true);
+
     auto corrupt = status_wire;
     corrupt[0] ^= std::byte{1};
     assert(!nstu::client::decode_agent_message(corrupt).has_value());

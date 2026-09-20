@@ -647,6 +647,9 @@ void agent_pipe_loop() {
                                  : nstu::client::AgentMessageType::unlock,
                              {}});
         queue_agent_message(
+            {nstu::client::AgentMessageType::managed_state,
+             nstu::control::encode_freeze_state(g_frozen.load())});
+        queue_agent_message(
             {nstu::client::AgentMessageType::status_request, {}});
         while (!g_stop_requested.load()) {
             std::deque<nstu::client::AgentMessage> pending;
@@ -1271,6 +1274,9 @@ void reload_local_freeze_state() {
     if (g_service_state == SERVICE_RUNNING) {
         publish_status(SERVICE_RUNNING, NO_ERROR);
     }
+    queue_agent_message(
+        {nstu::client::AgentMessageType::managed_state,
+         nstu::control::encode_freeze_state(g_frozen.load())});
 }
 
 bool apply_remote_freeze_state(bool frozen, std::string* error) {
@@ -1288,6 +1294,9 @@ bool apply_remote_freeze_state(bool frozen, std::string* error) {
     }
     g_frozen = frozen;
     publish_status(SERVICE_RUNNING, NO_ERROR);
+    queue_agent_message(
+        {nstu::client::AgentMessageType::managed_state,
+         nstu::control::encode_freeze_state(frozen)});
     return true;
 }
 

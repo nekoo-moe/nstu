@@ -284,6 +284,15 @@ SectionEnd
 
 Function un.onInit
   SetRegView 64
+  ReadRegStr $Role HKLM "Software\\NSTU" "InstallRole"
+  StrCmp $Role "Client" 0 nstu_uninit_not_client
+  StrCpy $0 "0"
+  ReadRegDWORD $0 HKLM "Software\\NSTU" "Frozen"
+  IntCmp $0 0 nstu_uninit_not_client nstu_uninit_frozen nstu_uninit_frozen
+nstu_uninit_frozen:
+  MessageBox MB_ICONSTOP|MB_OK "This NSTU client is in Managed mode. Disable Managed mode from the server, or run nstu-service.exe --thaw-local from an elevated command prompt, before uninstalling."
+  Abort
+nstu_uninit_not_client:
   StrCpy $AfterRestart "0"
   ${GetParameters} $0
   ${GetOptions} $0 "/AFTERRESTART=" $1

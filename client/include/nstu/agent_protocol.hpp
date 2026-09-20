@@ -47,6 +47,9 @@ enum class AgentMessageType : std::uint16_t {
     pairing_select = 26,
     pairing_code = 27,
     pairing_status = 28,
+    // Service-to-agent display state. The service remains the only
+    // process that reads and writes the machine-wide flag.
+    managed_state = 29,
 };
 
 struct AgentMessage {
