@@ -1479,6 +1479,32 @@ void draw_selected_client(
     ImGui::SameLine();
     draw_status_badge(selected_client->status, state);
     ImGui::TextDisabled("%s", selected_client->address.c_str());
+    bool managed = selected_client->frozen;
+    if (ImGui::Checkbox(
+            tr(state, "Managed mode", "Chế độ được quản lý"),
+            &managed)) {
+        std::string error;
+        const bool sent = control_plane.set_frozen(
+            selected_client->id, managed, &error);
+        state.control_status = sent
+            ? (managed
+                   ? tr(state, "Managed mode request sent.",
+                        "Đã gửi yêu cầu bật chế độ được quản lý.")
+                   : tr(state, "Thaw request sent.",
+                        "Đã gửi yêu cầu tắt chế độ được quản lý."))
+            : error;
+        if (!sent) {
+            record_operation_failure(
+                "ManagedMode", "Managed-mode command failed", error);
+        }
+        ImGui::OpenPopup("control-status");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", tr(
+            state,
+            "Blocks service stop and uninstall until disabled here or by a local administrator.",
+            "Chặn dừng dịch vụ và gỡ cài đặt cho đến khi tắt tại đây hoặc bởi quản trị viên cục bộ."));
+    }
 
     char latency[32]{};
     char packet_loss[32]{};

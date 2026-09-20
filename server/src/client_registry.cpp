@@ -9,6 +9,12 @@ namespace nstu::server {
 void ClientRegistry::upsert(ClientRecord record) {
     std::scoped_lock lock(mutex_);
     const auto existing = clients_.find(record.id);
+    if (existing != clients_.end()) {
+        // Managed state arrives in its own authenticated report. A
+        // status refresh must not erase it while that report is in
+        // flight, especially just after reconnect.
+        record.frozen = existing->second.frozen;
+    }
     if (existing != clients_.end() &&
         (!record.snapshot_jpeg || record.snapshot_jpeg->empty())) {
         record.snapshot_width = existing->second.snapshot_width;
@@ -28,6 +34,17 @@ bool ClientRegistry::set_status(std::uint64_t id, ClientStatus status) {
         return false;
     }
     found->second.status = status;
+    return true;
+}
+
+bool ClientRegistry::set_frozen(std::uint64_t id, bool frozen) {
+    std::scoped_lock lock(mutex_);
+    const auto found = clients_.find(id);
+    if (found == clients_.end()) {
+        return false;
+    }
+    found->second.frozen = frozen;
+    found->second.last_seen = std::chrono::steady_clock::now();
     return true;
 }
 

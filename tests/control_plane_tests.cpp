@@ -92,6 +92,34 @@ int main() {
     assert(lock.has_value());
     assert(lock->envelope.type == nstu::protocol::CommandType::lock);
 
+    assert(control_plane.set_frozen(registry_id, true, &error));
+    const auto freeze = channel.receive(&error);
+    assert(freeze.has_value());
+    assert(freeze->envelope.type ==
+           nstu::protocol::CommandType::freeze_set);
+    assert(nstu::control::decode_freeze_state(freeze->payload) == true);
+    assert(channel.send(
+        nstu::protocol::CommandType::freeze_report, 2,
+        nstu::control::encode_freeze_state(true), &error));
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() && snapshot[0].frozen;
+    }));
+
+    assert(control_plane.set_frozen(registry_id, false, &error));
+    const auto thaw = channel.receive(&error);
+    assert(thaw.has_value());
+    assert(thaw->envelope.type ==
+           nstu::protocol::CommandType::freeze_set);
+    assert(nstu::control::decode_freeze_state(thaw->payload) == false);
+    assert(channel.send(
+        nstu::protocol::CommandType::freeze_report, 3,
+        nstu::control::encode_freeze_state(false), &error));
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() && !snapshot[0].frozen;
+    }));
+
     assert(control_plane.set_snapshots(registry_id, true, 7, &error));
     const auto snapshots = channel.receive(&error);
     assert(snapshots.has_value());
@@ -190,7 +218,7 @@ int main() {
 
     status.locked = true;
     const auto locked_payload = nstu::control::encode_status_report(status);
-    assert(channel.send(nstu::protocol::CommandType::status_report, 2,
+    assert(channel.send(nstu::protocol::CommandType::status_report, 4,
                         locked_payload, &error));
     assert(wait_until([&] {
         const auto snapshot = registry.snapshot();

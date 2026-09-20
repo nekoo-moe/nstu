@@ -33,6 +33,9 @@ struct ClientRecord {
     bool streaming = false;
     bool snapshotting = false;
     bool viewing_broadcast = false;
+    // Last state reported by the client after it applied (or failed to
+    // apply) the authenticated managed-mode command.
+    bool frozen = false;
     std::uint8_t frames_per_second = 0;
     std::uint16_t snapshot_interval_seconds = 0;
     std::uint16_t snapshot_width = 0;
@@ -52,6 +55,7 @@ public:
     void upsert(ClientRecord record);
     [[nodiscard]] bool set_status(std::uint64_t id, ClientStatus status);
     [[nodiscard]] bool touch(std::uint64_t id);
+    [[nodiscard]] bool set_frozen(std::uint64_t id, bool frozen);
     [[nodiscard]] bool update_snapshot(
         std::uint64_t id, const control::SnapshotFrame& frame);
     [[nodiscard]] bool update_health(std::uint64_t id, std::uint32_t latency_ms,

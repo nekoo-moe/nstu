@@ -1226,6 +1226,17 @@ private:
             (void)registry_.touch(state.registry_id.load());
             return true;
         }
+        if (command->envelope.type ==
+            protocol::CommandType::freeze_report) {
+            const auto frozen =
+                control::decode_freeze_state(command->payload);
+            if (!frozen || !registry_.set_frozen(
+                               state.registry_id.load(), *frozen)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
         if (command->envelope.type == protocol::CommandType::status_report ||
             command->envelope.type == protocol::CommandType::hello) {
             const auto report = control::decode_status_report(command->payload);
@@ -1446,6 +1457,13 @@ bool ServerControlPlane::set_locked(std::uint64_t client_id, bool locked,
     return send_command(client_id, locked ? protocol::CommandType::lock
                                           : protocol::CommandType::unlock,
                         {}, error);
+}
+
+bool ServerControlPlane::set_frozen(std::uint64_t client_id, bool frozen,
+                                    std::string* error) {
+    const auto payload = control::encode_freeze_state(frozen);
+    return send_command(client_id, protocol::CommandType::freeze_set,
+                        payload, error);
 }
 
 bool ServerControlPlane::set_streaming(std::uint64_t client_id, bool enabled,

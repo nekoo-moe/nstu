@@ -59,6 +59,8 @@ public:
         std::string* error = nullptr);
     [[nodiscard]] bool set_locked(std::uint64_t client_id, bool locked,
                                   std::string* error = nullptr);
+    [[nodiscard]] bool set_frozen(std::uint64_t client_id, bool frozen,
+                                  std::string* error = nullptr);
     [[nodiscard]] bool set_streaming(std::uint64_t client_id, bool enabled,
                                      std::uint8_t frames_per_second,
                                      std::string* error = nullptr);
