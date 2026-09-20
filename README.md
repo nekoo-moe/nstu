@@ -17,6 +17,8 @@
 [![Last commit](https://img.shields.io/github/last-commit/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/commits)
 [![Issues](https://img.shields.io/github/issues/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/issues)
 
+> **AI-assisted development:** NSTU is developed with AI assistance; all changes remain human-reviewed and auditable in public source history.
+
 NSTU is a free and open-source classroom and computer-lab management project
 for Windows. It is designed around a centralized teacher server, lightweight
 student clients, authenticated control commands, chat, low-bandwidth client

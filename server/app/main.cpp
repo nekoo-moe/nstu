@@ -2117,7 +2117,19 @@ void draw_preferences(DashboardState& state) {
         state,
         "Disabled by default. Events stay in memory and are discarded when NSTU exits. Nothing is uploaded automatically; review the report before posting it to the public GitHub issue tracker.",
         "Mặc định tắt. Sự kiện chỉ nằm trong bộ nhớ và bị xóa khi NSTU thoát. Không có dữ liệu nào tự động tải lên; hãy xem lại báo cáo trước khi đăng lên GitHub Issues công khai."));
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextDisabled("%s", tr(state, "About", "Giới thiệu"));
+    ImGui::Text("NSTU %s", NSTU_PROJECT_VERSION);
+    ImGui::TextWrapped("%s", tr(
+        state,
+        "Open-source classroom management under the MIT License. Developed with AI assistance; changes remain human-reviewed and publicly auditable.",
+        "Phần mềm quản lý lớp học mã nguồn mở theo giấy phép MIT. Được phát triển với hỗ trợ AI; các thay đổi vẫn được con người rà soát và có thể kiểm tra công khai."));
     if (g_telemetry_policy.collect_in_background) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("%s", tr(state, "Diagnostic data",
+                                      "Dữ liệu chẩn đoán"));
         ImGui::Text("%s: %llu / %llu",
                     tr(state, "Collected events", "Sự kiện đã thu thập"),
                     static_cast<unsigned long long>(g_telemetry_events.size()),

@@ -9,7 +9,7 @@ endif()
 
 file(REMOVE_RECURSE "${NSTU_STAGE_DIR}")
 file(MAKE_DIRECTORY "${NSTU_STAGE_DIR}")
-foreach(component IN ITEMS client server diagnostics docs)
+foreach(component IN ITEMS client server diagnostics)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" --install "${NSTU_BUILD_DIR}"
             --prefix "${NSTU_STAGE_DIR}" --component "${component}"

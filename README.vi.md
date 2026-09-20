@@ -17,6 +17,8 @@
 [![Last commit](https://img.shields.io/github/last-commit/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/commits)
 [![Issues](https://img.shields.io/github/issues/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/issues)
 
+> **Phát triển có hỗ trợ AI:** NSTU được phát triển với hỗ trợ AI; mọi thay đổi vẫn được con người rà soát và có thể kiểm tra trong lịch sử mã nguồn công khai.
+
 NSTU là dự án quản lý lớp học và phòng máy Windows miễn phí, mã nguồn mở. Dự
 án hướng đến một máy giáo viên quản lý tập trung, client nhẹ trên máy học sinh,
 lệnh điều khiển được xác thực, chat, snapshot màn hình tiết kiệm băng thông và

@@ -1359,12 +1359,19 @@ DiagnosticResult check_server(const DiagnosticOptions& options) {
                       L"Không yêu cầu với role server.");
     }
     if (options.server_address.empty()) {
+        if (options.installer) {
+            return result(
+                "server", DiagnosticSeverity::not_applicable,
+                L"NSTU server reachability", L"Khả năng kết nối server NSTU",
+                L"The installer leaves server selection to authenticated LAN pairing.",
+                L"Trình cài đặt để việc chọn server cho ghép nối LAN đã xác thực.");
+        }
         return result("server", DiagnosticSeverity::failure,
                       L"NSTU server reachability", L"Khả năng kết nối server NSTU",
                       L"No NSTU server address is configured.",
                       L"Chưa cấu hình địa chỉ server NSTU.",
-                      L"Set the school-LAN server address before client enrollment.",
-                      L"Đặt địa chỉ server trong mạng trường trước khi enrollment client.", 8);
+                      L"Pair this client from the server interface.",
+                      L"Ghép nối client này từ giao diện server.", 8);
     }
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {

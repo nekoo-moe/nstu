@@ -148,14 +148,6 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         install(TARGETS nstu-service nstu-agent nstu-provision
             RUNTIME DESTINATION client
             COMPONENT client)
-        install(FILES
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/install-client-service.ps1"
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/uninstall-client-service.ps1"
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/verify-client-connection.ps1"
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/configure-data-root.ps1"
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-system-setup.ps1"
-            DESTINATION client
-            COMPONENT client)
         # The client-side exam host loads these files from the installed
         # package. Keep the documentation copy below as well so technicians
         # can inspect the schema and sample without opening the client binary
