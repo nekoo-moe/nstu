@@ -8,6 +8,8 @@
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
 #include "nstu/session.hpp"
+#include "nstu/setup/diagnostics.hpp"
+#include "nstu/setup/uwf.hpp"
 
 #include <windows.h>
 #include <wtsapi32.h>
@@ -68,6 +70,12 @@ std::atomic_bool g_agent_connected = false;
 // value is the source of truth; this is the copy the control handler can
 // consult without touching the registry on every SCM callback.
 std::atomic_bool g_frozen = false;
+std::atomic_bool g_uwf_configuring = false;
+std::mutex g_uwf_worker_mutex;
+std::thread g_uwf_worker;
+std::mutex g_server_endpoint_mutex;
+std::string g_server_address;
+std::uint16_t g_server_port = 0;
 std::atomic_bool g_agent_locked = false;
 std::atomic_bool g_agent_streaming = false;
 std::atomic<std::uint8_t> g_agent_stream_fps = 0;
@@ -785,6 +793,104 @@ nstu::control::ClientStatusReport current_status() {
     return status;
 }
 
+nstu::control::UwfConfigureOutcome wire_uwf_outcome(
+    nstu::setup::UwfConfigureOutcome outcome) noexcept {
+    using Setup = nstu::setup::UwfConfigureOutcome;
+    using Wire = nstu::control::UwfConfigureOutcome;
+    switch (outcome) {
+    case Setup::armed: return Wire::armed;
+    case Setup::already_enabled: return Wire::already_enabled;
+    case Setup::unsupported_edition: return Wire::unsupported_edition;
+    case Setup::feature_missing: return Wire::feature_missing;
+    case Setup::probe_unavailable: return Wire::probe_unavailable;
+    case Setup::provider_unavailable: return Wire::provider_unavailable;
+    case Setup::reboot_pending: return Wire::reboot_pending;
+    case Setup::invalid_data_root: return Wire::invalid_data_root;
+    case Setup::readiness_failed: return Wire::readiness_failed;
+    case Setup::checkpoint_required: return Wire::checkpoint_required;
+    case Setup::access_denied: return Wire::access_denied;
+    case Setup::failed: return Wire::failed;
+    }
+    return Wire::failed;
+}
+
+void queue_uwf_report(nstu::control::UwfConfigureReport report) {
+    auto payload = nstu::control::encode_uwf_configure_report(report);
+    if (!payload.empty()) {
+        queue_outbound_message(nstu::protocol::CommandType::uwf_report,
+                               std::move(payload));
+    }
+}
+
+void configure_uwf_async(bool checkpoint_acknowledged) {
+    bool expected = false;
+    if (!g_uwf_configuring.compare_exchange_strong(expected, true)) {
+        queue_uwf_report({
+            .outcome = nstu::control::UwfConfigureOutcome::busy,
+            .detail = "UWF configuration is already running",
+        });
+        return;
+    }
+    try {
+        std::scoped_lock worker_lock(g_uwf_worker_mutex);
+        if (g_uwf_worker.joinable()) {
+            g_uwf_worker.join();
+        }
+        std::string server_address;
+        std::uint16_t server_port = 0;
+        {
+            std::scoped_lock endpoint_lock(g_server_endpoint_mutex);
+            server_address = g_server_address;
+            server_port = g_server_port;
+        }
+        g_uwf_worker = std::thread([
+            checkpoint_acknowledged, server_address = std::move(server_address),
+            server_port] {
+            struct BusyGuard {
+                ~BusyGuard() { g_uwf_configuring = false; }
+            } guard;
+            bool readiness_passed = true;
+            nstu::setup::DiagnosticOptions options;
+            options.role = nstu::setup::DiagnosticRole::client;
+            options.boot_check = true;
+            options.server_address.assign(server_address.begin(),
+                                          server_address.end());
+            options.server_port = server_port;
+            nstu::setup::run_startup_diagnostics(
+                options, {}, [&](nstu::setup::DiagnosticResult result) {
+                    if (result.severity ==
+                        nstu::setup::DiagnosticSeverity::failure) {
+                        readiness_passed = false;
+                    }
+                });
+            const auto data_root = nstu::deployment::data_root(nullptr);
+            const auto result = nstu::setup::configure_uwf({
+                .data_root = data_root,
+                .diagnostic_readiness_passed = readiness_passed,
+                .checkpoint_acknowledged = checkpoint_acknowledged,
+            });
+            std::string detail = result.detail;
+            if (detail.empty()) detail = "UWF configuration failed";
+            detail.resize(std::min(detail.size(),
+                                   nstu::control::kMaximumUwfDetailBytes));
+            queue_uwf_report({
+                .outcome = wire_uwf_outcome(result.outcome),
+                .reboot_required = result.reboot_required,
+                .data_exclusion_ready = result.data_exclusion_added,
+                .registry_exclusion_ready =
+                    result.registry_exclusion_added,
+                .detail = std::move(detail),
+            });
+        });
+    } catch (...) {
+        g_uwf_configuring = false;
+        queue_uwf_report({
+            .outcome = nstu::control::UwfConfigureOutcome::failed,
+            .detail = "UWF configuration worker could not start",
+        });
+    }
+}
+
 void handle_server_command(
     const nstu::control::AuthenticatedCommand& command) {
     switch (command.envelope.type) {
@@ -980,6 +1086,14 @@ void handle_server_command(
              command.payload});
         break;
     }
+    case nstu::protocol::CommandType::uwf_configure: {
+        const auto acknowledged =
+            nstu::control::decode_uwf_configure_request(command.payload);
+        if (acknowledged) {
+            configure_uwf_async(*acknowledged);
+        }
+        break;
+    }
     case nstu::protocol::CommandType::freeze_set: {
         const auto requested =
             nstu::control::decode_freeze_state(command.payload);
@@ -1158,6 +1272,11 @@ void remote_control_loop(std::stop_token stop_token) {
                     }
                     nstu::client::clear_client_runtime_config(updated);
                 };
+            {
+                std::scoped_lock endpoint_lock(g_server_endpoint_mutex);
+                g_server_address = config.server_address;
+                g_server_port = config.server_port;
+            }
             (void)nstu::client::run_client_control_session(
                 config, stop_token, current_status, handle_server_command,
                 pop_outbound_message,
@@ -1416,6 +1535,12 @@ void WINAPI service_main(DWORD, wchar_t**) {
     }
     if (agent_supervisor_thread.joinable()) {
         agent_supervisor_thread.join();
+    }
+    {
+        std::scoped_lock worker_lock(g_uwf_worker_mutex);
+        if (g_uwf_worker.joinable()) {
+            g_uwf_worker.join();
+        }
     }
     CloseHandle(g_stop_event);
     g_stop_event = nullptr;

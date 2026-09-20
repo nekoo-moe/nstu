@@ -374,6 +374,22 @@ const char* detail_for(UwfEnableGate gate) noexcept {
 
 } // namespace
 
+bool is_uwf_supported_product(std::uint32_t product) noexcept {
+    switch (product) {
+    case kProductEnterprise:
+    case kProductEnterpriseN:
+    case kProductEnterpriseS:
+    case kProductEnterpriseSN:
+    case kProductEducation:
+    case kProductEducationN:
+    case kProductIotEnterprise:
+    case kProductIotEnterpriseS:
+        return true;
+    default:
+        return false;
+    }
+}
+
 UwfEnableGate evaluate_uwf_enable(
     const UwfEnableReadiness& readiness) noexcept {
     if (readiness.product_type == 0 || !readiness.feature_known) {

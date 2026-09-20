@@ -60,7 +60,8 @@ else()
 endif()
 
 add_executable(nstu-service service/main.cpp)
-target_link_libraries(nstu-service PRIVATE nstu_client_platform)
+target_link_libraries(nstu-service PRIVATE
+    nstu_client_platform nstu_setup_diagnostics nstu_uwf)
 nstu_enable_warnings(nstu-service)
 
 add_executable(nstu-provision tools/provision.cpp)

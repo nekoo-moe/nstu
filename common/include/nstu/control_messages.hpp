@@ -52,6 +52,32 @@ inline constexpr std::uint16_t kMaximumSnapshotWidth = 480;
 inline constexpr std::uint16_t kMaximumSnapshotHeight = 270;
 inline constexpr std::size_t kMaximumSnapshotJpegBytes = 60u * 1024u;
 
+enum class UwfConfigureOutcome : std::uint8_t {
+    armed = 1,
+    already_enabled = 2,
+    unsupported_edition = 3,
+    feature_missing = 4,
+    probe_unavailable = 5,
+    provider_unavailable = 6,
+    reboot_pending = 7,
+    invalid_data_root = 8,
+    readiness_failed = 9,
+    checkpoint_required = 10,
+    access_denied = 11,
+    failed = 12,
+    busy = 13,
+};
+
+struct UwfConfigureReport {
+    UwfConfigureOutcome outcome = UwfConfigureOutcome::failed;
+    bool reboot_required = false;
+    bool data_exclusion_ready = false;
+    bool registry_exclusion_ready = false;
+    std::string detail;
+};
+
+inline constexpr std::size_t kMaximumUwfDetailBytes = 256;
+
 struct VideoGroupKeyMessage {
     std::uint32_t stream_id = 0;
     std::uint64_t first_packet_sequence = 0;
@@ -87,6 +113,15 @@ struct VideoGroupKeyMessage {
 // wants; `freeze_report` carries what the client turned out to be.
 [[nodiscard]] std::vector<std::byte> encode_freeze_state(bool frozen);
 [[nodiscard]] std::optional<bool> decode_freeze_state(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_uwf_configure_request(
+    bool checkpoint_acknowledged);
+[[nodiscard]] std::optional<bool> decode_uwf_configure_request(
+    std::span<const std::byte> payload);
+[[nodiscard]] std::vector<std::byte> encode_uwf_configure_report(
+    const UwfConfigureReport& report);
+[[nodiscard]] std::optional<UwfConfigureReport> decode_uwf_configure_report(
     std::span<const std::byte> payload);
 
 [[nodiscard]] std::vector<std::byte> encode_video_group_key(

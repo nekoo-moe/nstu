@@ -77,6 +77,11 @@ enum class CommandType : std::uint16_t {
     // always what it was asked to be.
     freeze_set = 43,
     freeze_report = 44,
+    // Reboot-to-restore. The request carries an explicit checkpoint
+    // acknowledgement; the client runs readiness checks and reports what it
+    // actually changed instead of the server assuming success.
+    uwf_configure = 45,
+    uwf_report = 46,
 };
 
 enum class ConnectionRole : std::uint8_t {

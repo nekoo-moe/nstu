@@ -69,6 +69,32 @@ int main() {
     assert(session.has_value());
     nstu::control::AuthenticatedControlChannel channel(
         std::move(socket), std::move(*session));
+    assert(nstu::control::decode_uwf_configure_request(
+               nstu::control::encode_uwf_configure_request(true)) == true);
+    assert(nstu::control::decode_uwf_configure_request(
+               nstu::control::encode_uwf_configure_request(false)) == false);
+    nstu::control::UwfConfigureReport uwf_report{
+        .outcome = nstu::control::UwfConfigureOutcome::armed,
+        .reboot_required = true,
+        .data_exclusion_ready = true,
+        .registry_exclusion_ready = true,
+        .detail = "UWF is armed",
+    };
+    const auto uwf_report_payload =
+        nstu::control::encode_uwf_configure_report(uwf_report);
+    const auto decoded_uwf_report =
+        nstu::control::decode_uwf_configure_report(uwf_report_payload);
+    assert(decoded_uwf_report.has_value());
+    assert(decoded_uwf_report->outcome == uwf_report.outcome);
+    assert(decoded_uwf_report->reboot_required);
+    assert(decoded_uwf_report->data_exclusion_ready);
+    assert(decoded_uwf_report->registry_exclusion_ready);
+    assert(decoded_uwf_report->detail == uwf_report.detail);
+    auto malformed_uwf_report = uwf_report_payload;
+    malformed_uwf_report[1] |= std::byte{0x80};
+    assert(!nstu::control::decode_uwf_configure_report(
+                malformed_uwf_report).has_value());
+
     nstu::control::ClientStatusReport status;
     status.hostname = "LAB-PC-01";
     status.session_id = 3;

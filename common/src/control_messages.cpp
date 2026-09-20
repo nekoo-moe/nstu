@@ -183,6 +183,73 @@ std::optional<bool> decode_freeze_state(std::span<const std::byte> payload) {
     return value <= 1 ? std::optional{value != 0} : std::nullopt;
 }
 
+std::vector<std::byte> encode_uwf_configure_request(
+    bool checkpoint_acknowledged) {
+    return {static_cast<std::byte>(checkpoint_acknowledged ? 1 : 0)};
+}
+
+std::optional<bool> decode_uwf_configure_request(
+    std::span<const std::byte> payload) {
+    return decode_freeze_state(payload);
+}
+
+std::vector<std::byte> encode_uwf_configure_report(
+    const UwfConfigureReport& report) {
+    const auto outcome = static_cast<std::uint8_t>(report.outcome);
+    if (outcome < static_cast<std::uint8_t>(UwfConfigureOutcome::armed) ||
+        outcome > static_cast<std::uint8_t>(UwfConfigureOutcome::busy) ||
+        report.detail.empty() ||
+        report.detail.size() > kMaximumUwfDetailBytes ||
+        !std::all_of(report.detail.begin(), report.detail.end(), [](char value) {
+            const auto byte = static_cast<unsigned char>(value);
+            return byte >= 0x20 && byte < 0x7f;
+        })) {
+        return {};
+    }
+    const auto* detail = reinterpret_cast<const std::byte*>(report.detail.data());
+    std::vector<std::byte> payload;
+    payload.reserve(5 + report.detail.size());
+    append_le(payload, outcome);
+    std::uint8_t flags = report.reboot_required ? 1u : 0u;
+    flags |= report.data_exclusion_ready ? 2u : 0u;
+    flags |= report.registry_exclusion_ready ? 4u : 0u;
+    append_le(payload, flags);
+    append_le(payload, static_cast<std::uint16_t>(report.detail.size()));
+    payload.insert(payload.end(), detail, detail + report.detail.size());
+    return payload;
+}
+
+std::optional<UwfConfigureReport> decode_uwf_configure_report(
+    std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    std::uint8_t outcome = 0;
+    std::uint8_t flags = 0;
+    std::uint16_t detail_bytes = 0;
+    if (!read_le(payload, offset, outcome) ||
+        outcome < static_cast<std::uint8_t>(UwfConfigureOutcome::armed) ||
+        outcome > static_cast<std::uint8_t>(UwfConfigureOutcome::busy) ||
+        !read_le(payload, offset, flags) || (flags & ~0x07u) != 0 ||
+        !read_le(payload, offset, detail_bytes) || detail_bytes == 0 ||
+        detail_bytes > kMaximumUwfDetailBytes ||
+        payload.size() - offset != detail_bytes) {
+        return std::nullopt;
+    }
+    UwfConfigureReport report;
+    report.outcome = static_cast<UwfConfigureOutcome>(outcome);
+    report.reboot_required = (flags & 1u) != 0;
+    report.data_exclusion_ready = (flags & 2u) != 0;
+    report.registry_exclusion_ready = (flags & 4u) != 0;
+    report.detail.assign(
+        reinterpret_cast<const char*>(payload.data() + offset), detail_bytes);
+    if (!std::all_of(report.detail.begin(), report.detail.end(), [](char value) {
+            const auto byte = static_cast<unsigned char>(value);
+            return byte >= 0x20 && byte < 0x7f;
+        })) {
+        return std::nullopt;
+    }
+    return report;
+}
+
 std::vector<std::byte> encode_snapshot_frame(const SnapshotFrame& frame) {
     if (frame.width == 0 || frame.height == 0 ||
         frame.width > kMaximumSnapshotWidth ||

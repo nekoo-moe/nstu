@@ -59,6 +59,15 @@ include(NstuSigning)
 
 add_subdirectory(common)
 
+# UWF mutation is shared by the client service and diagnostics, so keep its
+# narrow WMI writer independent of the diagnostics application target.
+if(WIN32 AND (NSTU_BUILD_CLIENT OR NSTU_BUILD_SETUP))
+    add_library(nstu_uwf STATIC setup/src/uwf.cpp)
+    target_include_directories(nstu_uwf PUBLIC setup/include)
+    target_link_libraries(nstu_uwf PUBLIC nstu_common ole32 oleaut32 wbemuuid)
+    nstu_enable_warnings(nstu_uwf)
+endif()
+
 if(WIN32 AND NSTU_BUILD_VIDEO)
     add_subdirectory(video)
 endif()
@@ -71,7 +80,7 @@ if(NSTU_BUILD_SERVER AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/server/CMakeLists.t
     add_subdirectory(server)
 endif()
 
-if(WIN32 AND NSTU_BUILD_SETUP AND EXISTS
+if(WIN32 AND (NSTU_BUILD_CLIENT OR NSTU_BUILD_SETUP) AND EXISTS
    "${CMAKE_CURRENT_SOURCE_DIR}/setup/CMakeLists.txt")
     add_subdirectory(setup)
 endif()

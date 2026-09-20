@@ -1768,22 +1768,6 @@ DiagnosticResult check_registry() {
 
 } // namespace
 
-bool is_uwf_supported_product(std::uint32_t product_type) noexcept {
-    switch (product_type) {
-    case kProductEnterprise:
-    case kProductEnterpriseN:
-    case kProductEnterpriseS:
-    case kProductEnterpriseSN:
-    case kProductEducation:
-    case kProductEducationN:
-    case kProductIotEnterprise:
-    case kProductIotEnterpriseS:
-        return true;
-    default:
-        return false;
-    }
-}
-
 UwfState classify_uwf(const UwfProbeSnapshot& snapshot) noexcept {
     if (!is_uwf_supported_product(snapshot.product_type)) {
         return UwfState::unsupported_edition;
