@@ -44,23 +44,27 @@ jobs:
         run: ./packaging/test-exam-package-staging.ps1
       - name: Package unified installer
         run: cmake --build build --config Release --target nstu-package --parallel
-      - name: Check documentation payload
+      - name: Verify slimmed installer payload
         shell: pwsh
         run: |
-          if (Test-Path build\unified-installer-stage\docs\project\assets) {
-            throw 'Repository-only documentation assets must not be packaged.'
+          $stage = 'build\unified-installer-stage'
+          # The slimmed installer carries only role binaries, required runtimes,
+          # diagnostics, and exam runtime assets: no documentation directory and
+          # no PowerShell payload of any kind.
+          if (Test-Path (Join-Path $stage 'docs')) {
+            throw 'Installer must not package a docs directory.'
           }
-          if (-not (Test-Path build\unified-installer-stage\client\verify-client-connection.ps1)) {
-            throw 'Client post-install verifier is missing from the package.'
+          $ps1 = Get-ChildItem -Path $stage -Recurse -Filter *.ps1 -File -ErrorAction SilentlyContinue
+          if ($null -ne $ps1) {
+            throw "Installer must not package PowerShell scripts: $($ps1.FullName -join ', ')"
           }
-          if (-not (Test-Path build\unified-installer-stage\docs\exam\web\index.html)) {
-            throw 'Computer-based assessment web assets are missing from the package.'
-          }
-          foreach ($script in @(
-              'stage-exam-package.ps1',
-              'test-exam-package-staging.ps1')) {
-            if (-not (Test-Path (Join-Path build\unified-installer-stage\docs\deployment $script))) {
-              throw "Exam package deployment script is missing from the package: $script"
+          # Role binaries and the exam runtime web assets must be present.
+          foreach ($required in @(
+              'client\nstu-service.exe',
+              'server\nstu-server.exe',
+              'client\exam\web\index.html')) {
+            if (-not (Test-Path (Join-Path $stage $required))) {
+              throw "Required installer payload is missing: $required"
             }
           }
       - name: Upload installers

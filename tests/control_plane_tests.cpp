@@ -228,13 +228,18 @@ int main() {
     }
     auto wrong_identity = exam_start;
     wrong_identity.client_id[0] = std::byte{0xff};
+    // Identity is checked in every channel, so a mismatched request is refused
+    // even by the DEV build.
     assert(!control_plane.start_exam(registry_id, wrong_identity, &error));
-    // The exam gate fails closed: with no proven current-session UWF
-    // protection, a correctly formed request is still refused.
+#if NSTU_DEV_UNPROTECTED_EXAM
+    // The DEV (UNPROTECTED) build bypasses only the readiness gate: a correctly
+    // formed request starts even with no proven current-session protection.
+    assert(control_plane.start_exam(registry_id, exam_start, &error));
+#else
+    // Release fails closed: without proven current-session UWF protection a
+    // correctly formed request is refused, then permitted once a verified
+    // report with a completed probe on a known boot proves protection.
     assert(!control_plane.start_exam(registry_id, exam_start, &error));
-
-    // Prove current-session protection so the gate opens. A verified report
-    // with a completed probe on a known boot is the only thing that does.
     nstu::control::UwfFleetStatusReport verified;
     verified.phase = nstu::control::UwfFleetPhase::verified_protected;
     verified.probe.probe_succeeded = true;
@@ -247,6 +252,7 @@ int main() {
     assert(registry.set_uwf_fleet_status(registry_id, verified));
     assert(registry.snapshot()[0].uwf.proves_current_protection());
     assert(control_plane.start_exam(registry_id, exam_start, &error));
+#endif
     const auto exam_start_command = channel.receive(&error);
     assert(exam_start_command.has_value());
     assert(exam_start_command->envelope.type ==
