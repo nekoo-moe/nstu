@@ -1407,13 +1407,30 @@ private:
             std::uint64_t last_accepted = 0;
             if (audit_rate_limiter_.allow(registry_id,
                                           unix_milliseconds_now())) {
-                for (const auto& record : *records) {
-                    (void)audit_sink_.write(record);
-                    last_accepted = std::max(last_accepted, record.sequence);
+                if (!audit_sink_.is_open()) {
+                    // No central sink is configured on this server. Acknowledge
+                    // so a client does not spool forever, accepting that these
+                    // records are not persisted centrally.
+                    for (const auto& record : *records) {
+                        last_accepted = std::max(last_accepted, record.sequence);
+                    }
+                } else {
+                    // Records arrive in ascending sequence order. Advance the
+                    // acknowledgement only past records actually written, and
+                    // stop at the first failed write so the client retries from
+                    // there rather than dropping records on a full disk or a
+                    // failed rotation.
+                    for (const auto& record : *records) {
+                        if (!audit_sink_.write(record)) {
+                            break;
+                        }
+                        last_accepted = record.sequence;
+                    }
                 }
             }
-            // A throttled chunk is acknowledged with 0 so the client keeps its
-            // records and retries later rather than dropping them.
+            // A throttled chunk, or one the sink could not accept, is
+            // acknowledged with the last durably written sequence (0 if none),
+            // so the client keeps the rest and retries later.
             const auto ack = audit::encode_audit_ack(last_accepted);
             if (!send_authenticated_locked(
                     state, protocol::CommandType::audit_ack,
@@ -1550,6 +1567,7 @@ private:
 
     void on_disconnected(net::ConnectionId id) {
         std::shared_ptr<ConnectionState> state;
+        bool owned_mapping = false;
         {
             std::scoped_lock lock(states_mutex_);
             const auto found = states_.find(id);
@@ -1565,11 +1583,18 @@ private:
                 if (mapping != client_connections_.end() &&
                     mapping->second == id) {
                     client_connections_.erase(mapping);
+                    owned_mapping = true;
                 }
             }
         }
         const auto registry_id = state->registry_id.load();
-        if (registry_id != 0) {
+        // Act only when this disconnect still owned the registry mapping. On a
+        // reconnect the replacement connection has already claimed the mapping
+        // and may have reported a fresh current-session UWF proof; a late
+        // disconnect from the superseded connection must not mark the client
+        // offline or retire that new proof, which would close the exam gate
+        // until the next probe for no reason.
+        if (registry_id != 0 && owned_mapping) {
             (void)registry_.set_status(registry_id,
                                        ClientStatus::offline);
             (void)registry_.demote_uwf_verification(registry_id);
