@@ -77,4 +77,33 @@ struct UwfConfigureResult {
 [[nodiscard]] UwfConfigureResult configure_uwf(
     const UwfConfigureRequest& request);
 
+// A strictly read-only observation of what UWF is doing in the session that is
+// running right now.  Deliberately separate from configure_uwf: asking "is
+// this machine protected?" must never be able to change whether it is, and the
+// fleet workflow asks it on every reconnect.
+struct UwfProtectionProbeResult {
+    // False means the probe could not reach an answer at all.  Every other
+    // field is then meaningless and must not be read as a negative
+    // observation - "unknown" and "unprotected" are different states.
+    bool probe_succeeded = false;
+    bool supported_product = false;
+    // Current-session state is proof of protection.  Next-session state is
+    // only intent that a restart has yet to apply, which is exactly the
+    // distinction the pre-reboot configure report cannot make.
+    bool filter_current_enabled = false;
+    bool filter_next_enabled = false;
+    bool system_volume_current_protected = false;
+    bool data_exclusion_present = false;
+    bool registry_exclusion_present = false;
+    // Short printable ASCII, safe to forward over the control channel.
+    std::string detail;
+};
+
+// Reads live UWF state for the volume hosting `data_root`.  Issues WQL queries
+// and the provider's Find* lookups only; it never protects, unprotects, or
+// changes an exclusion.  Anything it can reach but not read is reported as
+// unprotected rather than unknown, so the exam gate fails closed.
+[[nodiscard]] UwfProtectionProbeResult probe_uwf_protection(
+    const std::filesystem::path& data_root);
+
 } // namespace nstu::setup

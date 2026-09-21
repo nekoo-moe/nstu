@@ -20,20 +20,50 @@ set(NSTU_WEBVIEW2_SDK_DIR "" CACHE PATH
 option(NSTU_INTERNAL_TEST_BUILD
     "Build an explicitly labeled installer that permits undersized VM RAM"
     OFF)
+# Publicly released DEV build. It bypasses ONLY the UWF/Exam readiness gate so
+# features can be exercised without entering the reboot-to-restore protected
+# state. It never relaxes authentication, pairing, package digest validation or
+# answer durability. The bypass is compile-time and cannot be toggled at
+# runtime, and every bypassed exam start is audited at severity=warning.
+option(NSTU_DEV_UNPROTECTED_BUILD
+    "Build a publicly labeled DEV build that bypasses only the UWF/Exam gate"
+    OFF)
+
+if(NSTU_INTERNAL_TEST_BUILD AND NSTU_DEV_UNPROTECTED_BUILD)
+    message(FATAL_ERROR
+        "NSTU_INTERNAL_TEST_BUILD and NSTU_DEV_UNPROTECTED_BUILD are mutually "
+        "exclusive: the DEV channel is a distinct public release.")
+endif()
 
 if(NSTU_INTERNAL_TEST_BUILD)
     set(NSTU_INTERNAL_TEST_BUILD_VALUE 1)
+    set(NSTU_DEV_UNPROTECTED_EXAM_VALUE 0)
     set(NSTU_INSTALLER_DISPLAY_NAME "NSTU Internal VM Test")
     set(NSTU_INSTALLER_FILE_SUFFIX "-internal-vm")
     set(NSTU_INSTALLER_CHANNEL "InternalVmTest")
     set(NSTU_INSTALLER_ROLE_SUFFIX " (Internal VM Test)")
+elseif(NSTU_DEV_UNPROTECTED_BUILD)
+    set(NSTU_INTERNAL_TEST_BUILD_VALUE 0)
+    set(NSTU_DEV_UNPROTECTED_EXAM_VALUE 1)
+    set(NSTU_INSTALLER_DISPLAY_NAME "NSTU DEV (UNPROTECTED)")
+    set(NSTU_INSTALLER_FILE_SUFFIX "-dev-unprotected")
+    set(NSTU_INSTALLER_CHANNEL "DevUnprotected")
+    set(NSTU_INSTALLER_ROLE_SUFFIX " (DEV UNPROTECTED)")
 else()
     set(NSTU_INTERNAL_TEST_BUILD_VALUE 0)
+    set(NSTU_DEV_UNPROTECTED_EXAM_VALUE 0)
     set(NSTU_INSTALLER_DISPLAY_NAME "NSTU")
     set(NSTU_INSTALLER_FILE_SUFFIX "")
     set(NSTU_INSTALLER_CHANNEL "Release")
     set(NSTU_INSTALLER_ROLE_SUFFIX "")
 endif()
+
+# The exam gate reads this define. It is set globally so the server library, the
+# server UI and the client service are compiled with one consistent value; a
+# mismatch between the gate in the library and its callers is exactly the kind
+# of split that must never happen.
+add_compile_definitions(
+    NSTU_DEV_UNPROTECTED_EXAM=${NSTU_DEV_UNPROTECTED_EXAM_VALUE})
 
 # Keep release installers self-contained on clean school images.  The static
 # MSVC runtime avoids requiring a separately deployed Visual C++ Redistributable

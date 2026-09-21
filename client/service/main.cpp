@@ -1,4 +1,5 @@
 #include "nstu/agent_protocol.hpp"
+#include "nstu/audit.hpp"
 #include "nstu/client_config.hpp"
 #include "nstu/client_control.hpp"
 #include "nstu/client_freeze.hpp"
@@ -51,6 +52,10 @@ std::mutex g_agent_queue_mutex;
 std::deque<nstu::client::AgentMessage> g_agent_queue;
 std::mutex g_outbound_queue_mutex;
 std::deque<nstu::client::ClientOutboundCommand> g_outbound_queue;
+// Client-side NSTU activity audit. The spool is internally synchronised; the
+// upload cadence timer is only touched on the single control-session thread.
+nstu::audit::Spool g_audit_spool;
+std::chrono::steady_clock::time_point g_audit_next_upload{};
 nstu::exam::AnswerOutbox g_exam_outbox;
 std::mutex g_exam_inflight_mutex;
 // The value is the complete exam context key.  Keeping it alongside the
@@ -76,6 +81,16 @@ std::atomic_bool g_frozen = false;
 std::atomic_bool g_uwf_configuring = false;
 std::mutex g_uwf_worker_mutex;
 std::thread g_uwf_worker;
+// Boot identity for the fleet reboot-to-restore workflow.  Random, generated
+// once when the service starts, and held in memory only: it therefore differs
+// after every restart without needing persistence or a trustworthy clock.  A
+// client claiming UWF protection under the same boot identity the server
+// configured has not actually rebooted, whatever else its report says.
+nstu::control::BootId g_boot_id{};
+std::mutex g_fleet_mutex;
+nstu::control::UwfFleetPhase g_fleet_phase =
+    nstu::control::UwfFleetPhase::idle;
+std::uint64_t g_fleet_operation_id = 0;
 std::mutex g_server_endpoint_mutex;
 std::string g_server_address;
 std::uint16_t g_server_port = 0;
@@ -429,6 +444,20 @@ void drain_exam_ingress() {
     }
 }
 
+void emit_audit(nstu::audit::Category category, nstu::audit::Severity severity,
+                std::string component, std::string action, std::string result,
+                std::string detail = {}, std::uint64_t operation_id = 0) {
+    nstu::audit::Event event;
+    event.category = category;
+    event.severity = severity;
+    event.component = std::move(component);
+    event.action = std::move(action);
+    event.result = std::move(result);
+    event.operation_id = operation_id;
+    event.detail = std::move(detail);
+    (void)g_audit_spool.emit(event);
+}
+
 void queue_outbound_message(nstu::protocol::CommandType type,
                             std::vector<std::byte> payload) {
     std::scoped_lock lock(g_outbound_queue_mutex);
@@ -450,6 +479,26 @@ std::optional<nstu::client::ClientOutboundCommand> pop_outbound_message() {
             auto message = std::move(g_outbound_queue.front());
             g_outbound_queue.pop_front();
             return message;
+        }
+    }
+
+    // Drain the audit spool at a bounded cadence, behind the higher-priority
+    // command queue above. Records are peeked, not removed: an audit_ack from
+    // the server advances the spool, so a lost upload is retried rather than
+    // lost, and a client that cannot reach the server bounds its own memory.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (!g_audit_spool.empty() && now >= g_audit_next_upload) {
+            const auto chunk = g_audit_spool.peek_chunk();
+            if (!chunk.empty()) {
+                auto payload = nstu::audit::encode_audit_chunk(chunk);
+                if (!payload.empty()) {
+                    g_audit_next_upload = now + std::chrono::seconds(5);
+                    return nstu::client::ClientOutboundCommand{
+                        nstu::protocol::CommandType::audit_upload,
+                        std::move(payload)};
+                }
+            }
         }
     }
 
@@ -963,6 +1012,321 @@ void configure_uwf_async(bool checkpoint_acknowledged,
     }
 }
 
+// Fleet reboot-to-restore.
+//
+// The single-client path above reports what a configuration attempt did. That
+// report is produced before the restart, so at best it proves UWF was armed.
+// A fleet operation has to answer the stronger question the exam gate asks -
+// "is this machine protected in the session it is running right now?" - which
+// needs a read-only probe plus the boot identity showing a restart really
+// happened. Both paths share g_uwf_configuring and the single g_uwf_worker
+// slot, so only one of them can ever be touching UWF, and the shutdown join
+// already in service_main covers both.
+
+nstu::control::UwfProtectionProbe wire_uwf_probe(
+    const nstu::setup::UwfProtectionProbeResult& result) noexcept {
+    nstu::control::UwfProtectionProbe probe;
+    // A probe that never reached an answer reports nothing at all. "Unknown"
+    // and "unprotected" are different states, and the wire format refuses a
+    // report carrying observations without a completed probe.
+    if (!result.probe_succeeded) {
+        return probe;
+    }
+    probe.probe_succeeded = true;
+    probe.filter_current_enabled = result.filter_current_enabled;
+    probe.filter_next_enabled = result.filter_next_enabled;
+    probe.system_volume_current_protected =
+        result.system_volume_current_protected;
+    probe.data_exclusion_present = result.data_exclusion_present;
+    probe.registry_exclusion_present = result.registry_exclusion_present;
+    return probe;
+}
+
+// The status codec refuses a detail that is empty, oversized, or not printable
+// ASCII, and a refused encode silently drops the whole report. Every detail is
+// forced into that shape here rather than trusted to arrive in it.
+std::string fleet_detail(std::string detail, const char* fallback) {
+    constexpr char kSpace = 0x20;
+    for (char& value : detail) {
+        const auto byte = static_cast<unsigned char>(value);
+        if (byte < 0x20 || byte >= 0x7f) {
+            value = kSpace;
+        }
+    }
+    while (!detail.empty() && detail.back() == kSpace) {
+        detail.pop_back();
+    }
+    if (detail.empty()) {
+        detail = fallback;
+    }
+    if (detail.size() > nstu::control::kMaximumUwfDetailBytes) {
+        detail.resize(nstu::control::kMaximumUwfDetailBytes);
+    }
+    return detail;
+}
+
+void queue_fleet_status(nstu::control::UwfFleetPhase phase,
+                        const nstu::control::UwfProtectionProbe& probe,
+                        std::string detail) {
+    if (phase == nstu::control::UwfFleetPhase::verified_protected &&
+        !nstu::control::probe_proves_protection(probe)) {
+        // Fail closed. This phase is what authorizes an exam, so it is never
+        // claimed on the strength of anything but the probe in this report.
+        phase = nstu::control::UwfFleetPhase::failed;
+    }
+    nstu::control::UwfFleetStatusReport report;
+    {
+        std::scoped_lock lock(g_fleet_mutex);
+        g_fleet_phase = phase;
+        report.operation_id = g_fleet_operation_id;
+    }
+    report.boot_id = g_boot_id;
+    report.phase = phase;
+    report.probe = probe;
+    report.detail =
+        fleet_detail(std::move(detail), "UWF state reported without detail");
+    auto payload = nstu::control::encode_uwf_fleet_status_report(report);
+    if (payload.empty()) {
+        OutputDebugStringA(
+            "NSTU UWF fleet status could not be encoded and was dropped\n");
+        return;
+    }
+    queue_outbound_message(nstu::protocol::CommandType::uwf_fleet_status,
+                           std::move(payload));
+}
+
+// Current-session UWF state cannot change without a restart, and a restart
+// replaces g_boot_id along with this cache. The window therefore bounds how
+// often a reconnect loop hits WMI without making the answer any less current.
+constexpr auto kFleetProbeCacheLifetime = std::chrono::seconds(30);
+std::mutex g_fleet_probe_cache_mutex;
+std::optional<nstu::setup::UwfProtectionProbeResult> g_fleet_probe_cache;
+std::chrono::steady_clock::time_point g_fleet_probe_cache_expiry{};
+
+nstu::setup::UwfProtectionProbeResult probe_uwf_state() {
+    {
+        std::scoped_lock lock(g_fleet_probe_cache_mutex);
+        if (g_fleet_probe_cache &&
+            std::chrono::steady_clock::now() < g_fleet_probe_cache_expiry) {
+            return *g_fleet_probe_cache;
+        }
+    }
+    nstu::setup::UwfProtectionProbeResult result;
+    try {
+        result = nstu::setup::probe_uwf_protection(
+            nstu::deployment::data_root(nullptr));
+    } catch (...) {
+        result = {};
+        result.detail = "the UWF probe failed unexpectedly";
+    }
+    {
+        std::scoped_lock lock(g_fleet_probe_cache_mutex);
+        g_fleet_probe_cache = result;
+        g_fleet_probe_cache_expiry =
+            std::chrono::steady_clock::now() + kFleetProbeCacheLifetime;
+    }
+    return result;
+}
+
+void invalidate_uwf_probe_cache() {
+    std::scoped_lock lock(g_fleet_probe_cache_mutex);
+    g_fleet_probe_cache.reset();
+}
+
+// Reports what this machine currently is, rather than what an operation hoped
+// it would become. The server demotes a previously verified client back to
+// verifying the moment it reconnects, and this is the report that resolves it;
+// until one arrives, no exam can start here.
+void report_current_fleet_state() {
+    const auto result = probe_uwf_state();
+    const auto probe = wire_uwf_probe(result);
+    nstu::control::UwfFleetPhase phase = nstu::control::UwfFleetPhase::idle;
+    if (nstu::control::probe_proves_protection(probe)) {
+        phase = nstu::control::UwfFleetPhase::verified_protected;
+    } else if (result.probe_succeeded && !result.supported_product) {
+        phase = nstu::control::UwfFleetPhase::unsupported;
+    } else {
+        // This machine is demonstrably not protected now. Whatever step an
+        // operation had reached is still what the server needs to see, except
+        // a verified claim, which this probe has just disproved.
+        std::scoped_lock lock(g_fleet_mutex);
+        phase =
+            g_fleet_phase == nstu::control::UwfFleetPhase::verified_protected
+                ? nstu::control::UwfFleetPhase::verifying
+                : g_fleet_phase;
+    }
+    queue_fleet_status(phase, probe, result.detail);
+}
+
+void report_current_fleet_state_async() {
+    bool expected = false;
+    if (!g_uwf_configuring.compare_exchange_strong(expected, true)) {
+        // A configuration is already running and reports on its own. Probing
+        // underneath it would only describe a half-applied state.
+        return;
+    }
+    try {
+        std::scoped_lock worker_lock(g_uwf_worker_mutex);
+        if (g_uwf_worker.joinable()) {
+            g_uwf_worker.join();
+        }
+        g_uwf_worker = std::thread([] {
+            struct BusyGuard {
+                ~BusyGuard() { g_uwf_configuring = false; }
+            } guard;
+            try {
+                report_current_fleet_state();
+            } catch (...) {
+                OutputDebugStringA(
+                    "NSTU UWF fleet state could not be reported\n");
+            }
+        });
+    } catch (...) {
+        g_uwf_configuring = false;
+    }
+}
+
+void configure_uwf_fleet_async(std::uint64_t operation_id,
+                               bool checkpoint_acknowledged,
+                               bool restart_requested) {
+    if (operation_id == 0) {
+        // Every later status report is matched back by operation id, so an
+        // unattributable request is refused rather than half honoured.
+        return;
+    }
+    bool duplicate = false;
+    {
+        std::scoped_lock lock(g_fleet_mutex);
+        duplicate = g_fleet_operation_id == operation_id;
+        if (!duplicate) {
+            g_fleet_operation_id = operation_id;
+            g_fleet_phase = nstu::control::UwfFleetPhase::requested;
+        }
+    }
+    if (duplicate) {
+        // The server retransmits when a reply is lost. Re-running the arming
+        // sequence - above all re-scheduling a restart - on a duplicate would
+        // be a far worse answer than repeating where this machine got to.
+        report_current_fleet_state_async();
+        return;
+    }
+    bool expected = false;
+    if (!g_uwf_configuring.compare_exchange_strong(expected, true)) {
+        queue_fleet_status(
+            nstu::control::UwfFleetPhase::failed, {},
+            "a UWF operation is already running on this computer");
+        return;
+    }
+    try {
+        std::scoped_lock worker_lock(g_uwf_worker_mutex);
+        if (g_uwf_worker.joinable()) {
+            g_uwf_worker.join();
+        }
+        std::string server_address;
+        std::uint16_t server_port = 0;
+        {
+            std::scoped_lock endpoint_lock(g_server_endpoint_mutex);
+            server_address = g_server_address;
+            server_port = g_server_port;
+        }
+        g_uwf_worker = std::thread([checkpoint_acknowledged, restart_requested,
+                                    server_address = std::move(server_address),
+                                    server_port] {
+            struct BusyGuard {
+                ~BusyGuard() { g_uwf_configuring = false; }
+            } guard;
+            try {
+                // Proof first, mutation only where it is missing. A machine
+                // already protected in the session it is running needs
+                // nothing armed and, above all, no classroom reboot.
+                invalidate_uwf_probe_cache();
+                auto result = probe_uwf_state();
+                auto probe = wire_uwf_probe(result);
+                if (nstu::control::probe_proves_protection(probe)) {
+                    queue_fleet_status(
+                        nstu::control::UwfFleetPhase::verified_protected, probe,
+                        result.detail);
+                    return;
+                }
+                if (result.probe_succeeded && !result.supported_product) {
+                    queue_fleet_status(
+                        nstu::control::UwfFleetPhase::unsupported, probe,
+                        result.detail);
+                    return;
+                }
+                queue_fleet_status(nstu::control::UwfFleetPhase::configuring,
+                                   probe, "running UWF readiness checks");
+
+                bool readiness_passed = true;
+                nstu::setup::DiagnosticOptions options;
+                options.role = nstu::setup::DiagnosticRole::client;
+                options.boot_check = true;
+                options.server_address.assign(server_address.begin(),
+                                              server_address.end());
+                options.server_port = server_port;
+                nstu::setup::run_startup_diagnostics(
+                    options, {}, [&](nstu::setup::DiagnosticResult check) {
+                        if (check.severity ==
+                            nstu::setup::DiagnosticSeverity::failure) {
+                            readiness_passed = false;
+                        }
+                    });
+                const auto configured = nstu::setup::configure_uwf({
+                    .data_root = nstu::deployment::data_root(nullptr),
+                    .diagnostic_readiness_passed = readiness_passed,
+                    .checkpoint_acknowledged = checkpoint_acknowledged,
+                });
+
+                // Re-read afterwards so the report carries observed state
+                // rather than the opinion of the configure call itself.
+                invalidate_uwf_probe_cache();
+                result = probe_uwf_state();
+                probe = wire_uwf_probe(result);
+
+                using Outcome = nstu::setup::UwfConfigureOutcome;
+                const bool armed =
+                    configured.outcome == Outcome::armed ||
+                    configured.outcome == Outcome::already_enabled ||
+                    configured.outcome == Outcome::reboot_pending;
+                if (!armed) {
+                    queue_fleet_status(
+                        configured.outcome == Outcome::unsupported_edition
+                            ? nstu::control::UwfFleetPhase::unsupported
+                            : nstu::control::UwfFleetPhase::failed,
+                        probe, configured.detail);
+                    return;
+                }
+                if (!restart_requested) {
+                    // Armed, but the operator did not ask for the restart that
+                    // would make it real. Saying so is the honest answer, and
+                    // the exam gate still refuses this machine.
+                    queue_fleet_status(
+                        nstu::control::UwfFleetPhase::awaiting_restart, probe,
+                        "UWF is armed; restart this computer to apply it");
+                    return;
+                }
+                if (!schedule_uwf_restart()) {
+                    queue_fleet_status(
+                        nstu::control::UwfFleetPhase::awaiting_restart, probe,
+                        "UWF is armed; the automatic restart failed, restart "
+                        "this computer manually");
+                    return;
+                }
+                queue_fleet_status(
+                    nstu::control::UwfFleetPhase::restarting, probe,
+                    "UWF is armed; this computer restarts in 60 seconds");
+            } catch (...) {
+                queue_fleet_status(nstu::control::UwfFleetPhase::failed, {},
+                                   "the UWF operation failed unexpectedly");
+            }
+        });
+    } catch (...) {
+        g_uwf_configuring = false;
+        queue_fleet_status(nstu::control::UwfFleetPhase::failed, {},
+                           "the UWF operation worker could not start");
+    }
+}
+
 void handle_server_command(
     const nstu::control::AuthenticatedCommand& command) {
     switch (command.envelope.type) {
@@ -1166,6 +1530,33 @@ void handle_server_command(
         }
         break;
     }
+    case nstu::protocol::CommandType::uwf_fleet_configure: {
+        const auto request =
+            nstu::control::decode_uwf_fleet_configure_request(command.payload);
+        if (!request) {
+            break;
+        }
+        // The recovery-checkpoint acknowledgement is not re-checked here on
+        // purpose: configure_uwf() owns that gate and reports exactly why it
+        // refused, so a teacher sees one answer rather than two.
+        emit_audit(nstu::audit::Category::uwf, nstu::audit::Severity::info,
+                   "client_uwf", "fleet_configure_received",
+                   request->restart_requested ? "restart_requested"
+                                               : "no_restart",
+                   {}, request->operation_id);
+        configure_uwf_fleet_async(request->operation_id,
+                                  request->checkpoint_acknowledged,
+                                  request->restart_requested);
+        break;
+    }
+    case nstu::protocol::CommandType::audit_ack: {
+        const auto sequence =
+            nstu::audit::decode_audit_ack(command.payload);
+        if (sequence) {
+            g_audit_spool.acknowledge(*sequence);
+        }
+        break;
+    }
     case nstu::protocol::CommandType::freeze_set: {
         const auto requested =
             nstu::control::decode_freeze_state(command.payload);
@@ -1322,6 +1713,11 @@ void remote_control_loop(std::stop_token stop_token) {
             queue_outbound_message(
                 nstu::protocol::CommandType::freeze_report,
                 nstu::control::encode_freeze_state(g_frozen.load()));
+            // ... and reboot-to-restore protection as this machine can
+            // currently prove it, rather than as an earlier operation hoped.
+            // The probe runs off this thread so a slow WMI call cannot delay
+            // reconnecting to the teacher.
+            report_current_fleet_state_async();
             std::string ignored_error;
             const auto endpoint_observer =
                 [&](const nstu::discovery::ServerEndpoint& endpoint) {
@@ -1554,6 +1950,16 @@ void WINAPI service_main(DWORD, wchar_t**) {
         return;
     }
     g_frozen = nstu::client::machine_frozen();
+    if (!nstu::security::generate_random(g_boot_id)) {
+        // Without a boot identity this service cannot prove that a restart
+        // ever happened, so every fleet report it made would be
+        // unverifiable.  Refusing to start is the only answer that keeps the
+        // exam gate meaningful.
+        CloseHandle(g_stop_event);
+        g_stop_event = nullptr;
+        report_status(SERVICE_STOPPED, ERROR_GEN_FAILURE);
+        return;
+    }
     report_status(SERVICE_START_PENDING);
     wchar_t executable[MAX_PATH]{};
     GetModuleFileNameW(nullptr, executable, MAX_PATH);

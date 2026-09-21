@@ -7,6 +7,7 @@ add_library(nstu_common STATIC
     src/exam_control.cpp
     src/exam_sync.cpp
     src/answer_journal.cpp
+    src/audit.cpp
     src/enrollment.cpp
     src/frame_reassembler.cpp
     src/iocp_dispatcher.cpp

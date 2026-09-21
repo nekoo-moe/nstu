@@ -1514,14 +1514,30 @@ void draw_selected_client(
         state.uwf_confirmation_open = true;
         ImGui::OpenPopup("uwf-confirmation");
     }
-    if (selected_client->uwf_reported) {
-        ImGui::TextWrapped("%s", selected_client->uwf_detail.c_str());
-        if (selected_client->uwf_reboot_required) {
+    if (selected_client->uwf.reported ||
+        selected_client->uwf.phase !=
+            nstu::control::UwfFleetPhase::idle) {
+        const bool proven =
+            selected_client->uwf.proves_current_protection();
+        ImGui::TextColored(
+            proven ? (g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
+                                  : ImVec4{0.10f, 0.55f, 0.24f, 1.0f})
+                   : (g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
+                                  : ImVec4{0.63f, 0.36f, 0.02f, 1.0f}),
+            "%s", nstu::server::to_string(selected_client->uwf.phase));
+        if (!selected_client->uwf.detail.empty()) {
+            ImGui::TextWrapped("%s", selected_client->uwf.detail.c_str());
+        }
+        if (proven) {
             ImGui::TextColored(
-                g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
-                            : ImVec4{0.63f, 0.36f, 0.02f, 1.0f},
-                "%s", tr(state, "Restart required to apply UWF.",
-                          "Cần khởi động lại để áp dụng UWF."));
+                g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
+                            : ImVec4{0.10f, 0.55f, 0.24f, 1.0f},
+                "%s",
+                tr(state,
+                   "Reboot-to-restore protected in this session. Exam mode is "
+                   "permitted.",
+                   "Đã bảo vệ khôi phục sau reboot trong phiên này. Cho phép "
+                   "chế độ thi."));
         }
     }
     if (state.uwf_confirmation_open &&
@@ -1534,8 +1550,10 @@ void draw_selected_client(
         if (ImGui::Button(tr(state, "I verified the checkpoint; enable",
                              "Đã xác minh điểm khôi phục; bật"))) {
             std::string error;
-            const bool sent = control_plane.configure_uwf(
-                state.uwf_confirmation_client_id, true, &error);
+            // Fleet path: arm UWF and request the visible client restart, so a
+            // fresh boot-bound probe can prove current-session protection.
+            const bool sent = control_plane.configure_uwf_fleet(
+                state.uwf_confirmation_client_id, true, true, &error);
             state.control_status = sent
                 ? tr(state, "UWF readiness request sent.",
                      "Đã gửi yêu cầu kiểm tra và bật UWF.")
@@ -2526,6 +2544,15 @@ void draw_menu_strip(DashboardState& state, bool has_clients,
     if (g_heading_font != nullptr) {
         ImGui::PopFont();
     }
+#if NSTU_DEV_UNPROTECTED_EXAM
+    // Permanent, unmissable marker for the public DEV channel. This build starts
+    // exams without proven reboot-to-restore protection; the operator must never
+    // mistake it for a Release install.
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4{0.96f, 0.36f, 0.36f, 1.0f}, "%s",
+                       tr(state, "DEV (UNPROTECTED) - exams run without UWF",
+                          "DEV (KHÔNG BẢO VỆ) - thi không cần UWF"));
+#endif
     ImGui::SameLine();
     if (draw_segment_option(tr(state, "Class", "Lớp"),
                             state.view == DashboardView::room_screens, 58.0f)) {

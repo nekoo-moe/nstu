@@ -24,6 +24,20 @@ nstu_enable_warnings(nstu_protocol_headers_tests)
 nstu_enable_test_assertions(nstu_protocol_headers_tests)
 add_test(NAME nstu.protocol_headers COMMAND nstu_protocol_headers_tests)
 
+# Fleet reboot-to-restore wire formats.  Pure codecs, so they are tested on
+# every platform rather than behind the Windows-only guard below.
+add_executable(nstu_uwf_fleet_codec_tests uwf_fleet_codec_tests.cpp)
+target_link_libraries(nstu_uwf_fleet_codec_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_uwf_fleet_codec_tests)
+nstu_enable_test_assertions(nstu_uwf_fleet_codec_tests)
+add_test(NAME nstu.uwf_fleet_codec COMMAND nstu_uwf_fleet_codec_tests)
+
+add_executable(nstu_audit_tests audit_tests.cpp)
+target_link_libraries(nstu_audit_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_audit_tests)
+nstu_enable_test_assertions(nstu_audit_tests)
+add_test(NAME nstu.audit COMMAND nstu_audit_tests)
+
 add_executable(nstu_exam_sync_tests exam_sync_tests.cpp)
 target_link_libraries(nstu_exam_sync_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_exam_sync_tests)

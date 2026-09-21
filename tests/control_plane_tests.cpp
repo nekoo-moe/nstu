@@ -157,9 +157,13 @@ int main() {
                         uwf_report_payload, &error));
     assert(wait_until([&] {
         const auto snapshot = registry.snapshot();
-        return !snapshot.empty() && snapshot[0].uwf_reported &&
-               snapshot[0].uwf_reboot_required;
+        return !snapshot.empty() && snapshot[0].uwf.reported &&
+               snapshot[0].uwf.phase ==
+                   nstu::control::UwfFleetPhase::awaiting_restart;
     }));
+    // The single-client report describes an attempt, never a proof, so it must
+    // not open the exam gate.
+    assert(!registry.snapshot()[0].uwf.proves_current_protection());
 
     assert(control_plane.set_snapshots(registry_id, true, 7, &error));
     const auto snapshots = channel.receive(&error);
@@ -225,6 +229,23 @@ int main() {
     auto wrong_identity = exam_start;
     wrong_identity.client_id[0] = std::byte{0xff};
     assert(!control_plane.start_exam(registry_id, wrong_identity, &error));
+    // The exam gate fails closed: with no proven current-session UWF
+    // protection, a correctly formed request is still refused.
+    assert(!control_plane.start_exam(registry_id, exam_start, &error));
+
+    // Prove current-session protection so the gate opens. A verified report
+    // with a completed probe on a known boot is the only thing that does.
+    nstu::control::UwfFleetStatusReport verified;
+    verified.phase = nstu::control::UwfFleetPhase::verified_protected;
+    verified.probe.probe_succeeded = true;
+    verified.probe.filter_current_enabled = true;
+    verified.probe.system_volume_current_protected = true;
+    for (std::size_t index = 0; index < verified.boot_id.size(); ++index) {
+        verified.boot_id[index] = static_cast<std::byte>(0xa0 + index);
+    }
+    verified.detail = "UWF protects this session";
+    assert(registry.set_uwf_fleet_status(registry_id, verified));
+    assert(registry.snapshot()[0].uwf.proves_current_protection());
     assert(control_plane.start_exam(registry_id, exam_start, &error));
     const auto exam_start_command = channel.receive(&error);
     assert(exam_start_command.has_value());

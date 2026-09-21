@@ -1,5 +1,6 @@
 #include "nstu/control_plane.hpp"
 
+#include "nstu/audit.hpp"
 #include "nstu/control_channel.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/discovery.hpp"
@@ -203,6 +204,18 @@ public:
             config_ = {};
             return false;
         }
+        if (!config_.exam_journal_path.empty()) {
+            // Central audit sink lives beside the server-owned journal, never
+            // under any client freeze/UWF overlay. A sink that cannot open is
+            // non-fatal: the server still runs and still acknowledges uploads,
+            // it simply cannot persist them centrally until this is resolved.
+            std::string audit_error;
+            if (!audit_sink_.open(
+                    config_.exam_journal_path.parent_path() / "audit",
+                    &audit_error)) {
+                OutputDebugStringA("NSTU audit sink could not be opened\n");
+            }
+        }
         if (keyring_file_exists(config_.keyring_path) &&
             !security::load_keyring(key_store_, config_.keyring_path,
                                     config_.keyring_entropy, error)) {
@@ -352,6 +365,54 @@ public:
             set_error(error, "client is not authenticated");
             return false;
         }
+        // Exam authorization gate. This is server-side and fails closed: the
+        // client never sends a "protected" flag, and nothing about protection
+        // rides in ExamStartRequest. Only a fresh, boot-bound probe recorded in
+        // the registry can open it.
+        const auto registry_snapshot = registry_.snapshot();
+        const auto client_record = std::find_if(
+            registry_snapshot.begin(), registry_snapshot.end(),
+            [client_id](const ClientRecord& client) {
+                return client.id == client_id;
+            });
+        const bool protection_proven =
+            client_record != registry_snapshot.end() &&
+            client_record->uwf.proves_current_protection();
+#if NSTU_DEV_UNPROTECTED_EXAM
+        if (!protection_proven) {
+            // DEV (UNPROTECTED) build only. This is the single readiness gate
+            // the DEV channel bypasses; authentication, pairing, package digest
+            // validation and answer durability are untouched. The bypass is
+            // compile-time and cannot be toggled at runtime. Every bypassed
+            // start is audited at severity=warning.
+            audit::Event bypass;
+            bypass.category = audit::Category::exam;
+            bypass.severity = audit::Severity::warning;
+            bypass.component = "exam_gate";
+            bypass.action = "start_bypassed_dev";
+            bypass.result = "unprotected";
+            bypass.client_id = client_id;
+            bypass.detail =
+                "DEV build started exam without proven UWF protection";
+            audit_emit(bypass);
+        }
+#else
+        if (!protection_proven) {
+            audit::Event blocked;
+            blocked.category = audit::Category::exam;
+            blocked.severity = audit::Severity::warning;
+            blocked.component = "exam_gate";
+            blocked.action = "start_blocked";
+            blocked.result = "unprotected";
+            blocked.client_id = client_id;
+            blocked.detail = "exam blocked: no current-session UWF protection";
+            audit_emit(blocked);
+            set_error(error,
+                      "exam blocked: this client has not proven current-session "
+                      "UWF protection");
+            return false;
+        }
+#endif
         const auto payload = exam::encode_exam_start_request(request);
         if (payload.empty()) {
             set_error(error, "exam start request could not be encoded");
@@ -393,6 +454,16 @@ public:
             active_exam_contexts_.erase(inserted_context);
             return false;
         }
+        audit::Event started;
+        started.category = audit::Category::exam;
+        started.severity =
+            protection_proven ? audit::Severity::info : audit::Severity::warning;
+        started.component = "exam_gate";
+        started.action = "start";
+        started.result = protection_proven ? "protected" : "unprotected_dev";
+        started.client_id = registry_id;
+        started.detail = "exam session started";
+        audit_emit(started);
         return true;
     }
 
@@ -419,6 +490,56 @@ public:
         std::scoped_lock context_lock(exam_contexts_mutex_);
         active_exam_contexts_.erase(state->registry_id.load());
         return true;
+    }
+
+    // Writes one server-originated audit record. Best effort: a closed or
+    // failing sink never disturbs the operation being audited.
+    void audit_emit(audit::Event event) {
+        if (!audit_sink_.is_open()) {
+            return;
+        }
+        audit::Record record;
+        record.sequence = next_audit_sequence_.fetch_add(1);
+        record.timestamp_unix_milliseconds = unix_milliseconds_now();
+        record.event = std::move(event);
+        (void)audit_sink_.write(record);
+    }
+
+    bool configure_uwf_fleet(std::uint64_t client_id,
+                             bool checkpoint_acknowledged,
+                             bool restart_requested, std::string* error) {
+        // Record the operation before sending it. begin_uwf_fleet_operation
+        // pins the boot identity the request is issued against, which is what a
+        // later "protected" report is checked against.
+        const auto operation_id = next_uwf_operation_id_.fetch_add(1);
+        if (!registry_.begin_uwf_fleet_operation(client_id, operation_id,
+                                                 restart_requested)) {
+            set_error(error, "client is not known to the registry");
+            return false;
+        }
+        control::UwfFleetConfigureRequest request;
+        request.operation_id = operation_id;
+        request.checkpoint_acknowledged = checkpoint_acknowledged;
+        request.restart_requested = restart_requested;
+        const auto payload =
+            control::encode_uwf_fleet_configure_request(request);
+        if (payload.empty()) {
+            set_error(error, "fleet UWF request could not be encoded");
+            return false;
+        }
+        const bool sent =
+            send_command(client_id, protocol::CommandType::uwf_fleet_configure,
+                         payload, error);
+        audit::Event event;
+        event.category = audit::Category::uwf;
+        event.severity = sent ? audit::Severity::info : audit::Severity::error;
+        event.component = "uwf_fleet";
+        event.action = restart_requested ? "arm_and_restart" : "arm";
+        event.result = sent ? "sent" : "send_failed";
+        event.operation_id = operation_id;
+        event.client_id = client_id;
+        audit_emit(event);
+        return sent;
     }
 
     bool broadcast_command(protocol::CommandType type,
@@ -1221,6 +1342,10 @@ private:
         record.status = ClientStatus::online;
         record.last_seen = std::chrono::steady_clock::now();
         registry_.upsert(std::move(record));
+        // Current-session protection proof belongs to the connection that
+        // produced it. Reconnect first retires it; the client then sends a fresh
+        // boot-bound probe report.
+        (void)registry_.demote_uwf_verification(registry_id);
         dispatcher_.record_handshake_success(state.connection_id);
         if (previous_connection != 0 &&
             previous_connection != state.connection_id) {
@@ -1253,6 +1378,46 @@ private:
                 control::decode_uwf_configure_report(command->payload);
             if (!report || !registry_.set_uwf_report(
                                state.registry_id.load(), *report)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
+        if (command->envelope.type ==
+            protocol::CommandType::uwf_fleet_status) {
+            const auto report =
+                control::decode_uwf_fleet_status_report(command->payload);
+            if (!report || !registry_.set_uwf_fleet_status(
+                               state.registry_id.load(), *report)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
+        if (command->envelope.type == protocol::CommandType::audit_upload) {
+            // process_authenticated runs with state.mutex already held (see
+            // on_bytes), so the reply goes out through send_authenticated_locked
+            // without taking the lock again.
+            const auto records = audit::decode_audit_chunk(command->payload);
+            if (!records) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            const auto registry_id = state.registry_id.load();
+            std::uint64_t last_accepted = 0;
+            if (audit_rate_limiter_.allow(registry_id,
+                                          unix_milliseconds_now())) {
+                for (const auto& record : *records) {
+                    (void)audit_sink_.write(record);
+                    last_accepted = std::max(last_accepted, record.sequence);
+                }
+            }
+            // A throttled chunk is acknowledged with 0 so the client keeps its
+            // records and retries later rather than dropping them.
+            const auto ack = audit::encode_audit_ack(last_accepted);
+            if (!send_authenticated_locked(
+                    state, protocol::CommandType::audit_ack,
+                    command->envelope.request_id, ack, nullptr)) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
             }
@@ -1407,6 +1572,7 @@ private:
         if (registry_id != 0) {
             (void)registry_.set_status(registry_id,
                                        ClientStatus::offline);
+            (void)registry_.demote_uwf_verification(registry_id);
         }
         drop_pending_pairings_for(id);
     }
@@ -1418,6 +1584,11 @@ public:
     // This journal is server-owned and intentionally never placed under a
     // client freeze/UWF overlay. It remains authoritative across reconnects.
     exam::AnswerJournal exam_journal_;
+    // Central audit sink. Distinct from the answer journal and from telemetry:
+    // it records that NSTU activity happened, never exam or answer content.
+    audit::Sink audit_sink_;
+    audit::UploadRateLimiter audit_rate_limiter_;
+    std::atomic<std::uint64_t> next_audit_sequence_ = 1;
     discovery::AuthenticatedDiscoveryResponder discovery_responder_;
     net::IocpDispatcher dispatcher_;
     security::ReplayProtector replay_protector_;
@@ -1435,6 +1606,10 @@ public:
     std::unordered_map<std::uint64_t, ActiveExamContext>
         active_exam_contexts_;
     std::atomic<std::uint64_t> next_request_id_ = 1;
+    // Fleet operation ids must be non-zero, so this counter starts at 1 and only
+    // ever increases. Every fleet status report is matched back to an operation
+    // by this id.
+    std::atomic<std::uint64_t> next_uwf_operation_id_ = 1;
 };
 
 ServerControlPlane::ServerControlPlane(ClientRegistry& registry,
@@ -1505,6 +1680,13 @@ bool ServerControlPlane::configure_uwf(
         control::encode_uwf_configure_request(checkpoint_acknowledged);
     return send_command(client_id, protocol::CommandType::uwf_configure,
                         payload, error);
+}
+
+bool ServerControlPlane::configure_uwf_fleet(
+    std::uint64_t client_id, bool checkpoint_acknowledged,
+    bool restart_requested, std::string* error) {
+    return impl_->configure_uwf_fleet(client_id, checkpoint_acknowledged,
+                                      restart_requested, error);
 }
 
 bool ServerControlPlane::set_streaming(std::uint64_t client_id, bool enabled,

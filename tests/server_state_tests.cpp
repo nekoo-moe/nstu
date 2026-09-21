@@ -4,6 +4,26 @@
 #include <cassert>
 #include <chrono>
 
+namespace {
+
+nstu::control::BootId boot_id(unsigned char seed) {
+    nstu::control::BootId id{};
+    for (std::size_t index = 0; index < id.size(); ++index) {
+        id[index] = static_cast<std::byte>(seed + index);
+    }
+    return id;
+}
+
+nstu::control::UwfProtectionProbe protected_probe() {
+    nstu::control::UwfProtectionProbe probe;
+    probe.probe_succeeded = true;
+    probe.filter_current_enabled = true;
+    probe.system_volume_current_protected = true;
+    return probe;
+}
+
+} // namespace
+
 int main() {
     using namespace std::chrono_literals;
     nstu::server::ClientRegistry registry;
@@ -15,7 +35,6 @@ int main() {
         .hostname = "LAB-PC-01",
         .address = "192.168.1.101",
         .status = nstu::server::ClientStatus::online,
-        .uwf_detail = {},
         .snapshot_jpeg = {},
         .last_seen = now,
     });
@@ -29,7 +48,6 @@ int main() {
         .hostname = "LAB-PC-01",
         .address = "192.168.1.101",
         .status = nstu::server::ClientStatus::online,
-        .uwf_detail = {},
         .snapshot_jpeg = {},
         .last_seen = now,
     });
@@ -45,9 +63,75 @@ int main() {
         .detail = "UWF is armed",
     };
     assert(registry.set_uwf_report(1, uwf_report));
-    assert(registry.snapshot()[0].uwf_reported);
-    assert(registry.snapshot()[0].uwf_reboot_required);
+    auto uwf_state = registry.snapshot()[0].uwf;
+    assert(uwf_state.reported);
+    assert(uwf_state.phase ==
+           nstu::control::UwfFleetPhase::awaiting_restart);
+    assert(!uwf_state.proves_current_protection());
     assert(!registry.set_uwf_report(99, uwf_report));
+
+    // A fleet proof is bound to operation and boot identity. A stale operation
+    // is ignored, and a claim from the configure boot is refused once this
+    // operation has entered a restart-only phase.
+    const auto configure_boot = boot_id(0x10);
+    nstu::control::UwfFleetStatusReport initial_state;
+    initial_state.boot_id = configure_boot;
+    initial_state.phase = nstu::control::UwfFleetPhase::idle;
+    initial_state.detail = "UWF is disabled";
+    assert(registry.set_uwf_fleet_status(1, initial_state));
+    assert(registry.begin_uwf_fleet_operation(1, 41, true));
+    assert(!registry.begin_uwf_fleet_operation(1, 0, true));
+    assert(!registry.begin_uwf_fleet_operation(99, 41, true));
+
+    nstu::control::UwfFleetStatusReport restarting;
+    restarting.operation_id = 41;
+    restarting.boot_id = configure_boot;
+    restarting.phase = nstu::control::UwfFleetPhase::restarting;
+    restarting.detail = "restarting";
+    assert(registry.set_uwf_fleet_status(1, restarting));
+
+    auto same_boot_claim = restarting;
+    same_boot_claim.phase =
+        nstu::control::UwfFleetPhase::verified_protected;
+    same_boot_claim.probe = protected_probe();
+    same_boot_claim.detail = "protected";
+    assert(registry.set_uwf_fleet_status(1, same_boot_claim));
+    uwf_state = registry.snapshot()[0].uwf;
+    assert(uwf_state.phase == nstu::control::UwfFleetPhase::verifying);
+    assert(!uwf_state.proves_current_protection());
+
+    auto stale_claim = same_boot_claim;
+    stale_claim.operation_id = 40;
+    stale_claim.boot_id = boot_id(0x20);
+    assert(registry.set_uwf_fleet_status(1, stale_claim));
+    uwf_state = registry.snapshot()[0].uwf;
+    assert(uwf_state.operation_id == 41);
+    assert(uwf_state.observed_boot_id == configure_boot);
+
+    auto verified = same_boot_claim;
+    verified.boot_id = boot_id(0x20);
+    assert(registry.set_uwf_fleet_status(1, verified));
+    uwf_state = registry.snapshot()[0].uwf;
+    assert(uwf_state.operation_id == 41);
+    assert(uwf_state.proves_current_protection());
+    assert(uwf_state.verified_boot_id == verified.boot_id);
+
+    // Periodic status upserts preserve live state. Connection boundaries retire
+    // proof and require a fresh probe from the current session.
+    registry.upsert({
+        .id = 1,
+        .hostname = "LAB-PC-01",
+        .address = "192.168.1.101",
+        .status = nstu::server::ClientStatus::online,
+        .snapshot_jpeg = {},
+        .last_seen = now,
+    });
+    assert(registry.snapshot()[0].uwf.proves_current_protection());
+    assert(registry.demote_uwf_verification(1));
+    uwf_state = registry.snapshot()[0].uwf;
+    assert(uwf_state.phase == nstu::control::UwfFleetPhase::verifying);
+    assert(!uwf_state.proves_current_protection());
+    assert(!registry.demote_uwf_verification(1));
 
     nstu::control::SnapshotFrame frame;
     frame.width = 320;

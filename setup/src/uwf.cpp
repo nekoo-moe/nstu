@@ -580,4 +580,131 @@ UwfConfigureResult configure_uwf(const UwfConfigureRequest& request) {
     return result;
 }
 
+namespace {
+
+// The probe validates the drive-letter shape only.  Unlike volume_exclusion it
+// does not require the directory to exist: a machine can be genuinely
+// protected while its data root is momentarily absent, and reporting that as
+// "unknown" would stall the whole fleet for no security benefit.
+std::optional<std::wstring> probe_drive_letter(
+    const std::filesystem::path& data_root) {
+    if (!data_root.is_absolute() || !data_root.has_root_name()) {
+        return std::nullopt;
+    }
+    const auto drive = data_root.root_name().wstring();
+    if (drive.size() != 2 || drive[1] != L':' ||
+        !((drive[0] >= L'A' && drive[0] <= L'Z') ||
+          (drive[0] >= L'a' && drive[0] <= L'z'))) {
+        return std::nullopt;
+    }
+    return drive;
+}
+
+} // namespace
+
+UwfProtectionProbeResult probe_uwf_protection(
+    const std::filesystem::path& data_root) {
+    UwfProtectionProbeResult result;
+
+    ComApartment apartment;
+    if (!apartment.ready()) {
+        result.detail = "COM could not be initialized for the UWF probe";
+        return result;
+    }
+
+    const auto product = product_type();
+    if (product == 0) {
+        result.detail = "the Windows edition could not be determined";
+        return result;
+    }
+    result.supported_product = is_uwf_supported_product(product);
+    if (!result.supported_product) {
+        // A definite answer rather than a failure: this edition cannot run UWF
+        // at all, so it is certainly not protected.
+        result.probe_succeeded = true;
+        result.detail = "this Windows edition does not support UWF";
+        return result;
+    }
+
+    bool feature_known = false;
+    bool feature_enabled = false;
+    if (!feature_state(feature_known, feature_enabled) || !feature_known) {
+        result.detail = "the UWF optional feature state was unreadable";
+        return result;
+    }
+    if (!feature_enabled) {
+        result.probe_succeeded = true;
+        result.detail = "the UWF optional feature is not installed";
+        return result;
+    }
+
+    // WmiWriter is reused for its connection and query plumbing.  Nothing
+    // below mutates: only ExecQuery and the provider's FindExclusion lookups.
+    WmiWriter provider;
+    ComPtr<IWbemClassObject> filter;
+    if (!provider.connect() ||
+        !provider.query_one(
+            L"SELECT CurrentEnabled, NextEnabled FROM UWF_Filter", filter) ||
+        !variant_bool(filter.Get(), L"CurrentEnabled",
+                      result.filter_current_enabled) ||
+        !variant_bool(filter.Get(), L"NextEnabled",
+                      result.filter_next_enabled)) {
+        result.detail = "the UWF filter state was unreadable";
+        return result;
+    }
+
+    // Past this point the probe has reached the provider and has an answer.
+    // Anything it then fails to read about the volume or the exclusions is
+    // reported as unprotected rather than unknown, because an unreadable
+    // volume must not be able to authorize an exam.
+    result.probe_succeeded = true;
+
+    const auto drive = probe_drive_letter(data_root);
+    if (!drive) {
+        result.detail = "the NSTU data root is not on a local drive letter";
+        return result;
+    }
+
+    // CurrentSession=TRUE is the entire point of this query.  The FALSE rows
+    // describe what the next boot is configured to do and prove nothing about
+    // the session running now.
+    const std::wstring volume_query =
+        L"SELECT * FROM UWF_Volume WHERE CurrentSession=TRUE AND "
+        L"DriveLetter='" + *drive + L"'";
+    ComPtr<IWbemClassObject> volume;
+    if (!provider.query_one(volume_query.c_str(), volume) ||
+        !variant_bool(volume.Get(), L"Protected",
+                      result.system_volume_current_protected)) {
+        result.system_volume_current_protected = false;
+        result.detail =
+            "the current-session volume protection state was unreadable";
+        return result;
+    }
+
+    // Exclusions are reported for the operator's benefit.  A missing exclusion
+    // is a configuration warning, not a protection failure, so a failed lookup
+    // here leaves the flag false and does not disturb the verdict above.
+    if (const auto exclusion = volume_exclusion(data_root); exclusion) {
+        (void)provider.contains(volume.Get(), L"FileName", *exclusion,
+                                result.data_exclusion_present);
+    }
+    ComPtr<IWbemClassObject> registry_filter;
+    if (provider.query_one(L"SELECT * FROM UWF_RegistryFilter WHERE "
+                           L"CurrentSession=TRUE",
+                           registry_filter)) {
+        (void)provider.contains(registry_filter.Get(), L"RegistryKey",
+                                kNstuRegistryExclusion,
+                                result.registry_exclusion_present);
+    }
+
+    if (!result.system_volume_current_protected) {
+        result.detail = "the NSTU volume is not protected in this session";
+    } else if (!result.filter_current_enabled) {
+        result.detail = "the volume is marked protected but UWF is disabled";
+    } else {
+        result.detail = "UWF is protecting the NSTU volume in this session";
+    }
+    return result;
+}
+
 } // namespace nstu::setup

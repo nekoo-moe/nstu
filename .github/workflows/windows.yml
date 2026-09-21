@@ -103,6 +103,38 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  dev-unprotected-build:
+    name: DEV unprotected installer
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install NSIS
+        run: choco install nsis --no-progress --yes --force
+      - name: Configure DEV unprotected build
+        run: >-
+          cmake -S . -B build-dev -A x64
+          -DNSTU_ENABLE_WERROR=ON
+          -DNSTU_DEV_UNPROTECTED_BUILD=ON
+      - name: Build DEV binaries
+        run: cmake --build build-dev --config Release --parallel
+      - name: Test DEV binaries
+        run: ctest --test-dir build-dev -C Release --output-on-failure
+      - name: Package DEV unprotected installer
+        run: cmake --build build-dev --config Release --target nstu-package --parallel
+      - name: Verify DEV label and channel
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem build-dev -Filter '*-dev-unprotected-setup.exe' -File
+          if ($null -eq $installer) { throw 'DEV installer was not produced.' }
+          if ($installer.Name -notmatch 'dev-unprotected') { throw 'DEV installer label is missing.' }
+      - name: Upload DEV unprotected installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: nstu-dev-unprotected-installer
+          path: build-dev/nstu-*-dev-unprotected-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: Development release
     needs: build-test
