@@ -1,12 +1,15 @@
 # Thiết kế khôi phục trạng thái sau khi khởi động lại của NSTU
 
-Trạng thái: **kiến trúc và kế hoạch an toàn, cùng diagnostics UWF chỉ đọc đã
-được triển khai. NSTU hiện chưa cung cấp khôi phục sau reboot và chưa thể thay
-thế Deep Freeze.** Probe phía client có thể đọc trạng thái UWF hiện tại/kế tiếp,
-volume được bảo vệ, số lượng exclusion, cấu hình/mức sử dụng overlay và sức khỏe
-event gần đây, nhưng chưa có code bật, tắt, cấu hình write filter, bảo vệ volume
-hoặc mutation UWF. Target server coi UWF là không áp dụng và vẫn dùng storage
-persistent.
+Trạng thái: **đã triển khai điều phối khôi phục sau reboot theo cả fleet, kèm
+probe xác minh chỉ đọc và một cổng cấp phép thi phía server.** Server có thể yêu
+cầu các client đang kết nối bật (arm) UWF cho lần khởi động kế tiếp rồi khởi động
+lại, và client báo tiến trình qua một state machine nhỏ. Sau khi khởi động lại,
+client chạy một probe chỉ đọc để đọc trạng thái UWF hiện tại/kế tiếp, volume được
+bảo vệ và số lượng exclusion, rồi báo máy có được bảo vệ *ngay trong phiên đang
+chạy* hay không. Chỉ bằng chứng mới, gắn với danh tính boot đó mới cho phép chế
+độ Thi. Windows vẫn sở hữu write filtering ở kernel; NSTU sở hữu policy,
+diagnostics, điều phối có xác thực, xác minh và hướng dẫn phục hồi. Target server
+coi UWF là không áp dụng và vẫn dùng storage persistent.
 
 Đây là tài liệu nguồn chuẩn trong repository cho trang GitHub Wiki tương lai.
 Tài liệu xác định kế hoạch thận trọng để quản lý tập trung máy phòng học.
@@ -515,3 +518,105 @@ kiểm toán được qua mọi tình huống lỗi.
 > Các nguồn được xem lại ngày 2026-09-09. Tài liệu Microsoft là nguồn quyết định
 > về hỗ trợ nền tảng và có thể thay đổi; phải kiểm tra lại trước mỗi production
 > release.
+
+## Điều phối fleet, xác minh và cổng thi
+
+Giáo viên kết nối mọi máy tới server, rồi kích hoạt thao tác khôi phục sau reboot
+theo cả fleet ("freeze"). "Freeze" ở đây nghĩa là bật và bảo vệ UWF cho lần khởi
+động kế tiếp; đây không phải chế độ Managed của dịch vụ NSTU, vốn là một tính
+năng riêng.
+
+Mỗi client mục tiêu đi qua một chuỗi trạng thái rõ ràng mà server quan sát được:
+`idle -> requested -> configuring -> awaiting_restart -> restarting -> verifying
+-> verified_protected`, hoặc `failed` / `unsupported`. Server phát một
+operation id khác 0 kèm yêu cầu và khớp mọi báo cáo trạng thái sau đó về đúng
+operation đó.
+
+### Danh tính boot là thứ khiến bằng chứng trở nên thật
+
+Báo cáo cấu hình được tạo *trước* khi khởi động lại, nên nhiều nhất nó chỉ nói
+UWF đã được arm. Không thể khẳng định bảo vệ cho phiên hiện tại nếu không biết
+một lần khởi động lại đã thực sự xảy ra. Dịch vụ client sinh một boot id ngẫu
+nhiên 128-bit khi khởi động, chỉ giữ trong bộ nhớ. Nó tất yếu đổi qua mỗi lần
+khởi động lại, không cần lưu trữ, và không tin vào đồng hồ của client. Sau khi
+khởi động lại, client chạy probe chỉ đọc và gửi báo cáo mang boot id mới. Server
+chỉ chấp nhận `verified_protected` khi chính probe trong báo cáo chứng minh được
+bảo vệ ở phiên hiện tại, và với một operation có yêu cầu khởi động lại, chỉ khi
+boot id khác với boot id lúc phát yêu cầu. Máy vốn đã được bảo vệ khi yêu cầu tới
+sẽ xác minh ngay trên cùng boot đó - điều này là đúng, không phải đáng ngờ.
+
+Một bằng chứng đã xác minh thuộc về đúng phiên tạo ra nó. Server thu hồi nó (hạ
+client về `verifying`) mỗi khi kết nối được thiết lập, thay thế, mất, hoặc client
+bị hết hạn vì im lặng, và client sẽ probe lại. Bằng chứng cũ hết hiệu lực theo
+thiết kế chứ không theo quy ước.
+
+### Cổng thi
+
+Chế độ Thi chỉ được cấp phép khi server đang giữ bằng chứng bảo vệ hiện tại, gắn
+với boot, cho client đó. Cổng nằm phía server và mặc định đóng: client không bao
+giờ gửi cờ "đã bảo vệ", và không có gì về bảo vệ nằm trong yêu cầu bắt đầu thi.
+
+### Kênh DEV (KHÔNG BẢO VỆ)
+
+Có một bản dựng công khai, gắn nhãn rõ ràng `NSTU DEV (UNPROTECTED)`
+(`-DNSTU_DEV_UNPROTECTED_BUILD=ON`, kênh `DevUnprotected`) để thử tính năng mà
+không cần vào trạng thái được bảo vệ. Nó chỉ bỏ qua **duy nhất** cổng sẵn sàng
+UWF/thi - không bao giờ bỏ qua xác thực, pairing, kiểm tra digest gói, hay tính
+bền vững của câu trả lời. Việc bỏ qua là ở thời điểm biên dịch
+(`#if NSTU_DEV_UNPROTECTED_EXAM`) và không thể bật/tắt lúc chạy. Mỗi lần bắt đầu
+thi bị bỏ qua đều phát một sự kiện audit `severity=warning`, giao diện server có
+banner cố định, và installer hiển thị trang cảnh báo. Nó loại trừ lẫn nhau với
+bản thử VM nội bộ.
+
+### Audit
+
+Toàn bộ hoạt động NSTU, gồm cả hoạt động phía client, được ghi thành các sự kiện
+audit có giới hạn và đã làm sạch (xem [ghi chú audit trong TELEMETRY.vi.md](TELEMETRY.vi.md))
+và tải lên server để lưu trữ tập trung. Bản ghi audit chỉ nói rằng một sự kiện đã
+xảy ra - không bao giờ chứa câu hỏi thi, câu trả lời, hay bất kỳ payload nào.
+
+## Checklist xác minh
+
+Checklist cho người vận hành, chạy trước khi cấp phép thi:
+
+- [ ] Mọi máy mục tiêu hiển thị Online trên server.
+- [ ] Đã kích hoạt thao tác khôi phục sau reboot ("freeze") và mỗi client đã đi
+      qua Configuring, rồi Awaiting restart / Restarting.
+- [ ] Các máy liên quan đã khởi động lại (có đếm ngược 60 giây hiển thị trên mỗi
+      client).
+- [ ] Sau khi khởi động lại, mỗi client đã kết nối lại và đạt Protected, được xác
+      minh trong phiên hiện tại. Máy vốn đã được bảo vệ sẽ xác minh ngay.
+- [ ] Chế độ Thi bị từ chối với client chưa hiển thị Protected, và được phép ngay
+      khi đã Protected.
+- [ ] Windows edition không được hỗ trợ báo Unsupported thay vì báo thành công
+      giả.
+
+Checklist DEV (KHÔNG BẢO VỆ):
+
+- [ ] Giao diện server hiển thị banner DEV cố định và installer đã hiện trang cảnh
+      báo.
+- [ ] Chế độ Thi khởi động không cần bảo vệ, và mỗi lần khởi động tạo một sự kiện
+      audit `severity=warning`.
+- [ ] Bản dựng này không bao giờ được triển khai lên máy thi thật hay máy
+      production.
+
+Checklist audit:
+
+- [ ] Hoạt động của client xuất hiện trong log audit tập trung trên server.
+- [ ] Không có câu hỏi thi, nội dung câu trả lời, thông tin đăng nhập, bí mật,
+      khóa, mã SAS, token, đường dẫn thô, hay định danh mạng thô nào xuất hiện
+      trong bất kỳ bản ghi nào.
+
+Hướng dẫn kiểm thử cho lập trình viên:
+
+- Cấu hình và build bằng MinGW UCRT64:
+  `cmake -S . -B build/mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Debug`
+  rồi `cmake --build build/mingw` (đưa bin UCRT64 vào PATH).
+- Chạy toàn bộ test với `ctest --test-dir build/mingw`.
+- Các test cần kiểm tra: `nstu.uwf_fleet_codec` (codec wire và từ chối payload
+  hỏng), `nstu.server_state` (state fleet, bằng chứng gắn boot, hạ cấp khi kết
+  nối lại), `nstu.control_plane` và `nstu.control_plane_exam_auth` (cổng thi mặc
+  định đóng, rồi mở khi đã chứng minh bảo vệ), `nstu.audit` (làm sạch, xoay vòng
+  file, giới hạn spool, hạn mức tải lên).
+- Build kênh DEV với `-DNSTU_DEV_UNPROTECTED_BUILD=ON` và xác nhận nó biên dịch
+  phần bỏ qua; bản Release phải không biên dịch phần đó.

@@ -92,3 +92,21 @@ GitHub Issues là công khai. Trước khi gửi:
 Không dùng biểu mẫu chẩn đoán công khai cho lỗ hổng bảo mật hoặc báo cáo chứa dữ
 liệu nhạy cảm. Hãy dùng kênh liên hệ riêng với maintainer hoặc GitHub private
 vulnerability reporting khi có; xem [SECURITY.md](SECURITY.md).
+
+## Log audit hoạt động (khác với telemetry)
+
+NSTU cũng giữ một **log audit hoạt động** vận hành, không giống chẩn đoán công
+khai tùy chọn ở trên và cũng không giống answer journal của bài thi. Log audit
+ghi lại rằng hoạt động NSTU đã xảy ra - enrollment, thay đổi chế độ Managed, thao
+tác UWF theo fleet, cấp phép thi, sự kiện phiên và bảo mật - kèm category,
+severity, component, action, result và detail đã được làm sạch và giới hạn. Nó
+không bao giờ ghi câu hỏi thi, nội dung câu trả lời, ảnh chụp màn hình, nội dung
+chat hay remote-input, thông tin đăng nhập, bí mật, khóa, mã SAS, token, đường
+dẫn thô, hay định danh mạng thô: mọi trường đều đi qua cùng bộ làm sạch văn bản
+công khai cộng với một danh sách chặn cứng trước khi được ghi hoặc gửi.
+
+Hoạt động của client được đưa vào một hàng đợi có giới hạn, bỏ phần tử cũ nhất khi
+đầy, và tải lên server theo từng khối nhỏ, có giới hạn tốc độ và được xác nhận
+theo sequence. Server lưu trữ bản ghi tập trung vào một sink phân tách theo dòng,
+có xoay vòng file. Đây là việc ghi nhận vận hành luôn bật, tách biệt với chẩn
+đoán cần đồng ý ở trên.

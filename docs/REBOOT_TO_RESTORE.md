@@ -586,3 +586,47 @@ All NSTU activity, including client-side activity, is recorded as bounded,
 sanitized audit events (see [the audit note in TELEMETRY.md](TELEMETRY.md)) and
 uploaded to the server for central persistence. Audit records say that an event
 happened - never exam questions, answers, or any payload.
+
+## Verification checklist
+
+Operator checklist, run before authorizing an exam:
+
+- [ ] Every target machine shows Online on the server.
+- [ ] The fleet reboot-to-restore ("freeze") action was triggered and each client
+      moved through Configuring, then Awaiting restart / Restarting.
+- [ ] The affected machines restarted (a visible 60-second countdown on each
+      client).
+- [ ] After the restart each client reconnected and reached Protected, verified
+      in the current session. A machine already protected verifies immediately.
+- [ ] Exam mode is refused for any client not showing Protected, and permitted
+      once it is.
+- [ ] An unsupported Windows edition reports Unsupported rather than a false
+      success.
+
+DEV (UNPROTECTED) checklist:
+
+- [ ] The server UI shows the permanent DEV banner and the installer showed its
+      warning page.
+- [ ] Exam mode starts without protection, and every start produced a
+      severity=warning audit event.
+- [ ] This build is never deployed to a real exam or production machine.
+
+Audit checklist:
+
+- [ ] Client activity appears in the central audit log on the server.
+- [ ] No exam question, answer body, credential, secret, key, SAS code, token,
+      raw path, or raw network identifier appears in any record.
+
+Developer test guidelines:
+
+- Configure and build with MinGW UCRT64:
+  `cmake -S . -B build/mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Debug`
+  then `cmake --build build/mingw` (put the UCRT64 bin on PATH).
+- Run the whole suite with `ctest --test-dir build/mingw`.
+- Feature tests to check: `nstu.uwf_fleet_codec` (wire codecs and malformed
+  rejection), `nstu.server_state` (fleet state, boot-bound proof, reconnect
+  demotion), `nstu.control_plane` and `nstu.control_plane_exam_auth` (exam gate
+  fails closed, then opens once protection is proven), `nstu.audit` (redaction,
+  rotation, spool bounds, upload quota).
+- Build the DEV channel with `-DNSTU_DEV_UNPROTECTED_BUILD=ON` and confirm it
+  compiles the bypass; a Release build must not compile it at all.

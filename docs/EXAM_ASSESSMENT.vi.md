@@ -326,3 +326,17 @@ và audit vẫn là security blocker trước production.
 Manifest mẫu nằm tại `exam/examples/ielts-sample.json`. Giao diện này chỉ là
 lớp tương tác; quy tắc chấm điểm, công cụ soạn đề của giáo viên, điều khiển
 giám thị và bước hoàn tất ở phía server vẫn là các mốc riêng trong roadmap.
+
+## Cổng bảo vệ khôi phục sau reboot
+
+Chế độ Thi chỉ được server cấp phép khi client mục tiêu đã chứng minh được bảo vệ
+UWF (khôi phục sau reboot) ở phiên hiện tại. Cổng nằm phía server và mặc định
+đóng: client không bao giờ khẳng định cờ bảo vệ, và không có gì về bảo vệ nằm
+trong yêu cầu bắt đầu thi. Xem [REBOOT_TO_RESTORE.vi.md](REBOOT_TO_RESTORE.vi.md)
+để biết cách thiết lập bằng chứng gắn với boot và vì sao kết nối lại sẽ thu hồi
+nó.
+
+Bản dựng công khai `NSTU DEV (UNPROTECTED)` chỉ bỏ qua duy nhất cổng này để thử
+nghiệm và không bỏ qua gì khác; mỗi lần bắt đầu bị bỏ qua đều được audit ở
+`severity=warning` và bản dựng được gắn nhãn rõ ràng trong giao diện lẫn
+installer. Bản Release không thể bắt đầu thi trên client chưa được bảo vệ.
