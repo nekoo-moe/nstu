@@ -96,3 +96,21 @@ Security vulnerabilities or reports containing sensitive data must not be filed
 through the public diagnostic template. Use a private maintainer channel or
 GitHub private vulnerability reporting when available; see
 [SECURITY.md](SECURITY.md).
+
+## Activity audit log (distinct from telemetry)
+
+NSTU also keeps an operational **activity audit log**, which is not the same as
+the opt-in public diagnostics described above and not the same as the exam
+answer journal. The audit log records that NSTU activity happened - enrollment,
+managed-mode changes, UWF fleet operations, exam authorization, session and
+security events - with a category, severity, component, action, result, and
+bounded sanitized detail. It never records exam questions, answer bodies,
+screenshots, chat or remote-input contents, credentials, secrets, keys, SAS
+codes, tokens, raw file paths, or raw network identifiers: every field is passed
+through the same public-text sanitizer plus a hard denylist before it is written
+or sent.
+
+Client activity is spooled with a bounded, drop-oldest queue and uploaded to the
+server in small, rate-limited, sequence-acknowledged chunks. The server persists
+records centrally to a rotating newline-delimited sink. This is always-on
+operational record keeping, separate from the consent-gated diagnostics above.

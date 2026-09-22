@@ -33,7 +33,7 @@ Both nonces are 256-bit values generated with Windows CNG. Client and server
 proofs use different domain labels. The session key is also derived under a
 separate label, preventing the same HMAC input from being reused across roles.
 
-The server must verify the client MAC before inserting the hello into
+The server must verify the client's HMAC proof before inserting the hello into
 `ReplayProtector`. Replay insertion is atomic and bounded. Capacity must be
 sized for the maximum accepted handshake rate over the clock-skew interval, and
 the TCP listener must separately rate-limit unauthenticated connections.
@@ -78,14 +78,66 @@ copies. `save_keyring` and `load_keyring` serialize active entries and revoked-I
 tombstones into a versioned binary format protected with machine-scope DPAPI,
 restrictive ACLs, flush, and atomic replacement.
 
-Initial enrollment uses a one-time 256-bit bootstrap secret. The client sends a
-fresh nonce, timestamp, identity, requested key ID, and HMAC. Both peers derive
-the installed PSK from the bootstrap secret and transcript, so the PSK itself is
-not transmitted. The server applies clock and replay checks before enrollment,
-persists the keyring before acknowledging, and rolls back the in-memory change
-if persistence fails. `nstu-provision.exe` stores the resulting client runtime
-configuration under machine-scope DPAPI. The bootstrap export must be distributed
-out of band and deleted after enrollment.
+Initial enrollment is normally done by on-screen pairing, which needs no
+pre-shared bootstrap secret. The unenrolled client runs the mutually
+authenticated exchange itself and displays a six-digit short authentication
+string; the server operator approves the request only when the code shown on the
+client matches the one in the server's pending list. That out-of-band six-digit
+comparison is the trust root — a channel an attacker cannot forge without being
+physically present at both screens. On approval the server mints a fresh key,
+derives the installed PSK from the transcript (the PSK is never transmitted),
+applies clock and replay checks, persists the keyring before acknowledging, and
+rolls back the in-memory change if persistence fails. An optional operator-set
+room name is carried on the pairing beacon purely as a routing hint so a client
+targets the right classroom; it is never a credential and never weakens the SAS
+check.
+
+A deprecated manual fallback remains for machines that cannot pair on screen. It
+uses a one-time 256-bit bootstrap secret: the client sends a fresh nonce,
+timestamp, identity, requested key ID, and HMAC, and both peers derive the
+installed PSK from the bootstrap secret and transcript. The provisioning tool
+stores the resulting client runtime configuration under machine-scope DPAPI. The
+bootstrap export must be distributed out of band and deleted after enrollment.
+This path is no longer shipped in the installer.
+
+## Authenticated LAN endpoint discovery
+
+An enrolled client may recover from a changed server IPv4 address without
+treating DHCP data as identity. UDP discovery uses the client's existing
+256-bit-or-stronger PSK and two domain-separated HMAC-SHA256 transcripts:
+
+```text
+request  = version, kind, client_id, key_id, client_nonce, client_time, HMAC
+response = version, kind, client_id, key_id, client_nonce, server_time,
+           TCP control port, HMAC
+```
+
+Both wire messages are exactly 104 bytes. Reserved fields must be zero, packet
+size and version are exact, timestamps have a 120-second acceptance window,
+and the response must echo the request identity, key ID, and 256-bit nonce. The
+server accepts each authenticated request nonce once. Invalid sources are
+limited to eight failures in 30 seconds and blocked for 60 seconds; the source
+table is bounded.
+
+The response source address is only a connection candidate. Before updating
+the machine-scoped DPAPI configuration, the client establishes TCP and completes
+the normal mutual handshake, including proof that the peer possesses the same
+enrollment PSK. Failed TCP authentication leaves the cached endpoint unchanged.
+The cache update uses the existing flushed temporary-file and atomic-replace
+path. After that succeeds, the service also refreshes the non-secret
+`ServerAddress` and `ServerPort` registry hints used by login diagnostics; those
+values are never accepted as credentials.
+
+Server hardware MAC addresses are not authentication material: they can change
+with adapters, virtualization, NIC replacement, teaming, or spoofing, and they
+are not available across a router. Administrators may still use a MAC address
+for DHCP reservation or inventory. Trust comes from the enrollment PSK and the
+mutual handshake, not from an IP or MAC address.
+
+Automatic discovery is restricted to the local IPv4 broadcast domain. Do not
+forward it to the Internet. Allow inbound UDP on the control port only from the
+managed classroom VLAN. Discovery metadata and screen traffic are not
+encrypted; the existing trusted-LAN confidentiality limitation still applies.
 
 ## Authenticated control frames
 

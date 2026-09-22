@@ -44,23 +44,35 @@ jobs:
         run: ./packaging/test-exam-package-staging.ps1
       - name: Package unified installer
         run: cmake --build build --config Release --target nstu-package --parallel
-      - name: Check documentation payload
+      - name: Verify slimmed installer payload
         shell: pwsh
         run: |
-          if (Test-Path build\unified-installer-stage\docs\project\assets) {
-            throw 'Repository-only documentation assets must not be packaged.'
+          $stage = 'build\unified-installer-stage'
+          # The slimmed installer carries only role binaries, required runtimes,
+          # diagnostics, and exam runtime assets: no documentation directory and
+          # no PowerShell payload of any kind.
+          if (Test-Path (Join-Path $stage 'docs')) {
+            throw 'Installer must not package a docs directory.'
           }
-          if (-not (Test-Path build\unified-installer-stage\client\verify-client-connection.ps1)) {
-            throw 'Client post-install verifier is missing from the package.'
+          $ps1 = Get-ChildItem -Path $stage -Recurse -Filter *.ps1 -File -ErrorAction SilentlyContinue
+          if ($null -ne $ps1) {
+            throw "Installer must not package PowerShell scripts: $($ps1.FullName -join ', ')"
           }
-          if (-not (Test-Path build\unified-installer-stage\docs\exam\web\index.html)) {
-            throw 'Computer-based assessment web assets are missing from the package.'
+          # nstu-provision (the legacy file-copy enrollment tool) is deprecated:
+          # UI-driven pairing by room name replaces hand-copied enrollment
+          # secrets. The target stays buildable in the repo as a manual fallback
+          # but must never ship in the installer payload.
+          $provision = Get-ChildItem -Path $stage -Recurse -Filter nstu-provision.exe -File -ErrorAction SilentlyContinue
+          if ($null -ne $provision) {
+            throw "Installer must not package the deprecated nstu-provision.exe: $($provision.FullName -join ', ')"
           }
-          foreach ($script in @(
-              'stage-exam-package.ps1',
-              'test-exam-package-staging.ps1')) {
-            if (-not (Test-Path (Join-Path build\unified-installer-stage\docs\deployment $script))) {
-              throw "Exam package deployment script is missing from the package: $script"
+          # Role binaries and the exam runtime web assets must be present.
+          foreach ($required in @(
+              'client\nstu-service.exe',
+              'server\nstu-server.exe',
+              'client\exam\web\index.html')) {
+            if (-not (Test-Path (Join-Path $stage $required))) {
+              throw "Required installer payload is missing: $required"
             }
           }
       - name: Upload installers
@@ -100,6 +112,38 @@ jobs:
         with:
           name: nstu-internal-vm-installer
           path: build-internal/nstu-*-internal-vm-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  dev-unprotected-build:
+    name: DEV unprotected installer
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install NSIS
+        run: choco install nsis --no-progress --yes --force
+      - name: Configure DEV unprotected build
+        run: >-
+          cmake -S . -B build-dev -A x64
+          -DNSTU_ENABLE_WERROR=ON
+          -DNSTU_DEV_UNPROTECTED_BUILD=ON
+      - name: Build DEV binaries
+        run: cmake --build build-dev --config Release --parallel
+      - name: Test DEV binaries
+        run: ctest --test-dir build-dev -C Release --output-on-failure
+      - name: Package DEV unprotected installer
+        run: cmake --build build-dev --config Release --target nstu-package --parallel
+      - name: Verify DEV label and channel
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem build-dev -Filter '*-dev-unprotected-setup.exe' -File
+          if ($null -eq $installer) { throw 'DEV installer was not produced.' }
+          if ($installer.Name -notmatch 'dev-unprotected') { throw 'DEV installer label is missing.' }
+      - name: Upload DEV unprotected installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: nstu-dev-unprotected-installer
+          path: build-dev/nstu-*-dev-unprotected-setup.exe
           if-no-files-found: error
           retention-days: 14
 

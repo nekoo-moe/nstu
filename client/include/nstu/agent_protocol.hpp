@@ -40,11 +40,43 @@ enum class AgentMessageType : std::uint16_t {
     exam_state_response = 22,
     exam_start = 23,
     exam_stop = 24,
+    // Pairing. The service owns the protocol because it owns the machine
+    // config; the agent owns the screen, which is where the six digits have
+    // to appear for anyone to be able to compare them.
+    pairing_choices = 25,
+    pairing_select = 26,
+    pairing_code = 27,
+    pairing_status = 28,
+    // Service-to-agent display state. The service remains the only
+    // process that reads and writes the machine-wide flag.
+    managed_state = 29,
 };
 
 struct AgentMessage {
     AgentMessageType type = AgentMessageType::status_request;
     std::vector<std::byte> payload;
+};
+
+// One server this machine could pair with, as offered to the agent for the
+// selection menu.
+struct AgentPairingChoice {
+    std::string server_name;
+    std::string address;
+    std::uint16_t port = 0;
+};
+
+// The six digits the person at this machine reads out, and the name of the
+// server claiming to want them.
+struct AgentPairingCode {
+    std::string code;
+    std::string server_name;
+};
+
+// How the attempt ended. `outcome` is a `PairingOutcome`; `detail` is the
+// sentence to put on screen.
+struct AgentPairingStatus {
+    std::uint8_t outcome = 0;
+    std::string detail;
 };
 
 struct AgentStatus {
@@ -60,6 +92,11 @@ struct AgentStatus {
 inline constexpr std::size_t kMaximumAgentPayloadBytes =
     protocol::kMaxCommandPayload;
 
+// A classroom has one server, sometimes a handful. A list longer than this is
+// noise a teacher cannot usefully read, so it is refused rather than shown.
+inline constexpr std::size_t kMaximumPairingChoices = 8;
+inline constexpr std::size_t kMaximumPairingTextBytes = 128;
+
 [[nodiscard]] std::vector<std::byte> encode_agent_message(
     const AgentMessage& message);
 [[nodiscard]] std::optional<AgentMessage> decode_agent_message(
@@ -73,6 +110,26 @@ inline constexpr std::size_t kMaximumAgentPayloadBytes =
 [[nodiscard]] std::vector<std::byte> encode_agent_status(
     const AgentStatus& status);
 [[nodiscard]] std::optional<AgentStatus> decode_agent_status(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_agent_pairing_choices(
+    std::span<const AgentPairingChoice> choices);
+[[nodiscard]] std::optional<std::vector<AgentPairingChoice>>
+decode_agent_pairing_choices(std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_agent_pairing_selection(
+    std::uint16_t choice_index);
+[[nodiscard]] std::optional<std::uint16_t> decode_agent_pairing_selection(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_agent_pairing_code(
+    const AgentPairingCode& code);
+[[nodiscard]] std::optional<AgentPairingCode> decode_agent_pairing_code(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_agent_pairing_status(
+    const AgentPairingStatus& status);
+[[nodiscard]] std::optional<AgentPairingStatus> decode_agent_pairing_status(
     std::span<const std::byte> payload);
 
 [[nodiscard]] std::vector<std::byte> encode_remote_input(

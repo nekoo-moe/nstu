@@ -1,6 +1,6 @@
 Unicode true
 RequestExecutionLevel admin
-Name "@NSTU_INSTALLER_DISPLAY_NAME@"
+Name "@NSTU_INSTALLER_DISPLAY_NAME@ (AI-assisted)"
 OutFile "@NSTU_UNIFIED_INSTALLER@"
 InstallDir "$PROGRAMFILES64\\NSTU"
 InstallDirRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation"
@@ -14,21 +14,20 @@ ShowUninstDetails show
 !include "FileFunc.nsh"
 
 Var Role
-Var ServerAddress
-Var ServerPort
 Var RolePage
 Var RoleClient
 Var RoleServer
-Var AddressLabel
-Var AddressInput
-Var PortLabel
-Var PortInput
-Var AfterRestart
+Var UwfCheckbox
+Var UwfNotice
+Var EnableUwf
 Var PreflightReport
-Var PostInstallReport
+Var RoomName
+Var RoomLabel
+Var RoomField
 
 !define STAGE "@NSTU_UNIFIED_STAGE_DIR@"
 !define INTERNAL_TEST_BUILD @NSTU_INTERNAL_TEST_BUILD_VALUE@
+!define DEV_UNPROTECTED_BUILD @NSTU_DEV_UNPROTECTED_EXAM_VALUE@
 
 !insertmacro MUI_PAGE_WELCOME
 Page custom RolePageCreate RolePageLeave
@@ -40,38 +39,34 @@ Page custom RolePageCreate RolePageLeave
 Function .onInit
   SetRegView 64
   StrCpy $Role "Client"
-  StrCpy $ServerPort "47001"
+  StrCpy $EnableUwf "0"
+  StrCpy $RoomName ""
   StrCpy $PreflightReport "$TEMP\\NSTU-installer-preflight.json"
-  StrCpy $PostInstallReport "$TEMP\\NSTU-client-post-install.json"
   ${GetParameters} $0
   ${GetOptions} $0 "/ROLE=" $1
   ${IfNot} ${Errors}
     StrCpy $Role $1
   ${EndIf}
-  ${GetOptions} $0 "/SERVER=" $1
+  ${GetOptions} $0 "/ROOM=" $1
   ${IfNot} ${Errors}
-    StrCpy $ServerAddress $1
-  ${EndIf}
-  ${GetOptions} $0 "/PORT=" $1
-  ${IfNot} ${Errors}
-    StrCpy $ServerPort $1
+    StrCpy $RoomName $1
   ${EndIf}
 FunctionEnd
 
 Function RoleServerClicked
   StrCpy $Role "Server"
-  ShowWindow $AddressLabel ${SW_HIDE}
-  ShowWindow $AddressInput ${SW_HIDE}
-  ShowWindow $PortLabel ${SW_HIDE}
-  ShowWindow $PortInput ${SW_HIDE}
+  ShowWindow $UwfCheckbox ${SW_HIDE}
+  ShowWindow $UwfNotice ${SW_HIDE}
+  ShowWindow $RoomLabel ${SW_HIDE}
+  ShowWindow $RoomField ${SW_HIDE}
 FunctionEnd
 
 Function RoleClientClicked
   StrCpy $Role "Client"
-  ShowWindow $AddressLabel ${SW_SHOW}
-  ShowWindow $AddressInput ${SW_SHOW}
-  ShowWindow $PortLabel ${SW_SHOW}
-  ShowWindow $PortInput ${SW_SHOW}
+  ShowWindow $UwfCheckbox ${SW_SHOW}
+  ShowWindow $UwfNotice ${SW_SHOW}
+  ShowWindow $RoomLabel ${SW_SHOW}
+  ShowWindow $RoomField ${SW_SHOW}
 FunctionEnd
 
 Function RolePageCreate
@@ -89,20 +84,24 @@ Function RolePageCreate
   Pop $RoleServer
   ${NSD_OnClick} $RoleServer RoleServerClicked
   ${NSD_Check} $RoleClient
-  ${NSD_CreateLabel} 0 88u 120u 16u "Server IP address"
-  Pop $AddressLabel
-  ${NSD_CreateText} 130u 84u 220u 20u ""
-  Pop $AddressInput
-  ${NSD_CreateLabel} 0 118u 120u 16u "Control port"
-  Pop $PortLabel
-  ${NSD_CreateText} 130u 114u 100u 20u "47001"
-  Pop $PortInput
-  ${NSD_SetText} $AddressInput $ServerAddress
-  ${NSD_SetText} $PortInput $ServerPort
-  ${NSD_CreateLabel} 0 154u 100% 36u "The client preflight checks the server before installation. A Windows restart is required after client installation and before any uninstall changes are made."
+  ${NSD_CreateLabel} 0 84u 100% 34u "Clients discover NSTU servers on the local network after installation. If several answer, the client asks which one to pair with. The server must approve the matching six-digit code."
+  Pop $0
+  ${NSD_CreateLabel} 0 120u 100% 11u "Room name (optional - leave blank to choose on screen):"
+  Pop $RoomLabel
+  ${NSD_CreateText} 0 132u 100% 13u "$RoomName"
+  Pop $RoomField
+  ${NSD_CreateCheckbox} 0 150u 100% 18u "Enable reboot-to-restore (Education/Enterprise only)"
+  Pop $UwfCheckbox
+  ${NSD_CreateLabel} 18u 170u 95% 34u "Requires passing readiness checks, persistent NSTU exclusions, and a recovery checkpoint you have verified. UWF is armed only after enrollment."
+  Pop $UwfNotice
+  ${NSD_CreateLabel} 0 208u 100% 34u "Client preflight checks this computer. A Windows restart activates the service; pairing then happens through the client and server interfaces."
   Pop $0
 !if ${INTERNAL_TEST_BUILD}
-  ${NSD_CreateLabel} 0 196u 100% 30u "INTERNAL VM TEST: RAM capacity failures are warnings. CPU details are informational in every build. Do not deploy this build to a school or production machine."
+  ${NSD_CreateLabel} 0 246u 100% 30u "INTERNAL VM TEST: RAM capacity failures are warnings. CPU details are informational in every build. Do not deploy this build to a school or production machine."
+  Pop $0
+!endif
+!if ${DEV_UNPROTECTED_BUILD}
+  ${NSD_CreateLabel} 0 246u 100% 40u "DEV (UNPROTECTED) BUILD: This build starts Exam mode WITHOUT reboot-to-restore (UWF) protection. It is for testing only. Do not deploy it to a real exam or production machine. Authentication, pairing, and package validation are unchanged."
   Pop $0
 !endif
   StrCmp $Role "Server" nstu_role_page_server nstu_role_page_client
@@ -123,23 +122,14 @@ Function RolePageLeave
     StrCpy $Role "Server"
   ${Else}
     StrCpy $Role "Client"
-    ${NSD_GetText} $AddressInput $ServerAddress
-    ${NSD_GetText} $PortInput $ServerPort
-    ${If} $ServerAddress == ""
-      MessageBox MB_ICONSTOP|MB_OK "Enter the server IP address before continuing."
+    ${NSD_GetText} $RoomField $RoomName
+    ${NSD_GetState} $UwfCheckbox $EnableUwf
+    ${If} $EnableUwf == ${BST_CHECKED}
+      MessageBox MB_YESNO|MB_ICONEXCLAMATION "Confirm that you created or verified a recovery checkpoint. If readiness passes, this computer will show a 60-second countdown and restart automatically. Continue with reboot-to-restore enabled?" IDYES nstu_uwf_confirmed IDNO nstu_uwf_not_confirmed
+nstu_uwf_not_confirmed:
       Abort
+nstu_uwf_confirmed:
     ${EndIf}
-    ${If} $ServerPort == ""
-      MessageBox MB_ICONSTOP|MB_OK "Enter the server control port before continuing."
-      Abort
-    ${EndIf}
-    IntCmp $ServerPort 1 nstu_port_min_ok nstu_port_invalid nstu_port_min_ok
-nstu_port_min_ok:
-    IntCmp $ServerPort 65535 nstu_port_valid nstu_port_valid nstu_port_invalid
-nstu_port_invalid:
-    MessageBox MB_ICONSTOP|MB_OK "Enter a control port from 1 through 65535."
-    Abort
-nstu_port_valid:
   ${EndIf}
 FunctionEnd
 
@@ -170,7 +160,7 @@ nstu_no_server_marker:
 !endif
   StrCmp $Role "Server" nstu_preflight_server
   StrCmp $Role "Client" 0 nstu_preflight_invalid_role
-  nsExec::ExecToStack '"$PLUGINSDIR\\NSTU-Diagnostics\\nstu-diagnostics.exe" --target=client --server-ip="$ServerAddress" --server-port=$ServerPort --installer --auto-close --report="$PreflightReport"'
+  nsExec::ExecToStack '"$PLUGINSDIR\\NSTU-Diagnostics\\nstu-diagnostics.exe" --target=client --installer --auto-close --report="$PreflightReport"'
   Pop $0
   Pop $1
   StrCmp $0 "0" nstu_preflight_ok
@@ -188,83 +178,66 @@ nstu_preflight_server:
   Abort
 nstu_preflight_ok:
   Delete "$PreflightReport"
+  StrCmp $Role "Client" 0 nstu_preflight_done
+  IfFileExists "$INSTDIR\\client\\nstu-service.exe" 0 nstu_preflight_done
+  nsExec::ExecToStack '"$INSTDIR\\client\\nstu-service.exe" --uninstall'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" nstu_preflight_done
+  MessageBox MB_ICONSTOP|MB_OK "The existing client service could not be prepared for update.$\r$\n$\r$\n$1"
+  Abort
+nstu_preflight_done:
 SectionEnd
 
 Section -Server
   StrCmp $Role "Server" 0 nstu_server_done
-  ReadEnvStr $R0 "ProgramData"
-  SetOutPath "$INSTDIR\\server"
-  File /r "${STAGE}\\server\\*"
-  SetOutPath "$INSTDIR\\diagnostics"
-  File /r "${STAGE}\\diagnostics\\*"
-  SetOutPath "$INSTDIR\\docs"
-  File /r "${STAGE}\\docs\\*"
-  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\docs\\deployment\\test-install-role.ps1" -Role Server -InstallRoot "$INSTDIR"'
-  Pop $0
-  Pop $1
-  StrCmp $0 "0" 0 nstu_server_setup_failed
-  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\docs\\deployment\\test-system-setup.ps1" -Role Server -DataRoot "$R0\\NSTU" -ExpectedServerBinary "$INSTDIR\\server\\nstu-server.exe"'
-  Pop $0
-  Pop $1
-  StrCmp $0 "0" 0 nstu_server_setup_failed
-  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\docs\\deployment\\configure-data-root.ps1" -DataRoot "$R0\\NSTU"'
-  Pop $0
-  Pop $1
-  StrCmp $0 "0" 0 nstu_server_setup_failed
-  WriteRegStr HKLM "Software\\NSTU" "InstallRole" "Server"
-  WriteRegStr HKLM "Software\\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "DisplayName" "NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@"
-  WriteUninstaller "$INSTDIR\\Uninstall.exe"
-  Goto nstu_server_done
-nstu_server_setup_failed:
-  DeleteRegKey HKLM "Software\\NSTU"
-  DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU"
-  RMDir /r "$INSTDIR\\server"
-  RMDir /r "$INSTDIR\\diagnostics"
-  RMDir /r "$INSTDIR\\docs"
-  MessageBox MB_ICONSTOP|MB_OK "Server setup checks failed.$\r$\n$\r$\n$1"
-  Abort
+  SetOutPath "$INSTDIR\server"
+  File /r "${STAGE}\server\*"
+  SetOutPath "$INSTDIR\diagnostics"
+  File /r "${STAGE}\diagnostics\*"
+  WriteRegStr HKLM "Software\NSTU" "InstallRole" "Server"
+  WriteRegStr HKLM "Software\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "DisplayName" "NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@ (AI-assisted)"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Server" '"$INSTDIR\server\nstu-server.exe"'
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
 nstu_server_done:
 SectionEnd
 
 Section -Client
   StrCmp $Role "Client" 0 nstu_client_done
   ReadEnvStr $R0 "ProgramData"
-  SetOutPath "$INSTDIR\\client"
-  File /r "${STAGE}\\client\\*"
-  SetOutPath "$INSTDIR\\diagnostics"
-  File /r "${STAGE}\\diagnostics\\*"
-  SetOutPath "$INSTDIR\\docs"
-  File /r "${STAGE}\\docs\\*"
-  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\client\\install-client-service.ps1" -InstallRoot "$INSTDIR\\client"'
+  SetOutPath "$INSTDIR\client"
+  File /r "${STAGE}\client\*"
+  SetOutPath "$INSTDIR\diagnostics"
+  File /r "${STAGE}\diagnostics\*"
+  WriteRegStr HKLM "Software\NSTU" "InstallRole" "Client"
+  WriteRegStr HKLM "Software\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
+  ${If} $EnableUwf == ${BST_CHECKED}
+    WriteRegDWORD HKLM "Software\NSTU" "UwfConfigureRequested" 1
+  ${Else}
+    WriteRegDWORD HKLM "Software\NSTU" "UwfConfigureRequested" 0
+  ${EndIf}
+  ${If} $RoomName != ""
+    WriteRegStr HKLM "Software\NSTU" "PreferredRoom" "$RoomName"
+  ${Else}
+    DeleteRegValue HKLM "Software\NSTU" "PreferredRoom"
+  ${EndIf}
+  nsExec::ExecToStack '"$INSTDIR\client\nstu-service.exe" --install'
   Pop $0
   Pop $1
   StrCmp $0 "0" 0 nstu_client_setup_failed
-  WriteRegStr HKLM "Software\\NSTU" "InstallRole" "Client"
-  WriteRegStr HKLM "Software\\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
-  WriteRegStr HKLM "Software\\NSTU" "ServerAddress" "$ServerAddress"
-  WriteRegDWORD HKLM "Software\\NSTU" "ServerPort" $ServerPort
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "DisplayName" "NSTU Client@NSTU_INSTALLER_ROLE_SUFFIX@"
-  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "NSTU Diagnostics" '"$INSTDIR\\diagnostics\\nstu-diagnostics.exe" --target=client --boot-check --auto-close --log="$R0\\NSTU\\boot-check.log"'
-  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\client\\verify-client-connection.ps1" -InstallRoot "$INSTDIR\\client" -ServerAddress "$ServerAddress" -ServerPort $ServerPort -ReportPath "$PostInstallReport"'
-  Pop $0
-  Pop $1
-  StrCmp $0 "0" nstu_client_post_install_verified
-  MessageBox MB_ICONSTOP|MB_OK "Client installation was not activated because the post-install server check failed. The report was saved to:$\r$\n$PostInstallReport$\r$\n$\r$\n$1"
-  Abort
-nstu_client_post_install_verified:
-  Delete "$PostInstallReport"
-  WriteUninstaller "$INSTDIR\\Uninstall.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "DisplayName" "NSTU Client@NSTU_INSTALLER_ROLE_SUFFIX@ (AI-assisted)"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Diagnostics" '"$INSTDIR\diagnostics\nstu-diagnostics.exe" --target=client --boot-check --auto-close --log="$R0\NSTU\boot-check.log"'
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
   SetRebootFlag true
   Goto nstu_client_done
 nstu_client_setup_failed:
-  DeleteRegKey HKLM "Software\\NSTU"
-  DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU"
-  RMDir /r "$INSTDIR\\client"
-  RMDir /r "$INSTDIR\\diagnostics"
-  RMDir /r "$INSTDIR\\docs"
+  DeleteRegKey HKLM "Software\NSTU"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU"
+  RMDir /r "$INSTDIR\client"
+  RMDir /r "$INSTDIR\diagnostics"
   MessageBox MB_ICONSTOP|MB_OK "Client service setup failed.$\r$\n$\r$\n$1"
   Abort
 nstu_client_done:
@@ -283,60 +256,38 @@ SectionEnd
 
 Function un.onInit
   SetRegView 64
-  StrCpy $AfterRestart "0"
-  ${GetParameters} $0
-  ${GetOptions} $0 "/AFTERRESTART=" $1
-  ${IfNot} ${Errors}
-    StrCpy $AfterRestart "1"
-  ${EndIf}
+  ReadRegStr $Role HKLM "Software\\NSTU" "InstallRole"
+  StrCmp $Role "Client" 0 nstu_uninit_not_client
+  StrCpy $0 "0"
+  ReadRegDWORD $0 HKLM "Software\\NSTU" "Frozen"
+  IntCmp $0 0 nstu_uninit_not_client nstu_uninit_frozen nstu_uninit_frozen
+nstu_uninit_frozen:
+  MessageBox MB_ICONSTOP|MB_OK "This NSTU client is in Managed mode. Disable Managed mode from the server, or run nstu-service.exe --thaw-local from an elevated command prompt, before uninstalling."
+  Abort
+nstu_uninit_not_client:
 FunctionEnd
 
 Section "Uninstall"
-  ReadRegStr $Role HKLM "Software\\NSTU" "InstallRole"
-  ${If} $AfterRestart != "1"
-    MessageBox MB_YESNO|MB_ICONEXCLAMATION "NSTU removal requires an immediate Windows restart. No service, process, or package file has been changed. Restart and continue removal now?" IDYES nstu_uninstall_stage IDNO nstu_uninstall_abort
-nstu_uninstall_stage:
-    nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\docs\\deployment\\stage-uninstall.ps1" -Role "$Role" -InstallRoot "$INSTDIR" -UninstallerPath "$INSTDIR\\Uninstall.exe"'
-    Pop $0
-    Pop $1
-    StrCmp $0 "0" 0 nstu_uninstall_stage_failed
-    SetRebootFlag true
-    Reboot
-nstu_uninstall_abort:
-    Abort
-nstu_uninstall_stage_failed:
-    MessageBox MB_ICONSTOP|MB_OK "NSTU removal could not be staged.$\r$\n$\r$\n$1"
-    Abort
-  ${EndIf}
-  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\docs\\deployment\\finalize-uninstall.ps1" -Role "$Role" -InstallRoot "$INSTDIR"'
-  Pop $0
-  Pop $1
-  StrCmp $0 "0" 0 nstu_uninstall_finalize_failed
+  ReadRegStr $Role HKLM "Software\NSTU" "InstallRole"
   StrCmp $Role "Client" 0 nstu_uninstall_server
-  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\client\\uninstall-client-service.ps1" -InstallRoot "$INSTDIR\\client" -AfterRestart'
+  IfFileExists "$INSTDIR\client\nstu-service.exe" 0 nstu_uninstall_files
+  nsExec::ExecToStack '"$INSTDIR\client\nstu-service.exe" --uninstall'
   Pop $0
   Pop $1
-  StrCmp $0 "0" nstu_uninstall_files 0
-nstu_uninstall_server:
-  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\docs\\deployment\\uninstall-server.ps1" -InstallRoot "$INSTDIR" -AfterRestart'
-  Pop $0
-  Pop $1
-  StrCmp $0 "0" nstu_uninstall_files 0
-nstu_uninstall_finalize_failed:
-  MessageBox MB_ICONSTOP|MB_OK "NSTU removal could not complete after restart.$\r$\n$\r$\n$1"
+  StrCmp $0 "0" nstu_uninstall_client_processes
+  MessageBox MB_ICONSTOP|MB_OK "NSTU client service removal failed.$\r$\n$\r$\n$1"
   Abort
+nstu_uninstall_client_processes:
+  Goto nstu_uninstall_files
+nstu_uninstall_server:
 nstu_uninstall_files:
-  nsExec::ExecToStack '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\\docs\\deployment\\finalize-uninstall.ps1" -Role "$Role" -InstallRoot "$INSTDIR" -Complete'
-  Pop $0
-  Pop $1
-  StrCmp $0 "0" 0 nstu_uninstall_finalize_failed
-  DeleteRegValue HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "NSTU Diagnostics"
-  DeleteRegKey HKLM "Software\\NSTU"
-  DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU"
-  RMDir /r "$INSTDIR\\client"
-  RMDir /r "$INSTDIR\\server"
-  RMDir /r "$INSTDIR\\diagnostics"
-  RMDir /r "$INSTDIR\\docs"
-  Delete "$INSTDIR\\Uninstall.exe"
-  RMDir "$INSTDIR"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Diagnostics"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Server"
+  DeleteRegKey HKLM "Software\NSTU"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU"
+  RMDir /r /REBOOTOK "$INSTDIR\client"
+  RMDir /r /REBOOTOK "$INSTDIR\server"
+  RMDir /r /REBOOTOK "$INSTDIR\diagnostics"
+  Delete /REBOOTOK "$INSTDIR\Uninstall.exe"
+  RMDir /REBOOTOK "$INSTDIR"
 SectionEnd

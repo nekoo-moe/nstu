@@ -1,12 +1,15 @@
 # NSTU Reboot-to-Restore Design
 
-Status: **architecture and safety plan with implemented read-only UWF
-diagnostics. NSTU does not currently provide reboot-to-restore and cannot yet
-replace Deep Freeze.** The client probe can inspect current and next UWF state,
-protected volumes, exclusion counts, overlay configuration/consumption, and
-recent event health, but no write-filter, volume-protection, or UWF mutation
-code is enabled. The server target treats UWF as not applicable and remains
-persistent.
+Status: **implemented fleet reboot-to-restore orchestration with a read-only
+verification probe and a server-side exam-authorization gate.** The server can
+ask connected clients to arm UWF for the next boot and restart, and the client
+reports its progress through a small state machine. After the restart the client
+runs a read-only probe that inspects current and next UWF state, protected
+volumes and exclusion counts, and reports whether the volume is protected *in
+the session it is running now*. Only that fresh, boot-bound proof authorizes
+Exam mode. Windows still owns the kernel-mode write filtering; NSTU owns policy,
+diagnostics, authenticated orchestration, verification and recovery guidance.
+The server target treats UWF as not applicable and remains persistent.
 
 This document is the canonical repository source for a future GitHub Wiki page.
 It defines a conservative implementation plan for centrally managed lab PCs.
@@ -525,3 +528,105 @@ recoverable, auditable maintenance path through every failure.
 References were reviewed on 2026-09-09. Microsoft documentation is the
 authority for platform support and may change; revalidate it before each
 production release.
+
+## Fleet orchestration, verification, and the exam gate
+
+The teacher connects every machine to the server, then triggers a fleet
+reboot-to-restore ("freeze") operation. "Freeze" here means enabling and
+protecting UWF for the next boot; it is not the NSTU Managed-mode service guard,
+which is a separate feature.
+
+Each targeted client moves through an explicit, server-visible sequence:
+`idle -> requested -> configuring -> awaiting_restart -> restarting ->
+verifying -> verified_protected`, or `failed` / `unsupported`. The server issues
+a non-zero operation id with the request and matches every later status report
+back to it.
+
+### Boot identity is what makes the proof real
+
+A configuration report is produced *before* the restart, so at best it says UWF
+was armed. Current-session protection cannot be established without knowing that
+a restart actually happened. The client service generates a random 128-bit boot
+id at start, in memory only. It necessarily changes across a restart, needs no
+persistence, and does not trust the client clock. After the restart the client
+runs the read-only probe and sends a status report carrying the new boot id. The
+server accepts `verified_protected` only when the report's own probe proves
+current-session protection, and, for an operation that expected a restart, only
+when the boot id differs from the one the request was issued against. A machine
+already protected when the request arrives verifies immediately on the same boot
+- that is correct, not suspicious.
+
+A verified proof belongs to the session that produced it. The server retires it
+(demotes the client back to `verifying`) whenever the connection is established,
+replaced, lost, or the client is expired for silence, and the client then
+re-probes. Stale proof expires by construction rather than by policy.
+
+### Exam gate
+
+`Exam mode` is authorized only when the server holds a current, boot-bound proof
+of protection for that client. The gate is server-side and fails closed: the
+client never sends a "protected" flag, and nothing about protection travels in
+the exam start request.
+
+### DEV (UNPROTECTED) channel
+
+A separate, publicly labeled `NSTU DEV (UNPROTECTED)` build
+(`-DNSTU_DEV_UNPROTECTED_BUILD=ON`, channel `DevUnprotected`) exists for testing
+features without entering the protected state. It bypasses **only** the UWF/exam
+readiness gate - never authentication, pairing, package digest validation, or
+answer durability. The bypass is compile-time (`#if NSTU_DEV_UNPROTECTED_EXAM`)
+and cannot be toggled at runtime. Every bypassed exam start emits a
+`severity=warning` audit event, the server UI shows a permanent banner, and the
+installer shows a warning page. It is mutually exclusive with the internal VM
+test build.
+
+### Audit
+
+All NSTU activity, including client-side activity, is recorded as bounded,
+sanitized audit events (see [the audit note in TELEMETRY.md](TELEMETRY.md)) and
+uploaded to the server for central persistence. Audit records say that an event
+happened - never exam questions, answers, or any payload.
+
+## Verification checklist
+
+Operator checklist, run before authorizing an exam:
+
+- [ ] Every target machine shows Online on the server.
+- [ ] The fleet reboot-to-restore ("freeze") action was triggered and each client
+      moved through Configuring, then Awaiting restart / Restarting.
+- [ ] The affected machines restarted (a visible 60-second countdown on each
+      client).
+- [ ] After the restart each client reconnected and reached Protected, verified
+      in the current session. A machine already protected verifies immediately.
+- [ ] Exam mode is refused for any client not showing Protected, and permitted
+      once it is.
+- [ ] An unsupported Windows edition reports Unsupported rather than a false
+      success.
+
+DEV (UNPROTECTED) checklist:
+
+- [ ] The server UI shows the permanent DEV banner and the installer showed its
+      warning page.
+- [ ] Exam mode starts without protection, and every start produced a
+      severity=warning audit event.
+- [ ] This build is never deployed to a real exam or production machine.
+
+Audit checklist:
+
+- [ ] Client activity appears in the central audit log on the server.
+- [ ] No exam question, answer body, credential, secret, key, SAS code, token,
+      raw path, or raw network identifier appears in any record.
+
+Developer test guidelines:
+
+- Configure and build with MinGW UCRT64:
+  `cmake -S . -B build/mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Debug`
+  then `cmake --build build/mingw` (put the UCRT64 bin on PATH).
+- Run the whole suite with `ctest --test-dir build/mingw`.
+- Feature tests to check: `nstu.uwf_fleet_codec` (wire codecs and malformed
+  rejection), `nstu.server_state` (fleet state, boot-bound proof, reconnect
+  demotion), `nstu.control_plane` and `nstu.control_plane_exam_auth` (exam gate
+  fails closed, then opens once protection is proven), `nstu.audit` (redaction,
+  rotation, spool bounds, upload quota).
+- Build the DEV channel with `-DNSTU_DEV_UNPROTECTED_BUILD=ON` and confirm it
+  compiles the bypass; a Release build must not compile it at all.

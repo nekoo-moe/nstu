@@ -1,8 +1,11 @@
 #include "nstu/agent_protocol.hpp"
 
+#include "nstu/pairing.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <string_view>
 #include <type_traits>
 
 namespace nstu::client {
@@ -43,7 +46,40 @@ bool read_le(std::span<const std::byte> input, std::size_t& offset, T& value) {
 
 bool valid_type(AgentMessageType type) noexcept {
     return type >= AgentMessageType::lock &&
-           type <= AgentMessageType::exam_stop;
+           type <= AgentMessageType::managed_state;
+}
+
+// Pairing text reaches the agent from the network and lands directly on a
+// screen, so it is held to printable ASCII here rather than trusted to be
+// harmless. The discovery beacon sanitizes names too; this is the side that
+// has to be right even if it did not.
+bool printable_text(std::string_view text, std::size_t maximum) noexcept {
+    if (text.empty() || text.size() > maximum) {
+        return false;
+    }
+    return std::all_of(text.begin(), text.end(), [](char character) {
+        const auto value = static_cast<unsigned char>(character);
+        return value >= 0x20 && value < 0x7f;
+    });
+}
+
+void append_text(std::vector<std::byte>& output, std::string_view text) {
+    append_le(output, static_cast<std::uint16_t>(text.size()));
+    const auto* bytes = reinterpret_cast<const std::byte*>(text.data());
+    output.insert(output.end(), bytes, bytes + text.size());
+}
+
+bool read_text(std::span<const std::byte> input, std::size_t& offset,
+               std::string& text) {
+    std::uint16_t length = 0;
+    if (!read_le(input, offset, length) ||
+        length > kMaximumPairingTextBytes ||
+        offset + length > input.size()) {
+        return false;
+    }
+    text.assign(reinterpret_cast<const char*>(input.data() + offset), length);
+    offset += length;
+    return true;
 }
 
 bool read_exact(const NamedPipe& pipe, std::span<std::byte> output,
@@ -187,6 +223,126 @@ std::optional<AgentStatus> decode_agent_status(
         (status.snapshotting &&
          (status.snapshot_interval_seconds < 5 ||
           status.snapshot_interval_seconds > 10))) {
+        return std::nullopt;
+    }
+    return status;
+}
+
+std::vector<std::byte> encode_agent_pairing_choices(
+    std::span<const AgentPairingChoice> choices) {
+    if (choices.empty() || choices.size() > kMaximumPairingChoices) {
+        return {};
+    }
+    std::vector<std::byte> payload;
+    append_le(payload, static_cast<std::uint8_t>(choices.size()));
+    for (const auto& choice : choices) {
+        if (!printable_text(choice.server_name, kMaximumPairingTextBytes) ||
+            !printable_text(choice.address, kMaximumPairingTextBytes) ||
+            choice.port == 0) {
+            return {};
+        }
+        append_text(payload, choice.server_name);
+        append_text(payload, choice.address);
+        append_le(payload, choice.port);
+    }
+    return payload;
+}
+
+std::optional<std::vector<AgentPairingChoice>> decode_agent_pairing_choices(
+    std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    std::uint8_t count = 0;
+    if (!read_le(payload, offset, count) || count == 0 ||
+        count > kMaximumPairingChoices) {
+        return std::nullopt;
+    }
+    std::vector<AgentPairingChoice> choices;
+    choices.reserve(count);
+    for (std::uint8_t index = 0; index < count; ++index) {
+        AgentPairingChoice choice;
+        if (!read_text(payload, offset, choice.server_name) ||
+            !read_text(payload, offset, choice.address) ||
+            !read_le(payload, offset, choice.port) || choice.port == 0 ||
+            !printable_text(choice.server_name, kMaximumPairingTextBytes) ||
+            !printable_text(choice.address, kMaximumPairingTextBytes)) {
+            return std::nullopt;
+        }
+        choices.push_back(std::move(choice));
+    }
+    return offset == payload.size() ? std::optional{std::move(choices)}
+                                    : std::nullopt;
+}
+
+std::vector<std::byte> encode_agent_pairing_selection(
+    std::uint16_t choice_index) {
+    if (choice_index >= kMaximumPairingChoices) {
+        return {};
+    }
+    std::vector<std::byte> payload;
+    append_le(payload, choice_index);
+    return payload;
+}
+
+std::optional<std::uint16_t> decode_agent_pairing_selection(
+    std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    std::uint16_t choice_index = 0;
+    if (payload.size() != sizeof(std::uint16_t) ||
+        !read_le(payload, offset, choice_index) ||
+        choice_index >= kMaximumPairingChoices) {
+        return std::nullopt;
+    }
+    return choice_index;
+}
+
+std::vector<std::byte> encode_agent_pairing_code(const AgentPairingCode& code) {
+    if (code.code.size() != pairing::kSasDigits ||
+        !std::all_of(code.code.begin(), code.code.end(),
+                     [](char digit) { return digit >= '0' && digit <= '9'; }) ||
+        !printable_text(code.server_name, kMaximumPairingTextBytes)) {
+        return {};
+    }
+    std::vector<std::byte> payload;
+    append_text(payload, code.code);
+    append_text(payload, code.server_name);
+    return payload;
+}
+
+std::optional<AgentPairingCode> decode_agent_pairing_code(
+    std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    AgentPairingCode code;
+    if (!read_text(payload, offset, code.code) ||
+        !read_text(payload, offset, code.server_name) ||
+        offset != payload.size() ||
+        code.code.size() != pairing::kSasDigits ||
+        !std::all_of(code.code.begin(), code.code.end(),
+                     [](char digit) { return digit >= '0' && digit <= '9'; }) ||
+        !printable_text(code.server_name, kMaximumPairingTextBytes)) {
+        return std::nullopt;
+    }
+    return code;
+}
+
+std::vector<std::byte> encode_agent_pairing_status(
+    const AgentPairingStatus& status) {
+    if (!printable_text(status.detail, kMaximumPairingTextBytes)) {
+        return {};
+    }
+    std::vector<std::byte> payload;
+    append_le(payload, status.outcome);
+    append_text(payload, status.detail);
+    return payload;
+}
+
+std::optional<AgentPairingStatus> decode_agent_pairing_status(
+    std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    AgentPairingStatus status;
+    if (!read_le(payload, offset, status.outcome) ||
+        !read_text(payload, offset, status.detail) ||
+        offset != payload.size() ||
+        !printable_text(status.detail, kMaximumPairingTextBytes)) {
         return std::nullopt;
     }
     return status;

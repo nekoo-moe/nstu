@@ -1,11 +1,14 @@
 #include "nstu/control_plane.hpp"
 
+#include "nstu/audit.hpp"
 #include "nstu/control_channel.hpp"
 #include "nstu/control_messages.hpp"
+#include "nstu/discovery.hpp"
 #include "nstu/enrollment.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
 #include "nstu/keyring.hpp"
+#include "nstu/pairing.hpp"
 
 #include <windows.h>
 
@@ -21,6 +24,13 @@
 
 namespace nstu::server {
 namespace {
+
+// A pairing request occupies a socket and a slot until the teacher answers it,
+// so both are bounded. The window is long enough to walk to the machine and
+// read the code off its screen, short enough that a forgotten request clears
+// itself.
+inline constexpr std::size_t kMaximumPendingPairings = 16;
+inline constexpr std::chrono::seconds kPairingApprovalWindow{180};
 
 void set_error(std::string* error, const char* message) {
     if (error != nullptr) {
@@ -112,6 +122,11 @@ public:
         enrollment,
         enrollment_complete,
         probe_complete,
+        // Verified pairing runs on the same pre-authentication path as legacy
+        // enrollment, but it takes two extra round trips and a human in the
+        // middle of them.
+        pairing_offered,
+        pairing_pending,
         auth_hello,
         auth_proof,
         authenticated,
@@ -136,8 +151,33 @@ public:
         security::ControlSequenceGuard receive_sequence;
         std::uint64_t send_sequence = 0;
         std::uint64_t handshake_request_id = 0;
+        std::uint64_t pairing_id = 0;
+        // Written by whichever thread answers the operator, read by the I/O
+        // thread, so it deliberately does not live under `mutex`.
+        std::atomic_bool pairing_settled = false;
         std::atomic<std::uint64_t> registry_id = 0;
         std::mutex mutex;
+    };
+
+    // Held between the client's confirmation tag and the operator's answer.
+    // The secrets are the only copy of the key that approval would install, so
+    // dropping the record is the same thing as refusing the request.
+    struct PendingPairingRecord {
+        ~PendingPairingRecord() { pairing::secure_zero(secrets); }
+        PendingPairingRecord() = default;
+        PendingPairingRecord(PendingPairingRecord&&) = default;
+        PendingPairingRecord& operator=(PendingPairingRecord&&) = default;
+        PendingPairingRecord(const PendingPairingRecord&) = delete;
+        PendingPairingRecord& operator=(const PendingPairingRecord&) = delete;
+
+        std::uint64_t pairing_id = 0;
+        net::ConnectionId connection_id = 0;
+        std::uint64_t request_id = 0;
+        std::string address;
+        pairing::PairingTranscript transcript;
+        pairing::PairingSecrets secrets;
+        std::chrono::steady_clock::time_point expires_at{};
+        bool client_confirmed = false;
     };
 
     // The server is the authority for which exam session a client may
@@ -164,6 +204,18 @@ public:
             config_ = {};
             return false;
         }
+        if (!config_.exam_journal_path.empty()) {
+            // Central audit sink lives beside the server-owned journal, never
+            // under any client freeze/UWF overlay. A sink that cannot open is
+            // non-fatal: the server still runs and still acknowledges uploads,
+            // it simply cannot persist them centrally until this is resolved.
+            std::string audit_error;
+            if (!audit_sink_.open(
+                    config_.exam_journal_path.parent_path() / "audit",
+                    &audit_error)) {
+                OutputDebugStringA("NSTU audit sink could not be opened\n");
+            }
+        }
         if (keyring_file_exists(config_.keyring_path) &&
             !security::load_keyring(key_store_, config_.keyring_path,
                                     config_.keyring_entropy, error)) {
@@ -185,32 +237,75 @@ public:
         dispatcher_config.idle_timeout = std::chrono::seconds(15);
         dispatcher_config.accept_depth = std::clamp<std::size_t>(
             config_.maximum_clients / 8, 8, 64);
-        net::IocpDispatcherCallbacks callbacks;
-        callbacks.on_connected = [this](net::ConnectionId id,
+        const auto callbacks = [this] {
+            net::IocpDispatcherCallbacks value;
+            value.on_connected = [this](net::ConnectionId id,
                                         const std::string& source) {
-            auto state = std::make_shared<ConnectionState>();
-            state->connection_id = id;
-            state->source = source;
-            std::scoped_lock lock(states_mutex_);
-            states_.emplace(id, std::move(state));
-        };
-        callbacks.on_bytes = [this](net::ConnectionId id,
+                auto state = std::make_shared<ConnectionState>();
+                state->connection_id = id;
+                state->source = source;
+                std::scoped_lock lock(states_mutex_);
+                states_.emplace(id, std::move(state));
+            };
+            value.on_bytes = [this](net::ConnectionId id,
                                     std::vector<std::byte> bytes) {
-            on_bytes(id, std::move(bytes));
+                on_bytes(id, std::move(bytes));
+            };
+            value.on_disconnected = [this](net::ConnectionId id) {
+                on_disconnected(id);
+            };
+            return value;
         };
-        callbacks.on_disconnected = [this](net::ConnectionId id) {
-            on_disconnected(id);
-        };
-        if (!dispatcher_.start(dispatcher_config, std::move(callbacks), error)) {
+
+        // Production uses one configured TCP/UDP port. Tests and embedders may
+        // request port zero; Windows chooses TCP and UDP ephemeral ports from
+        // different exclusion ranges, so a TCP-selected number can be denied
+        // to UDP with WSAEACCES. Retry the pair rather than making a valid
+        // ephemeral request fail depending on host networking configuration.
+        constexpr int maximum_ephemeral_attempts = 32;
+        const int attempts = config_.port == 0 ? maximum_ephemeral_attempts : 1;
+        bool started = false;
+        std::string start_error;
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            start_error.clear();
+            if (!dispatcher_.start(dispatcher_config, callbacks(),
+                                   &start_error)) {
+                break;
+            }
+            const auto control_port = dispatcher_.local_port();
+            if (discovery_responder_.start(control_port, control_port,
+                                           key_store_, &start_error)) {
+                started = true;
+                break;
+            }
+            dispatcher_.stop();
+        }
+        if (!started) {
+            set_error(error, start_error.empty()
+                                 ? "server control plane could not bind"
+                                 : start_error.c_str());
             enrollment_authority_.reset();
             exam_journal_.close();
+            security::secure_zero(config_.keyring_entropy);
+            config_ = {};
             return false;
+        }
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            server_name_ = discovery::sanitize_server_name(config_.server_name);
         }
         return true;
     }
 
     void stop() noexcept {
+        discovery_responder_.stop();
         dispatcher_.stop();
+        {
+            std::scoped_lock lock(pairing_mutex_);
+            pending_pairings_.clear();
+            pairing_window_open_ = false;
+            server_name_.clear();
+        }
         {
             std::scoped_lock lock(states_mutex_);
             states_.clear();
@@ -275,6 +370,54 @@ public:
             set_error(error, "client is not authenticated");
             return false;
         }
+        // Exam authorization gate. This is server-side and fails closed: the
+        // client never sends a "protected" flag, and nothing about protection
+        // rides in ExamStartRequest. Only a fresh, boot-bound probe recorded in
+        // the registry can open it.
+        const auto registry_snapshot = registry_.snapshot();
+        const auto client_record = std::find_if(
+            registry_snapshot.begin(), registry_snapshot.end(),
+            [client_id](const ClientRecord& client) {
+                return client.id == client_id;
+            });
+        const bool protection_proven =
+            client_record != registry_snapshot.end() &&
+            client_record->uwf.proves_current_protection();
+#if NSTU_DEV_UNPROTECTED_EXAM
+        if (!protection_proven) {
+            // DEV (UNPROTECTED) build only. This is the single readiness gate
+            // the DEV channel bypasses; authentication, pairing, package digest
+            // validation and answer durability are untouched. The bypass is
+            // compile-time and cannot be toggled at runtime. Every bypassed
+            // start is audited at severity=warning.
+            audit::Event bypass;
+            bypass.category = audit::Category::exam;
+            bypass.severity = audit::Severity::warning;
+            bypass.component = "exam_gate";
+            bypass.action = "start_bypassed_dev";
+            bypass.result = "unprotected";
+            bypass.client_id = client_id;
+            bypass.detail =
+                "DEV build started exam without proven UWF protection";
+            audit_emit(bypass);
+        }
+#else
+        if (!protection_proven) {
+            audit::Event blocked;
+            blocked.category = audit::Category::exam;
+            blocked.severity = audit::Severity::warning;
+            blocked.component = "exam_gate";
+            blocked.action = "start_blocked";
+            blocked.result = "unprotected";
+            blocked.client_id = client_id;
+            blocked.detail = "exam blocked: no current-session UWF protection";
+            audit_emit(blocked);
+            set_error(error,
+                      "exam blocked: this client has not proven current-session "
+                      "UWF protection");
+            return false;
+        }
+#endif
         const auto payload = exam::encode_exam_start_request(request);
         if (payload.empty()) {
             set_error(error, "exam start request could not be encoded");
@@ -316,6 +459,16 @@ public:
             active_exam_contexts_.erase(inserted_context);
             return false;
         }
+        audit::Event started;
+        started.category = audit::Category::exam;
+        started.severity =
+            protection_proven ? audit::Severity::info : audit::Severity::warning;
+        started.component = "exam_gate";
+        started.action = "start";
+        started.result = protection_proven ? "protected" : "unprotected_dev";
+        started.client_id = registry_id;
+        started.detail = "exam session started";
+        audit_emit(started);
         return true;
     }
 
@@ -342,6 +495,56 @@ public:
         std::scoped_lock context_lock(exam_contexts_mutex_);
         active_exam_contexts_.erase(state->registry_id.load());
         return true;
+    }
+
+    // Writes one server-originated audit record. Best effort: a closed or
+    // failing sink never disturbs the operation being audited.
+    void audit_emit(audit::Event event) {
+        if (!audit_sink_.is_open()) {
+            return;
+        }
+        audit::Record record;
+        record.sequence = next_audit_sequence_.fetch_add(1);
+        record.timestamp_unix_milliseconds = unix_milliseconds_now();
+        record.event = std::move(event);
+        (void)audit_sink_.write(record);
+    }
+
+    bool configure_uwf_fleet(std::uint64_t client_id,
+                             bool checkpoint_acknowledged,
+                             bool restart_requested, std::string* error) {
+        // Record the operation before sending it. begin_uwf_fleet_operation
+        // pins the boot identity the request is issued against, which is what a
+        // later "protected" report is checked against.
+        const auto operation_id = next_uwf_operation_id_.fetch_add(1);
+        if (!registry_.begin_uwf_fleet_operation(client_id, operation_id,
+                                                 restart_requested)) {
+            set_error(error, "client is not known to the registry");
+            return false;
+        }
+        control::UwfFleetConfigureRequest request;
+        request.operation_id = operation_id;
+        request.checkpoint_acknowledged = checkpoint_acknowledged;
+        request.restart_requested = restart_requested;
+        const auto payload =
+            control::encode_uwf_fleet_configure_request(request);
+        if (payload.empty()) {
+            set_error(error, "fleet UWF request could not be encoded");
+            return false;
+        }
+        const bool sent =
+            send_command(client_id, protocol::CommandType::uwf_fleet_configure,
+                         payload, error);
+        audit::Event event;
+        event.category = audit::Category::uwf;
+        event.severity = sent ? audit::Severity::info : audit::Severity::error;
+        event.component = "uwf_fleet";
+        event.action = restart_requested ? "arm_and_restart" : "arm";
+        event.result = sent ? "sent" : "send_failed";
+        event.operation_id = operation_id;
+        event.client_id = client_id;
+        audit_emit(event);
+        return sent;
     }
 
     bool broadcast_command(protocol::CommandType type,
@@ -389,6 +592,203 @@ public:
     std::size_t authenticated_client_count() const noexcept {
         std::scoped_lock lock(states_mutex_);
         return client_connections_.size();
+    }
+
+    void set_pairing_window(bool open, std::string_view server_name) {
+        std::string effective_name;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            // The configured room name always wins. The caller-supplied name
+            // (the computer name, passed by the server app) is only a fallback
+            // for when no room name has been configured.
+            effective_name = server_name_.empty() ? std::string(server_name)
+                                                   : server_name_;
+        }
+        discovery_responder_.set_pairing_beacon(open, effective_name);
+        std::vector<AbandonedPairing> abandoned;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            pairing_window_open_ = open;
+            if (open) {
+                return;
+            }
+            abandoned.reserve(pending_pairings_.size());
+            for (const auto& [pairing_id, record] : pending_pairings_) {
+                (void)pairing_id;
+                abandoned.push_back(AbandonedPairing{
+                    .connection_id = record.connection_id,
+                    .request_id = record.request_id,
+                });
+            }
+            pending_pairings_.clear();
+        }
+        // Closing the window refuses everything it admitted; a request the
+        // teacher never answered must not survive into the next session.
+        refuse_abandoned(abandoned,
+                         pairing::PairingRejectReason::unavailable);
+    }
+
+    bool pairing_window_open() const noexcept {
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        return pairing_window_open_;
+    }
+
+    std::string server_name() const {
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        return server_name_;
+    }
+
+    void set_server_name(std::string_view name) {
+        const auto sanitized = discovery::sanitize_server_name(name);
+        bool window_open = false;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            server_name_ = sanitized;
+            window_open = pairing_window_open_;
+        }
+        // If the operator renames the room while the window is open, re-arm the
+        // beacon so the new label is advertised without reopening it.
+        if (window_open) {
+            discovery_responder_.set_pairing_beacon(true, sanitized);
+        }
+    }
+
+    std::vector<PendingPairing> pending_pairings() const {
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<PendingPairing> visible;
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        visible.reserve(pending_pairings_.size());
+        for (const auto& [pairing_id, record] : pending_pairings_) {
+            if (!record.client_confirmed || record.expires_at <= now) {
+                continue;
+            }
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::seconds>(record.expires_at - now);
+            visible.push_back(PendingPairing{
+                .pairing_id = pairing_id,
+                .client_uuid = record.transcript.client_uuid,
+                .hostname = record.transcript.client_hostname,
+                .address = record.address,
+                .short_authentication_string =
+                    record.secrets.short_authentication_string,
+                .seconds_remaining =
+                    static_cast<std::uint32_t>(remaining.count()),
+            });
+        }
+        std::sort(visible.begin(), visible.end(),
+                  [](const PendingPairing& left, const PendingPairing& right) {
+                      return left.pairing_id < right.pairing_id;
+                  });
+        return visible;
+    }
+
+    bool approve_pairing(std::uint64_t pairing_id, std::string* error) {
+        PendingPairingRecord record;
+        std::vector<AbandonedPairing> expired;
+        bool found_record = false;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            expired = take_expired_locked(std::chrono::steady_clock::now());
+            const auto found = pending_pairings_.find(pairing_id);
+            found_record = found != pending_pairings_.end() &&
+                           found->second.client_confirmed;
+            if (found_record) {
+                record = std::move(found->second);
+                pending_pairings_.erase(found);
+            }
+        }
+        refuse_abandoned(expired, pairing::PairingRejectReason::timed_out);
+        if (!found_record) {
+            set_error(error, "pairing request is no longer pending");
+            return false;
+        }
+        const auto client_id =
+            pairing::client_id_from_uuid(record.transcript.client_uuid);
+        if (!client_id) {
+            set_error(error, "client UUID is not a usable identity");
+            return false;
+        }
+        const auto server_tag = pairing::confirmation_tag(
+            record.secrets, record.transcript,
+            pairing::ConfirmationRole::server);
+        if (!server_tag) {
+            set_error(error, "pairing confirmation tag could not be computed");
+            return false;
+        }
+        // Rotate rather than enroll: a machine that is re-imaged and pairs
+        // again keeps one identity and its previous key stops working.
+        auto previous = key_store_.snapshot();
+        const auto key_id = key_store_.rotate(
+            *client_id, record.secrets.enrolled_key, error);
+        if (!key_id) {
+            for (auto& entry : previous) {
+                security::secure_zero(entry.key);
+            }
+            return false;
+        }
+        std::string keyring_error;
+        if (!config_.keyring_path.empty() &&
+            !security::save_keyring(key_store_, config_.keyring_path,
+                                    config_.keyring_entropy, &keyring_error)) {
+            (void)key_store_.replace(previous, nullptr);
+            for (auto& entry : previous) {
+                security::secure_zero(entry.key);
+            }
+            set_error(error, "paired key could not be persisted");
+            return false;
+        }
+        for (auto& entry : previous) {
+            security::secure_zero(entry.key);
+        }
+        const pairing::PairingAccept accept{
+            .key_id = *key_id,
+            .server_tag = *server_tag,
+        };
+        const auto payload = pairing::encode_pairing_accept(accept);
+        if (payload.empty()) {
+            set_error(error, "pairing acceptance encoding failed");
+            return false;
+        }
+        const auto wire = plain_frame(protocol::CommandType::pairing_accept,
+                                      record.request_id, payload);
+        settle_pairing_connection(record.connection_id);
+        if (!dispatcher_.send(record.connection_id, wire, nullptr)) {
+            set_error(error,
+                      "client disconnected before it could be told the result");
+            return false;
+        }
+        dispatcher_.record_handshake_success(record.connection_id);
+        return true;
+    }
+
+    bool reject_pairing(std::uint64_t pairing_id, std::string* error) {
+        net::ConnectionId connection_id = 0;
+        std::uint64_t request_id = 0;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            const auto found = pending_pairings_.find(pairing_id);
+            if (found == pending_pairings_.end()) {
+                set_error(error, "pairing request is no longer pending");
+                return false;
+            }
+            connection_id = found->second.connection_id;
+            request_id = found->second.request_id;
+            pending_pairings_.erase(found);
+        }
+        send_pairing_reject(connection_id, request_id,
+                            pairing::PairingRejectReason::operator_declined);
+        settle_pairing_connection(connection_id);
+        return true;
+    }
+
+    std::size_t expire_pending_pairings() {
+        std::vector<AbandonedPairing> expired;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            expired = take_expired_locked(std::chrono::steady_clock::now());
+        }
+        refuse_abandoned(expired, pairing::PairingRejectReason::timed_out);
+        return expired.size();
     }
 
 private:
@@ -541,7 +941,16 @@ private:
     bool process_frame(ConnectionState& state,
                        const protocol::TcpFrame& frame) {
         if (state.stage == Stage::enrollment) {
+            if (frame.envelope.type == protocol::CommandType::pairing_hello) {
+                return process_pairing_hello(state, frame);
+            }
             return process_enrollment(state, frame);
+        }
+        if (state.stage == Stage::pairing_offered) {
+            return process_pairing_confirm(state, frame);
+        }
+        if (state.stage == Stage::pairing_pending) {
+            return process_pairing_wait(state, frame);
         }
         if (state.stage == Stage::enrollment_complete ||
             state.stage == Stage::probe_complete) {
@@ -559,6 +968,262 @@ private:
         }
         fail_handshake(state, "unexpected control-plane state");
         return false;
+    }
+
+    // Refusing a request means closing its connection, and closing a
+    // connection calls back into on_disconnected, which wants pairing_mutex_.
+    // So the decision is made under the lock and acted on after it is dropped.
+    struct AbandonedPairing {
+        net::ConnectionId connection_id = 0;
+        std::uint64_t request_id = 0;
+    };
+
+    void send_pairing_reject(net::ConnectionId connection_id,
+                             std::uint64_t request_id,
+                             pairing::PairingRejectReason reason) {
+        const auto payload = pairing::encode_pairing_reject(reason);
+        if (payload.empty()) {
+            return;
+        }
+        const auto wire = plain_frame(protocol::CommandType::pairing_reject,
+                                      request_id, payload);
+        (void)dispatcher_.send(connection_id, wire, nullptr);
+    }
+
+    // The client is telling us who it claims to be and offering an ephemeral
+    // public key. Nothing is trusted here; the exchange only exists so both
+    // machines can compute the same six-digit code for a human to compare.
+    bool process_pairing_hello(ConnectionState& state,
+                               const protocol::TcpFrame& frame) {
+        const auto hello = pairing::decode_pairing_hello(frame.payload);
+        if (!hello) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::protocol_error,
+                "invalid pairing hello");
+        }
+        auto key_pair = pairing::EphemeralKeyPair::generate(nullptr);
+        if (!key_pair || key_pair->agreement() != hello->agreement) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::protocol_error,
+                "pairing key agreement is unavailable");
+        }
+        pairing::PairingOffer offer;
+        offer.agreement = key_pair->agreement();
+        const auto public_key = key_pair->public_key();
+        offer.server_public_key.assign(public_key.begin(), public_key.end());
+        if (!security::generate_random(offer.server_nonce)) {
+            return refuse_pairing(state, frame.envelope.request_id,
+                                  pairing::PairingRejectReason::unspecified,
+                                  "pairing nonce generation failed");
+        }
+        auto transcript = pairing::make_transcript(*hello, offer);
+        if (!transcript) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::protocol_error,
+                "pairing transcript is malformed");
+        }
+        auto shared = key_pair->agree(hello->client_public_key, nullptr);
+        if (!shared) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::protocol_error,
+                "pairing key agreement rejected the peer key");
+        }
+        auto secrets = pairing::derive_pairing_secrets(*shared, *transcript);
+        security::secure_zero(*shared);
+        if (!secrets) {
+            return refuse_pairing(state, frame.envelope.request_id,
+                                  pairing::PairingRejectReason::unspecified,
+                                  "pairing key derivation failed");
+        }
+        const auto offer_payload = pairing::encode_pairing_offer(offer);
+        if (offer_payload.empty()) {
+            pairing::secure_zero(*secrets);
+            fail_handshake(state, "pairing offer encoding failed");
+            return false;
+        }
+
+        std::uint64_t pairing_id = 0;
+        std::vector<AbandonedPairing> expired;
+        const char* refusal = nullptr;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            expired = take_expired_locked(std::chrono::steady_clock::now());
+            if (!pairing_window_open_) {
+                refusal = "pairing window is closed";
+            } else if (pending_pairings_.size() >= kMaximumPendingPairings) {
+                refusal = "too many pairing requests are pending";
+            } else {
+                pairing_id = next_pairing_id_++;
+                PendingPairingRecord record;
+                record.pairing_id = pairing_id;
+                record.connection_id = state.connection_id;
+                record.request_id = frame.envelope.request_id;
+                record.address = state.source;
+                record.transcript = std::move(*transcript);
+                record.secrets = std::move(*secrets);
+                record.expires_at =
+                    std::chrono::steady_clock::now() + kPairingApprovalWindow;
+                pending_pairings_.emplace(pairing_id, std::move(record));
+            }
+        }
+        refuse_abandoned(expired, pairing::PairingRejectReason::timed_out);
+        // Moving a PairingSecrets copies its digests, so the local copy still
+        // holds key material whether or not the record was stored.
+        pairing::secure_zero(*secrets);
+        if (refusal != nullptr) {
+            return refuse_pairing(state, frame.envelope.request_id,
+                                  pairing::PairingRejectReason::unavailable,
+                                  refusal);
+        }
+
+        const auto wire = plain_frame(protocol::CommandType::pairing_offer,
+                                      frame.envelope.request_id, offer_payload);
+        if (!dispatcher_.send(state.connection_id, wire, nullptr)) {
+            drop_pending_pairing(pairing_id);
+            return false;
+        }
+        state.pairing_id = pairing_id;
+        state.handshake_request_id = frame.envelope.request_id;
+        state.stage = Stage::pairing_offered;
+        return true;
+    }
+
+    // The client's tag proves it derived the same secret from the same
+    // transcript. That is not proof of identity - a man in the middle can do
+    // it too - but it does mean only requests that got that far are worth
+    // showing to the teacher.
+    bool process_pairing_confirm(ConnectionState& state,
+                                 const protocol::TcpFrame& frame) {
+        if (frame.envelope.type == protocol::CommandType::heartbeat) {
+            return answer_pairing_heartbeat(state, frame);
+        }
+        if (frame.envelope.type != protocol::CommandType::pairing_confirm ||
+            frame.envelope.request_id != state.handshake_request_id) {
+            fail_handshake(state, "expected pairing confirmation");
+            return false;
+        }
+        const auto confirm = pairing::decode_pairing_confirm(frame.payload);
+        bool verified = false;
+        bool found_record = false;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            const auto found = pending_pairings_.find(state.pairing_id);
+            found_record = found != pending_pairings_.end();
+            if (found_record) {
+                verified = confirm.has_value() &&
+                           pairing::verify_confirmation_tag(
+                               found->second.secrets, found->second.transcript,
+                               pairing::ConfirmationRole::client,
+                               confirm->client_tag);
+                if (verified) {
+                    found->second.client_confirmed = true;
+                    found->second.expires_at =
+                        std::chrono::steady_clock::now() +
+                        kPairingApprovalWindow;
+                } else {
+                    pending_pairings_.erase(found);
+                }
+            }
+        }
+        if (!found_record) {
+            fail_handshake(state, "pairing request is no longer pending");
+            return false;
+        }
+        if (!verified) {
+            return refuse_pairing(
+                state, frame.envelope.request_id,
+                pairing::PairingRejectReason::confirmation_failed,
+                "pairing confirmation did not verify");
+        }
+        state.stage = Stage::pairing_pending;
+        return true;
+    }
+
+    // Waiting on a human. The dispatcher closes idle connections after fifteen
+    // seconds, so the client keeps this one alive with heartbeats rather than
+    // the server holding the timeout open for anything that connects.
+    bool process_pairing_wait(ConnectionState& state,
+                              const protocol::TcpFrame& frame) {
+        if (state.pairing_settled.load()) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+        if (frame.envelope.type != protocol::CommandType::heartbeat) {
+            fail_handshake(state, "unexpected frame while pairing is pending");
+            return false;
+        }
+        return answer_pairing_heartbeat(state, frame);
+    }
+
+    bool answer_pairing_heartbeat(ConnectionState& state,
+                                  const protocol::TcpFrame& frame) {
+        if (!frame.payload.empty()) {
+            fail_handshake(state, "invalid pairing heartbeat");
+            return false;
+        }
+        const auto wire = plain_frame(protocol::CommandType::heartbeat,
+                                      frame.envelope.request_id, {});
+        return dispatcher_.send(state.connection_id, wire, nullptr);
+    }
+
+    // Tells the client why before closing, so the machine in front of the
+    // student can say something more useful than "connection lost". Must not
+    // be called while pairing_mutex_ is held.
+    bool refuse_pairing(ConnectionState& state, std::uint64_t request_id,
+                        pairing::PairingRejectReason reason,
+                        const char* detail) {
+        send_pairing_reject(state.connection_id, request_id, reason);
+        fail_handshake(state, detail);
+        return false;
+    }
+
+    void refuse_abandoned(const std::vector<AbandonedPairing>& abandoned,
+                          pairing::PairingRejectReason reason) {
+        for (const auto& entry : abandoned) {
+            send_pairing_reject(entry.connection_id, entry.request_id, reason);
+            settle_pairing_connection(entry.connection_id);
+        }
+    }
+
+    void drop_pending_pairing(std::uint64_t pairing_id) {
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        pending_pairings_.erase(pairing_id);
+    }
+
+    void drop_pending_pairings_for(net::ConnectionId connection_id) {
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        std::erase_if(pending_pairings_, [connection_id](const auto& entry) {
+            return entry.second.connection_id == connection_id;
+        });
+    }
+
+    void settle_pairing_connection(net::ConnectionId connection_id) {
+        const auto state = state_for_connection(connection_id);
+        if (state) {
+            state->pairing_settled.store(true);
+        }
+    }
+
+    std::vector<AbandonedPairing> take_expired_locked(
+        std::chrono::steady_clock::time_point now) {
+        std::vector<AbandonedPairing> expired;
+        for (auto entry = pending_pairings_.begin();
+             entry != pending_pairings_.end();) {
+            if (entry->second.expires_at > now) {
+                ++entry;
+                continue;
+            }
+            expired.push_back(AbandonedPairing{
+                .connection_id = entry->second.connection_id,
+                .request_id = entry->second.request_id,
+            });
+            entry = pending_pairings_.erase(entry);
+        }
+        return expired;
     }
 
     bool process_enrollment(ConnectionState& state,
@@ -711,6 +1376,10 @@ private:
         record.status = ClientStatus::online;
         record.last_seen = std::chrono::steady_clock::now();
         registry_.upsert(std::move(record));
+        // Current-session protection proof belongs to the connection that
+        // produced it. Reconnect first retires it; the client then sends a fresh
+        // boot-bound probe report.
+        (void)registry_.demote_uwf_verification(registry_id);
         dispatcher_.record_handshake_success(state.connection_id);
         if (previous_connection != 0 &&
             previous_connection != state.connection_id) {
@@ -736,6 +1405,84 @@ private:
         }
         if (command->envelope.type == protocol::CommandType::heartbeat) {
             (void)registry_.touch(state.registry_id.load());
+            return true;
+        }
+        if (command->envelope.type == protocol::CommandType::uwf_report) {
+            const auto report =
+                control::decode_uwf_configure_report(command->payload);
+            if (!report || !registry_.set_uwf_report(
+                               state.registry_id.load(), *report)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
+        if (command->envelope.type ==
+            protocol::CommandType::uwf_fleet_status) {
+            const auto report =
+                control::decode_uwf_fleet_status_report(command->payload);
+            if (!report || !registry_.set_uwf_fleet_status(
+                               state.registry_id.load(), *report)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
+        if (command->envelope.type == protocol::CommandType::audit_upload) {
+            // process_authenticated runs with state.mutex already held (see
+            // on_bytes), so the reply goes out through send_authenticated_locked
+            // without taking the lock again.
+            const auto records = audit::decode_audit_chunk(command->payload);
+            if (!records) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            const auto registry_id = state.registry_id.load();
+            std::uint64_t last_accepted = 0;
+            if (audit_rate_limiter_.allow(registry_id,
+                                          unix_milliseconds_now())) {
+                if (!audit_sink_.is_open()) {
+                    // No central sink is configured on this server. Acknowledge
+                    // so a client does not spool forever, accepting that these
+                    // records are not persisted centrally.
+                    for (const auto& record : *records) {
+                        last_accepted = std::max(last_accepted, record.sequence);
+                    }
+                } else {
+                    // Records arrive in ascending sequence order. Advance the
+                    // acknowledgement only past records actually written, and
+                    // stop at the first failed write so the client retries from
+                    // there rather than dropping records on a full disk or a
+                    // failed rotation.
+                    for (const auto& record : *records) {
+                        if (!audit_sink_.write(record)) {
+                            break;
+                        }
+                        last_accepted = record.sequence;
+                    }
+                }
+            }
+            // A throttled chunk, or one the sink could not accept, is
+            // acknowledged with the last durably written sequence (0 if none),
+            // so the client keeps the rest and retries later.
+            const auto ack = audit::encode_audit_ack(last_accepted);
+            if (!send_authenticated_locked(
+                    state, protocol::CommandType::audit_ack,
+                    command->envelope.request_id, ack, nullptr)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
+        if (command->envelope.type ==
+            protocol::CommandType::freeze_report) {
+            const auto frozen =
+                control::decode_freeze_state(command->payload);
+            if (!frozen || !registry_.set_frozen(
+                               state.registry_id.load(), *frozen)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
             return true;
         }
         if (command->envelope.type == protocol::CommandType::status_report ||
@@ -854,6 +1601,7 @@ private:
 
     void on_disconnected(net::ConnectionId id) {
         std::shared_ptr<ConnectionState> state;
+        bool owned_mapping = false;
         {
             std::scoped_lock lock(states_mutex_);
             const auto found = states_.find(id);
@@ -869,14 +1617,23 @@ private:
                 if (mapping != client_connections_.end() &&
                     mapping->second == id) {
                     client_connections_.erase(mapping);
+                    owned_mapping = true;
                 }
             }
         }
         const auto registry_id = state->registry_id.load();
-        if (registry_id != 0) {
+        // Act only when this disconnect still owned the registry mapping. On a
+        // reconnect the replacement connection has already claimed the mapping
+        // and may have reported a fresh current-session UWF proof; a late
+        // disconnect from the superseded connection must not mark the client
+        // offline or retire that new proof, which would close the exam gate
+        // until the next probe for no reason.
+        if (registry_id != 0 && owned_mapping) {
             (void)registry_.set_status(registry_id,
                                        ClientStatus::offline);
+            (void)registry_.demote_uwf_verification(registry_id);
         }
+        drop_pending_pairings_for(id);
     }
 
 public:
@@ -886,10 +1643,24 @@ public:
     // This journal is server-owned and intentionally never placed under a
     // client freeze/UWF overlay. It remains authoritative across reconnects.
     exam::AnswerJournal exam_journal_;
+    // Central audit sink. Distinct from the answer journal and from telemetry:
+    // it records that NSTU activity happened, never exam or answer content.
+    audit::Sink audit_sink_;
+    audit::UploadRateLimiter audit_rate_limiter_;
+    std::atomic<std::uint64_t> next_audit_sequence_ = 1;
+    discovery::AuthenticatedDiscoveryResponder discovery_responder_;
     net::IocpDispatcher dispatcher_;
     security::ReplayProtector replay_protector_;
     std::unique_ptr<security::EnrollmentAuthority> enrollment_authority_;
     std::mutex enrollment_mutex_;
+    mutable std::mutex pairing_mutex_;
+    std::unordered_map<std::uint64_t, PendingPairingRecord> pending_pairings_;
+    bool pairing_window_open_ = false;
+    // Operator-facing room label advertised on the pairing beacon. Guarded by
+    // pairing_mutex_ alongside the window flag. A display hint, never a
+    // credential: sanitized to the discovery name bound, empty means "not set".
+    std::string server_name_;
+    std::uint64_t next_pairing_id_ = 1;
     mutable std::mutex states_mutex_;
     mutable std::mutex exam_contexts_mutex_;
     std::unordered_map<net::ConnectionId,
@@ -898,6 +1669,10 @@ public:
     std::unordered_map<std::uint64_t, ActiveExamContext>
         active_exam_contexts_;
     std::atomic<std::uint64_t> next_request_id_ = 1;
+    // Fleet operation ids must be non-zero, so this counter starts at 1 and only
+    // ever increases. Every fleet status report is matched back to an operation
+    // by this id.
+    std::atomic<std::uint64_t> next_uwf_operation_id_ = 1;
 };
 
 ServerControlPlane::ServerControlPlane(ClientRegistry& registry,
@@ -913,6 +1688,41 @@ bool ServerControlPlane::start(ServerControlPlaneConfig config,
 
 void ServerControlPlane::stop() noexcept { impl_->stop(); }
 
+void ServerControlPlane::set_pairing_window(bool open,
+                                            std::string_view server_name) {
+    impl_->set_pairing_window(open, server_name);
+}
+
+bool ServerControlPlane::pairing_window_open() const noexcept {
+    return impl_->pairing_window_open();
+}
+
+std::string ServerControlPlane::server_name() const {
+    return impl_->server_name();
+}
+
+void ServerControlPlane::set_server_name(std::string_view name) {
+    impl_->set_server_name(name);
+}
+
+std::vector<PendingPairing> ServerControlPlane::pending_pairings() const {
+    return impl_->pending_pairings();
+}
+
+bool ServerControlPlane::approve_pairing(std::uint64_t pairing_id,
+                                         std::string* error) {
+    return impl_->approve_pairing(pairing_id, error);
+}
+
+bool ServerControlPlane::reject_pairing(std::uint64_t pairing_id,
+                                        std::string* error) {
+    return impl_->reject_pairing(pairing_id, error);
+}
+
+std::size_t ServerControlPlane::expire_pending_pairings() {
+    return impl_->expire_pending_pairings();
+}
+
 bool ServerControlPlane::send_command(std::uint64_t client_id,
                                       protocol::CommandType type,
                                       std::span<const std::byte> payload,
@@ -925,6 +1735,29 @@ bool ServerControlPlane::set_locked(std::uint64_t client_id, bool locked,
     return send_command(client_id, locked ? protocol::CommandType::lock
                                           : protocol::CommandType::unlock,
                         {}, error);
+}
+
+bool ServerControlPlane::set_frozen(std::uint64_t client_id, bool frozen,
+                                    std::string* error) {
+    const auto payload = control::encode_freeze_state(frozen);
+    return send_command(client_id, protocol::CommandType::freeze_set,
+                        payload, error);
+}
+
+bool ServerControlPlane::configure_uwf(
+    std::uint64_t client_id, bool checkpoint_acknowledged,
+    std::string* error) {
+    const auto payload =
+        control::encode_uwf_configure_request(checkpoint_acknowledged);
+    return send_command(client_id, protocol::CommandType::uwf_configure,
+                        payload, error);
+}
+
+bool ServerControlPlane::configure_uwf_fleet(
+    std::uint64_t client_id, bool checkpoint_acknowledged,
+    bool restart_requested, std::string* error) {
+    return impl_->configure_uwf_fleet(client_id, checkpoint_acknowledged,
+                                      restart_requested, error);
 }
 
 bool ServerControlPlane::set_streaming(std::uint64_t client_id, bool enabled,

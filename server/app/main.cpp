@@ -1,6 +1,7 @@
 #include "nstu/client_registry.hpp"
 #include "nstu/control_plane.hpp"
 #include "nstu/deployment.hpp"
+#include "nstu/discovery.hpp"
 #include "nstu/key_store.hpp"
 #include "nstu/screen_snapshot.hpp"
 #include "nstu/secret_store.hpp"
@@ -31,6 +32,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <deque>
 #include <iomanip>
 #include <sstream>
@@ -420,6 +422,8 @@ struct DashboardState {
     ImVec2 remote_pointer_last{};
     std::array<char, 64> remote_keyboard_input{};
     bool annotation_enabled = false;
+    bool uwf_confirmation_open = false;
+    std::uint64_t uwf_confirmation_client_id = 0;
     bool annotation_dragging = false;
     ImVec2 previous_annotation_point{};
     AnnotationTool annotation_tool = AnnotationTool::pen;
@@ -427,11 +431,20 @@ struct DashboardState {
     int annotation_thickness = 4;
     std::chrono::steady_clock::time_point next_host_snapshot{};
     std::string control_status;
+    std::string pairing_status;
     std::string startup_error;
     std::string telemetry_report_preview;
     bool telemetry_report_requested = false;
     std::array<char, 96> client_filter{};
     std::array<char, 512> chat_input{};
+    // Operator-editable room label shown to computers choosing this server. The
+    // buffer backs the "Add computers" text field (sized to the discovery name
+    // bound plus a NUL); room_name_path is where the plaintext hint persists and
+    // is empty when the data root is unavailable. A display hint, never a
+    // credential.
+    std::array<char, nstu::discovery::kMaximumServerNameBytes + 1>
+        room_name_input{};
+    std::filesystem::path room_name_path;
 };
 
 const char* tr(const DashboardState& state, const char* english,
@@ -1478,6 +1491,96 @@ void draw_selected_client(
     ImGui::SameLine();
     draw_status_badge(selected_client->status, state);
     ImGui::TextDisabled("%s", selected_client->address.c_str());
+    bool managed = selected_client->frozen;
+    if (ImGui::Checkbox(
+            tr(state, "Managed mode", "Chế độ được quản lý"),
+            &managed)) {
+        std::string error;
+        const bool sent = control_plane.set_frozen(
+            selected_client->id, managed, &error);
+        state.control_status = sent
+            ? (managed
+                   ? tr(state, "Managed mode request sent.",
+                        "Đã gửi yêu cầu bật chế độ được quản lý.")
+                   : tr(state, "Thaw request sent.",
+                        "Đã gửi yêu cầu tắt chế độ được quản lý."))
+            : error;
+        if (!sent) {
+            record_operation_failure(
+                "ManagedMode", "Managed-mode command failed", error);
+        }
+        ImGui::OpenPopup("control-status");
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", tr(
+            state,
+            "Blocks service stop and uninstall until disabled here or by a local administrator.",
+            "Chặn dừng dịch vụ và gỡ cài đặt cho đến khi tắt tại đây hoặc bởi quản trị viên cục bộ."));
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Enable reboot-to-restore",
+                         "Bật khôi phục sau reboot"))) {
+        state.uwf_confirmation_client_id = selected_client->id;
+        state.uwf_confirmation_open = true;
+        ImGui::OpenPopup("uwf-confirmation");
+    }
+    if (selected_client->uwf.reported ||
+        selected_client->uwf.phase !=
+            nstu::control::UwfFleetPhase::idle) {
+        const bool proven =
+            selected_client->uwf.proves_current_protection();
+        ImGui::TextColored(
+            proven ? (g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
+                                  : ImVec4{0.10f, 0.55f, 0.24f, 1.0f})
+                   : (g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
+                                  : ImVec4{0.63f, 0.36f, 0.02f, 1.0f}),
+            "%s", nstu::server::to_string(selected_client->uwf.phase));
+        if (!selected_client->uwf.detail.empty()) {
+            ImGui::TextWrapped("%s", selected_client->uwf.detail.c_str());
+        }
+        if (proven) {
+            ImGui::TextColored(
+                g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
+                            : ImVec4{0.10f, 0.55f, 0.24f, 1.0f},
+                "%s",
+                tr(state,
+                   "Reboot-to-restore protected in this session. Exam mode is "
+                   "permitted.",
+                   "Đã bảo vệ khôi phục sau reboot trong phiên này. Cho phép "
+                   "chế độ thi."));
+        }
+    }
+    if (state.uwf_confirmation_open &&
+        ImGui::BeginPopupModal("uwf-confirmation", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", tr(
+            state,
+            "This runs full client readiness checks, preserves NSTU data and registry state, then arms Unified Write Filter for the next restart. Create or verify a recovery checkpoint before continuing. A successful setup shows a 60-second countdown and restarts the client automatically.",
+            "Thao tác này chạy đầy đủ kiểm tra sẵn sàng, giữ lại dữ liệu và registry NSTU, rồi chuẩn bị Unified Write Filter cho lần khởi động tiếp theo. Hãy tạo hoặc xác minh điểm khôi phục trước khi tiếp tục. Khi thiết lập thành công, máy client sẽ hiển thị đếm ngược 60 giây rồi tự khởi động lại."));
+        if (ImGui::Button(tr(state, "I verified the checkpoint; enable",
+                             "Đã xác minh điểm khôi phục; bật"))) {
+            std::string error;
+            // Fleet path: arm UWF and request the visible client restart, so a
+            // fresh boot-bound probe can prove current-session protection.
+            const bool sent = control_plane.configure_uwf_fleet(
+                state.uwf_confirmation_client_id, true, true, &error);
+            state.control_status = sent
+                ? tr(state, "UWF readiness request sent.",
+                     "Đã gửi yêu cầu kiểm tra và bật UWF.")
+                : error;
+            if (!sent) {
+                record_operation_failure("UWF", "UWF command failed", error);
+            }
+            state.uwf_confirmation_open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr(state, "Cancel", "Hủy"))) {
+            state.uwf_confirmation_open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 
     char latency[32]{};
     char packet_loss[32]{};
@@ -2042,7 +2145,19 @@ void draw_preferences(DashboardState& state) {
         state,
         "Disabled by default. Events stay in memory and are discarded when NSTU exits. Nothing is uploaded automatically; review the report before posting it to the public GitHub issue tracker.",
         "Mặc định tắt. Sự kiện chỉ nằm trong bộ nhớ và bị xóa khi NSTU thoát. Không có dữ liệu nào tự động tải lên; hãy xem lại báo cáo trước khi đăng lên GitHub Issues công khai."));
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextDisabled("%s", tr(state, "About", "Giới thiệu"));
+    ImGui::Text("NSTU %s", NSTU_PROJECT_VERSION);
+    ImGui::TextWrapped("%s", tr(
+        state,
+        "Open-source classroom management under the MIT License. Developed with AI assistance; changes remain human-reviewed and publicly auditable.",
+        "Phần mềm quản lý lớp học mã nguồn mở theo giấy phép MIT. Được phát triển với hỗ trợ AI; các thay đổi vẫn được con người rà soát và có thể kiểm tra công khai."));
     if (g_telemetry_policy.collect_in_background) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("%s", tr(state, "Diagnostic data",
+                                      "Dữ liệu chẩn đoán"));
         ImGui::Text("%s: %llu / %llu",
                     tr(state, "Collected events", "Sự kiện đã thu thập"),
                     static_cast<unsigned long long>(g_telemetry_events.size()),
@@ -2282,7 +2397,232 @@ void draw_telemetry_report_popup(DashboardState& state,
     ImGui::EndPopup();
 }
 
-void draw_menu_strip(DashboardState& state, bool has_clients) {
+// The computer name is the only label a teacher reliably recognises in a
+// selection menu. The beacon sanitizes it again before it reaches the wire.
+std::string local_server_name() {
+    char name[MAX_COMPUTERNAME_LENGTH + 1]{};
+    DWORD length = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameA(name, &length) && length > 0) {
+        return std::string(name, length);
+    }
+    return "NSTU";
+}
+
+// The room name is a persisted display hint, not a secret, so it lives in a
+// small plaintext file under the data root rather than the protected keyring. A
+// missing or unreadable file means "no room configured" and the beacon falls
+// back to the computer name. Only the first line is the label; trailing CR (a
+// CRLF file) and surrounding spaces are trimmed so a hand-edited file still
+// round-trips. The control plane sanitizes the value to the discovery bound
+// before it reaches the wire, so a corrupt file can only mangle the label,
+// never the pairing that the six-digit code secures.
+std::string load_room_name(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return {};
+    }
+    std::string line;
+    std::getline(file, line);
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+    const auto first = line.find_first_not_of(" \t");
+    if (first == std::string::npos) {
+        return {};
+    }
+    const auto last = line.find_last_not_of(" \t");
+    return line.substr(first, last - first + 1);
+}
+
+// Persists the room label as plaintext. Best-effort: a write failure only means
+// the label will not survive a restart, so the caller surfaces it as a benign
+// status rather than a hard error. The value is written verbatim; the control
+// plane has already sanitized it to the discovery bound.
+bool save_room_name(const std::filesystem::path& path, std::string_view name) {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        return false;
+    }
+    file << name;
+    return static_cast<bool>(file);
+}
+
+// Six digits compared out loud across a room are easier to read in two groups.
+std::string grouped_code(const std::string& code) {
+    return code.size() == 6 ? code.substr(0, 3) + " " + code.substr(3) : code;
+}
+
+// The room-name field lets the operator label this server so a student machine
+// on a shared VLAN can target the right classroom by name. Editing it pushes
+// each keystroke to the live beacon (a client sweeping right now sees the new
+// label) and, once editing settles, persists the plaintext hint and reflects
+// the sanitized value back so the field matches what is advertised and saved.
+// The six-digit SAS the operator still compares is unaffected: the room name
+// only routes, it never authorizes.
+void draw_room_name_field(DashboardState& state,
+                          nstu::server::ServerControlPlane& control_plane) {
+    ImGui::TextUnformatted(tr(state,
+        "Room name (optional label shown to computers)",
+        "Tên phòng (nhãn tùy chọn hiển thị cho máy)"));
+    ImGui::SetNextItemWidth(360.0f);
+    if (ImGui::InputText("##room-name", state.room_name_input.data(),
+                         state.room_name_input.size())) {
+        control_plane.set_server_name(state.room_name_input.data());
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        const std::string sanitized = control_plane.server_name();
+        std::snprintf(state.room_name_input.data(),
+                      state.room_name_input.size(), "%s", sanitized.c_str());
+        if (!state.room_name_path.empty() &&
+            !save_room_name(state.room_name_path, sanitized)) {
+            record_operation_failure("Pairing",
+                                     "Room name could not be saved", "");
+        }
+    }
+    ImGui::TextDisabled("%s", tr(state,
+        "Leave blank to use the computer name.",
+        "Để trống để dùng tên máy tính."));
+}
+
+// The operator's half of verified pairing. By the time a row appears here the
+// key exchange is done and the client has already proved it derived the same
+// secret, so what is left is the one thing arithmetic cannot settle: whether
+// the machine on the other end of that exchange is the machine the teacher is
+// standing next to. Comparing the six digits answers it, and nothing turns
+// into a key without it.
+void draw_pairing_requests(DashboardState& state,
+                           nstu::server::ServerControlPlane& control_plane) {
+    ImGui::TextUnformatted(tr(state,
+        "New computers can find this server while this window is open.",
+        "Máy mới có thể tìm thấy máy "
+        "chủ này khi cửa sổ này đang mở."));
+    ImGui::TextDisabled("%s", tr(state,
+        "Approve only if the code matches the one shown on that computer.",
+        "Chỉ duyệt khi mã trùng với mã "
+        "hiển thị trên máy đó."));
+    ImGui::Separator();
+    const auto pending = control_plane.pending_pairings();
+    if (pending.empty()) {
+        ImGui::Dummy({656.0f, 8.0f});
+        ImGui::TextDisabled("%s", tr(state, "Waiting for computers...",
+                                     "Đang chờ máy..."));
+        ImGui::Dummy({656.0f, 8.0f});
+    } else if (ImGui::BeginTable("pairing-requests", 4,
+                                 ImGuiTableFlags_RowBg |
+                                     ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn(tr(state, "Computer", "Máy"),
+                                ImGuiTableColumnFlags_WidthFixed, 300.0f);
+        ImGui::TableSetupColumn(tr(state, "Code", "Mã"),
+                                ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn(tr(state, "Time left", "Còn lại"),
+                                ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        ImGui::TableSetupColumn("##pairing-actions",
+                                ImGuiTableColumnFlags_WidthFixed, 176.0f);
+        ImGui::TableHeadersRow();
+        for (const auto& request : pending) {
+            push_client_id(request.pairing_id);
+            ImGui::TableNextRow(0, 46.0f);
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(request.hostname.c_str());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", request.address.c_str());
+            }
+            ImGui::TextDisabled("%s", request.client_uuid.c_str());
+            ImGui::TableSetColumnIndex(1);
+            if (g_heading_font != nullptr) {
+                ImGui::PushFont(g_heading_font);
+            }
+            ImGui::TextUnformatted(
+                grouped_code(request.short_authentication_string).c_str());
+            if (g_heading_font != nullptr) {
+                ImGui::PopFont();
+            }
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%u s",
+                        static_cast<unsigned>(request.seconds_remaining));
+            ImGui::TableSetColumnIndex(3);
+            std::string error;
+            if (ImGui::Button(tr(state, "Approve", "Duyệt"),
+                              {84.0f, 30.0f})) {
+                if (control_plane.approve_pairing(request.pairing_id,
+                                                  &error)) {
+                    state.pairing_status = request.hostname + " " +
+                        tr(state, "is now enrolled.",
+                           "đã được ghép "
+                           "nối.");
+                } else {
+                    record_operation_failure("Pairing",
+                                             "Approve request failed", error);
+                    state.pairing_status = error;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(tr(state, "Reject", "Từ chối"),
+                              {84.0f, 30.0f})) {
+                if (control_plane.reject_pairing(request.pairing_id, &error)) {
+                    state.pairing_status = request.hostname + " " +
+                        tr(state, "was turned away.",
+                           "đã bị từ chối.");
+                } else {
+                    record_operation_failure("Pairing",
+                                             "Reject request failed", error);
+                    state.pairing_status = error;
+                }
+            }
+            pop_client_id();
+        }
+        ImGui::EndTable();
+    }
+    if (!state.pairing_status.empty()) {
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", state.pairing_status.c_str());
+    }
+}
+
+void draw_pairing_popup(DashboardState& state,
+                        nstu::server::ServerControlPlane& control_plane) {
+    constexpr float button_width = 140.0f;
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - 242.0f);
+    if (ImGui::Button(tr(state, "Add computers", "Thêm máy"),
+                      {button_width, 28.0f})) {
+        state.pairing_status.clear();
+        // Seed the editable field from the live room label so it shows what the
+        // beacon is currently advertising (empty means "using the computer
+        // name"). The configured name already wins inside set_pairing_window,
+        // so the computer name here is only the fallback.
+        const std::string current_room = control_plane.server_name();
+        std::snprintf(state.room_name_input.data(),
+                      state.room_name_input.size(), "%s",
+                      current_room.c_str());
+        control_plane.set_pairing_window(true, local_server_name());
+        ImGui::OpenPopup("pairing-popup");
+    }
+    bool staying_open = true;
+    if (ImGui::BeginPopupModal(
+            tr(state, "Add computers###pairing-popup",
+               "Thêm máy###pairing-popup"),
+            &staying_open, ImGuiWindowFlags_AlwaysAutoResize)) {
+        draw_room_name_field(state, control_plane);
+        ImGui::Separator();
+        draw_pairing_requests(state, control_plane);
+        ImGui::Separator();
+        if (ImGui::Button(tr(state, "Done", "Xong"), {110.0f, 30.0f})) {
+            staying_open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    // The beacon must not outlive the dialog. Leaving this screen is how the
+    // operator says they have stopped watching for new machines, so anything
+    // still waiting on an answer is turned away rather than carried over.
+    if (!staying_open || (!ImGui::IsPopupOpen("pairing-popup") &&
+                          control_plane.pairing_window_open())) {
+        control_plane.set_pairing_window(false);
+    }
+}
+
+void draw_menu_strip(DashboardState& state, bool has_clients,
+                     nstu::server::ServerControlPlane& control_plane) {
     if (!ImGui::BeginChild("menu-strip", {0, 31.0f}, false,
                            ImGuiWindowFlags_NoScrollbar)) {
         ImGui::EndChild();
@@ -2295,6 +2635,15 @@ void draw_menu_strip(DashboardState& state, bool has_clients) {
     if (g_heading_font != nullptr) {
         ImGui::PopFont();
     }
+#if NSTU_DEV_UNPROTECTED_EXAM
+    // Permanent, unmissable marker for the public DEV channel. This build starts
+    // exams without proven reboot-to-restore protection; the operator must never
+    // mistake it for a Release install.
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4{0.96f, 0.36f, 0.36f, 1.0f}, "%s",
+                       tr(state, "DEV (UNPROTECTED) - exams run without UWF",
+                          "DEV (KHÔNG BẢO VỆ) - thi không cần UWF"));
+#endif
     ImGui::SameLine();
     if (draw_segment_option(tr(state, "Class", "Lớp"),
                             state.view == DashboardView::room_screens, 58.0f)) {
@@ -2308,6 +2657,7 @@ void draw_menu_strip(DashboardState& state, bool has_clients) {
         state.view = DashboardView::selected_client;
     }
     ImGui::EndDisabled();
+    draw_pairing_popup(state, control_plane);
     draw_diagnostics_popup(state);
     draw_preferences(state);
     ImGui::EndChild();
@@ -2579,7 +2929,7 @@ void draw_dashboard_shell(
     const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
-    draw_menu_strip(state, !clients.empty());
+    draw_menu_strip(state, !clients.empty(), control_plane);
     draw_telemetry_report_popup(state, clients.size());
     draw_ribbon(clients, selected_client, state, control_plane);
     draw_workspace_toolbar(clients, state);
@@ -2684,6 +3034,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                 sizeof(entropy_text) - 1);
         control_config.enrollment_secret = nstu::security::load_machine_secret(
             (data_directory / L"server-enrollment.bin").wstring(), {}, nullptr);
+        // Operator-chosen room label (a display hint, not a secret): remember
+        // the path so the "Add computers" field can rewrite it, and load the
+        // plaintext file so the beacon advertises it. start() sanitizes it.
+        dashboard.room_name_path = data_directory / L"server-room-name.txt";
+        control_config.server_name = load_room_name(dashboard.room_name_path);
         std::string control_error;
         if (!control_plane.start(std::move(control_config), &control_error)) {
             dashboard.startup_error = control_error.empty()
@@ -2729,6 +3084,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                          ImGuiWindowFlags_NoBringToFrontOnFocus);
 
         const auto clients = registry.snapshot();
+        // Requests the teacher never answered clear themselves rather
+        // than sitting in the list until the window is closed.
+        control_plane.expire_pending_pairings();
         const auto now = std::chrono::steady_clock::now();
         if (dashboard.broadcast_enabled &&
             now >= dashboard.next_host_snapshot) {

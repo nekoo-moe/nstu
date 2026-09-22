@@ -31,7 +31,6 @@ if ($RequireSignedArtifacts) {
     $expectedBinaries = @(
         (Join-Path $installRoots[0] "nstu-service.exe"),
         (Join-Path $installRoots[0] "nstu-agent.exe"),
-        (Join-Path $installRoots[0] "nstu-provision.exe"),
         (Join-Path $installRoots[1] "nstu-server.exe"))
     foreach ($path in $expectedBinaries) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {

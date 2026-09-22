@@ -1,5 +1,6 @@
 #include "nstu/agent_protocol.hpp"
 #include "nstu/client_config.hpp"
+#include "nstu/control_messages.hpp"
 
 #include <windows.h>
 #include <wtsapi32.h>
@@ -98,6 +99,19 @@ int main() {
     assert(decoded_status->frames_per_second == 10);
     assert(decoded_status->snapshot_interval_seconds == 7);
     assert(decoded_status->session_id == 7);
+    const nstu::client::AgentMessage managed_message{
+        nstu::client::AgentMessageType::managed_state,
+        nstu::control::encode_freeze_state(true)};
+    const auto managed_wire =
+        nstu::client::encode_agent_message(managed_message);
+    const auto decoded_managed =
+        nstu::client::decode_agent_message(managed_wire);
+    assert(decoded_managed.has_value());
+    assert(decoded_managed->type ==
+           nstu::client::AgentMessageType::managed_state);
+    assert(nstu::control::decode_freeze_state(
+               decoded_managed->payload) == true);
+
     auto corrupt = status_wire;
     corrupt[0] ^= std::byte{1};
     assert(!nstu::client::decode_agent_message(corrupt).has_value());
@@ -121,6 +135,81 @@ int main() {
     const auto remote_message = nstu::client::encode_agent_message(
         {nstu::client::AgentMessageType::remote_input, remote_payload});
     assert(nstu::client::decode_agent_message(remote_message).has_value());
+
+    // Pairing IPC. The selection list and the six digits come off the network
+    // and go straight onto a screen, so the decoder is the place that has to
+    // refuse anything that is not what it claims to be.
+    const std::vector<nstu::client::AgentPairingChoice> choices{
+        {.server_name = "Lab A", .address = "192.168.1.10", .port = 47001},
+        {.server_name = "Lab B", .address = "192.168.1.11", .port = 47002},
+    };
+    const auto choices_payload =
+        nstu::client::encode_agent_pairing_choices(choices);
+    assert(!choices_payload.empty());
+    const auto decoded_choices =
+        nstu::client::decode_agent_pairing_choices(choices_payload);
+    assert(decoded_choices.has_value());
+    assert(decoded_choices->size() == 2);
+    assert((*decoded_choices)[1].server_name == "Lab B");
+    assert((*decoded_choices)[1].address == "192.168.1.11");
+    assert((*decoded_choices)[1].port == 47002);
+    // Nothing useful can be said about an empty list, a port of zero, or a
+    // name carrying control characters, so none of them encode at all.
+    assert(nstu::client::encode_agent_pairing_choices({}).empty());
+    const std::vector<nstu::client::AgentPairingChoice> portless{
+        {.server_name = "Lab A", .address = "10.0.0.1", .port = 0}};
+    assert(nstu::client::encode_agent_pairing_choices(portless).empty());
+    const std::vector<nstu::client::AgentPairingChoice> escaped{
+        {.server_name = "Lab[2J", .address = "10.0.0.1", .port = 47001}};
+    assert(nstu::client::encode_agent_pairing_choices(escaped).empty());
+    auto truncated_choices = choices_payload;
+    truncated_choices.pop_back();
+    assert(!nstu::client::decode_agent_pairing_choices(truncated_choices)
+                .has_value());
+    auto trailing_choices = choices_payload;
+    trailing_choices.push_back(std::byte{0});
+    assert(!nstu::client::decode_agent_pairing_choices(trailing_choices)
+                .has_value());
+
+    const auto selection = nstu::client::encode_agent_pairing_selection(1);
+    assert(!selection.empty());
+    assert(nstu::client::decode_agent_pairing_selection(selection) == 1);
+    assert(nstu::client::encode_agent_pairing_selection(
+               static_cast<std::uint16_t>(
+                   nstu::client::kMaximumPairingChoices))
+               .empty());
+    const std::array<std::byte, 2> out_of_range{std::byte{9}, std::byte{0}};
+    assert(!nstu::client::decode_agent_pairing_selection(out_of_range)
+                .has_value());
+
+    const nstu::client::AgentPairingCode code{.code = "048213",
+                                              .server_name = "Lab A"};
+    const auto code_payload = nstu::client::encode_agent_pairing_code(code);
+    assert(!code_payload.empty());
+    const auto decoded_code =
+        nstu::client::decode_agent_pairing_code(code_payload);
+    assert(decoded_code.has_value());
+    // The leading zero has to survive: it is the difference between a code a
+    // teacher can match and one they cannot.
+    assert(decoded_code->code == "048213");
+    assert(decoded_code->server_name == "Lab A");
+    assert(nstu::client::encode_agent_pairing_code(
+               {.code = "4821", .server_name = "Lab A"})
+               .empty());
+    assert(nstu::client::encode_agent_pairing_code(
+               {.code = "04821x", .server_name = "Lab A"})
+               .empty());
+
+    const nstu::client::AgentPairingStatus pairing_status{
+        .outcome = 1, .detail = "the teacher did not approve this computer"};
+    const auto pairing_status_payload =
+        nstu::client::encode_agent_pairing_status(pairing_status);
+    assert(!pairing_status_payload.empty());
+    const auto decoded_pairing_status =
+        nstu::client::decode_agent_pairing_status(pairing_status_payload);
+    assert(decoded_pairing_status.has_value());
+    assert(decoded_pairing_status->outcome == 1);
+    assert(decoded_pairing_status->detail == pairing_status.detail);
 
     nstu::client::ClientRuntimeConfig runtime;
     runtime.server_address = "127.0.0.1";

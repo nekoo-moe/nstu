@@ -69,6 +69,32 @@ int main() {
     assert(session.has_value());
     nstu::control::AuthenticatedControlChannel channel(
         std::move(socket), std::move(*session));
+    assert(nstu::control::decode_uwf_configure_request(
+               nstu::control::encode_uwf_configure_request(true)) == true);
+    assert(nstu::control::decode_uwf_configure_request(
+               nstu::control::encode_uwf_configure_request(false)) == false);
+    nstu::control::UwfConfigureReport uwf_report{
+        .outcome = nstu::control::UwfConfigureOutcome::armed,
+        .reboot_required = true,
+        .data_exclusion_ready = true,
+        .registry_exclusion_ready = true,
+        .detail = "UWF is armed",
+    };
+    const auto uwf_report_payload =
+        nstu::control::encode_uwf_configure_report(uwf_report);
+    const auto decoded_uwf_report =
+        nstu::control::decode_uwf_configure_report(uwf_report_payload);
+    assert(decoded_uwf_report.has_value());
+    assert(decoded_uwf_report->outcome == uwf_report.outcome);
+    assert(decoded_uwf_report->reboot_required);
+    assert(decoded_uwf_report->data_exclusion_ready);
+    assert(decoded_uwf_report->registry_exclusion_ready);
+    assert(decoded_uwf_report->detail == uwf_report.detail);
+    auto malformed_uwf_report = uwf_report_payload;
+    malformed_uwf_report[1] |= std::byte{0x80};
+    assert(!nstu::control::decode_uwf_configure_report(
+                malformed_uwf_report).has_value());
+
     nstu::control::ClientStatusReport status;
     status.hostname = "LAB-PC-01";
     status.session_id = 3;
@@ -91,6 +117,53 @@ int main() {
     const auto lock = channel.receive(&error);
     assert(lock.has_value());
     assert(lock->envelope.type == nstu::protocol::CommandType::lock);
+
+    assert(control_plane.set_frozen(registry_id, true, &error));
+    const auto freeze = channel.receive(&error);
+    assert(freeze.has_value());
+    assert(freeze->envelope.type ==
+           nstu::protocol::CommandType::freeze_set);
+    assert(nstu::control::decode_freeze_state(freeze->payload) == true);
+    assert(channel.send(
+        nstu::protocol::CommandType::freeze_report, 2,
+        nstu::control::encode_freeze_state(true), &error));
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() && snapshot[0].frozen;
+    }));
+
+    assert(control_plane.set_frozen(registry_id, false, &error));
+    const auto thaw = channel.receive(&error);
+    assert(thaw.has_value());
+    assert(thaw->envelope.type ==
+           nstu::protocol::CommandType::freeze_set);
+    assert(nstu::control::decode_freeze_state(thaw->payload) == false);
+    assert(channel.send(
+        nstu::protocol::CommandType::freeze_report, 3,
+        nstu::control::encode_freeze_state(false), &error));
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() && !snapshot[0].frozen;
+    }));
+
+    assert(control_plane.configure_uwf(registry_id, true, &error));
+    const auto uwf_command = channel.receive(&error);
+    assert(uwf_command.has_value());
+    assert(uwf_command->envelope.type ==
+           nstu::protocol::CommandType::uwf_configure);
+    assert(nstu::control::decode_uwf_configure_request(
+               uwf_command->payload) == true);
+    assert(channel.send(nstu::protocol::CommandType::uwf_report, 4,
+                        uwf_report_payload, &error));
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() && snapshot[0].uwf.reported &&
+               snapshot[0].uwf.phase ==
+                   nstu::control::UwfFleetPhase::awaiting_restart;
+    }));
+    // The single-client report describes an attempt, never a proof, so it must
+    // not open the exam gate.
+    assert(!registry.snapshot()[0].uwf.proves_current_protection());
 
     assert(control_plane.set_snapshots(registry_id, true, 7, &error));
     const auto snapshots = channel.receive(&error);
@@ -155,8 +228,31 @@ int main() {
     }
     auto wrong_identity = exam_start;
     wrong_identity.client_id[0] = std::byte{0xff};
+    // Identity is checked in every channel, so a mismatched request is refused
+    // even by the DEV build.
     assert(!control_plane.start_exam(registry_id, wrong_identity, &error));
+#if NSTU_DEV_UNPROTECTED_EXAM
+    // The DEV (UNPROTECTED) build bypasses only the readiness gate: a correctly
+    // formed request starts even with no proven current-session protection.
     assert(control_plane.start_exam(registry_id, exam_start, &error));
+#else
+    // Release fails closed: without proven current-session UWF protection a
+    // correctly formed request is refused, then permitted once a verified
+    // report with a completed probe on a known boot proves protection.
+    assert(!control_plane.start_exam(registry_id, exam_start, &error));
+    nstu::control::UwfFleetStatusReport verified;
+    verified.phase = nstu::control::UwfFleetPhase::verified_protected;
+    verified.probe.probe_succeeded = true;
+    verified.probe.filter_current_enabled = true;
+    verified.probe.system_volume_current_protected = true;
+    for (std::size_t index = 0; index < verified.boot_id.size(); ++index) {
+        verified.boot_id[index] = static_cast<std::byte>(0xa0 + index);
+    }
+    verified.detail = "UWF protects this session";
+    assert(registry.set_uwf_fleet_status(registry_id, verified));
+    assert(registry.snapshot()[0].uwf.proves_current_protection());
+    assert(control_plane.start_exam(registry_id, exam_start, &error));
+#endif
     const auto exam_start_command = channel.receive(&error);
     assert(exam_start_command.has_value());
     assert(exam_start_command->envelope.type ==
@@ -190,7 +286,7 @@ int main() {
 
     status.locked = true;
     const auto locked_payload = nstu::control::encode_status_report(status);
-    assert(channel.send(nstu::protocol::CommandType::status_report, 2,
+    assert(channel.send(nstu::protocol::CommandType::status_report, 5,
                         locked_payload, &error));
     assert(wait_until([&] {
         const auto snapshot = registry.snapshot();
@@ -205,6 +301,53 @@ int main() {
                snapshot[0].status == nstu::server::ClientStatus::offline;
     }));
     control_plane.stop();
+
+    // Server-name plumbing (the room label carried on the pairing beacon). It
+    // is a display/routing hint, so it is sanitized to the discovery name bound
+    // but never trimmed, and it clears when the plane stops. No sockets are
+    // exercised here: server_name() reflects exactly what start() and
+    // set_server_name() stored.
+    {
+        nstu::server::ClientRegistry naming_registry;
+        nstu::security::KeyStore naming_key_store;
+        nstu::server::ServerControlPlane naming_plane(naming_registry,
+                                                      naming_key_store);
+        nstu::server::ServerControlPlaneConfig naming_config;
+        naming_config.port = 0;
+        // A control character in the configured name is replaced; printable
+        // ASCII, interior spaces included, is preserved.
+        naming_config.server_name = "Lab 7\tRoom";
+        assert(naming_plane.start(std::move(naming_config), &error));
+        assert(naming_plane.server_name() == "Lab 7?Room");
+
+        // set_server_name re-sanitizes but does not trim: surrounding spaces
+        // are kept, because a room label is not a credential to normalize.
+        naming_plane.set_server_name("  Room 12  ");
+        assert(naming_plane.server_name() == "  Room 12  ");
+
+        // Over-long names are clamped to the discovery name bound (64 bytes).
+        naming_plane.set_server_name(std::string(200, 'R'));
+        assert(naming_plane.server_name().size() == 64);
+
+        // Stopping clears the advertised name so a restart re-derives it.
+        naming_plane.stop();
+        assert(naming_plane.server_name().empty());
+    }
+
+    // An empty configured name leaves server_name() empty; the beacon then
+    // falls back to the computer name at the call site.
+    {
+        nstu::server::ClientRegistry unnamed_registry;
+        nstu::security::KeyStore unnamed_key_store;
+        nstu::server::ServerControlPlane unnamed_plane(unnamed_registry,
+                                                       unnamed_key_store);
+        nstu::server::ServerControlPlaneConfig unnamed_config;
+        unnamed_config.port = 0;
+        assert(unnamed_plane.start(std::move(unnamed_config), &error));
+        assert(unnamed_plane.server_name().empty());
+        unnamed_plane.stop();
+    }
+
     nstu::security::secure_zero(key);
     return 0;
 }

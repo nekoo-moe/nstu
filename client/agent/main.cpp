@@ -58,6 +58,7 @@ constexpr wchar_t kWindowClass[] = L"NstuAgentOverlay";
 constexpr wchar_t kChatWindowClass[] = L"NstuAgentChat";
 constexpr wchar_t kAnnotationWindowClass[] = L"NstuAgentAnnotation";
 constexpr wchar_t kBroadcastWindowClass[] = L"NstuAgentBroadcast";
+constexpr wchar_t kPairingWindowClass[] = L"NstuAgentPairing";
 constexpr wchar_t kInstanceMutex[] = L"Local\\NSTU.Agent.Singleton";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kAgentCommandMessage = WM_APP + 2;
@@ -72,10 +73,16 @@ constexpr UINT kExamBridgeMessage = WM_APP + 5;
 // is required because WebView2 and the kiosk window are UI/STA-owned.
 constexpr UINT kExamServiceDisconnectedMessage = WM_APP + 6;
 constexpr UINT kExamHostStatusMessage = WM_APP + 7;
+// Pairing state is written by the pipe thread and drawn by the UI thread,
+// so the transport never touches a window directly.
+constexpr UINT kPairingUpdatedMessage = WM_APP + 8;
 constexpr UINT kTrayId = 1;
 constexpr int kChatMessages = 1001;
 constexpr int kChatInput = 1002;
 constexpr int kChatSend = 1003;
+constexpr int kPairingList = 1004;
+constexpr int kPairingConnect = 1005;
+constexpr UINT_PTR kPairingStatusTimer = 1;
 
 HWND g_chat_window = nullptr;
 HWND g_chat_messages = nullptr;
@@ -84,6 +91,8 @@ WNDPROC g_chat_input_original_proc = nullptr;
 HWND g_lock_window = nullptr;
 HWND g_annotation_window = nullptr;
 HWND g_broadcast_window = nullptr;
+HWND g_pairing_window = nullptr;
+HWND g_pairing_list = nullptr;
 nstu::client::ExamHost g_exam_host;
 std::atomic_bool g_agent_stopping = false;
 std::atomic_bool g_locked = false;
@@ -93,6 +102,7 @@ std::atomic_bool g_snapshotting = false;
 std::atomic<std::uint16_t> g_snapshot_interval_seconds = 0;
 std::atomic_bool g_viewing_broadcast = false;
 std::atomic_bool g_remote_control_active = false;
+std::atomic_bool g_managed = false;
 std::mutex g_annotation_mutex;
 std::vector<nstu::control::OverlayStroke> g_annotation_strokes;
 std::mutex g_broadcast_mutex;
@@ -108,6 +118,25 @@ bool g_chat_was_visible_for_exam = false;
 bool g_lock_was_visible_for_exam = false;
 bool g_annotation_was_visible_for_exam = false;
 bool g_broadcast_was_visible_for_exam = false;
+
+// Pairing is the one thing this agent puts on screen before the machine
+// belongs to anybody, so it has its own window rather than a tray balloon
+// nobody reads. It has four faces: a menu when the LAN answers with more
+// than one server, an acknowledgement that the request went out, the six
+// digits the teacher has to match, and a sentence saying how it ended.
+enum class PairingView {
+    hidden,
+    choices,
+    waiting,
+    code,
+    status,
+};
+
+std::mutex g_pairing_mutex;
+PairingView g_pairing_view = PairingView::hidden;
+std::vector<nstu::client::AgentPairingChoice> g_pairing_choices;
+std::wstring g_pairing_caption;
+std::wstring g_pairing_code;
 
 void queue_service_message(nstu::client::AgentMessage message) noexcept {
     if (message.payload.size() > nstu::client::kMaximumAgentPayloadBytes) {
@@ -126,6 +155,77 @@ void queue_service_message(nstu::client::AgentMessage message) noexcept {
     } catch (...) {
         OutputDebugStringA("NSTU could not queue an exam service message\n");
     }
+}
+
+// Pairing text is printable ASCII by the time the codec has accepted it,
+// so widening it needs no code page and cannot fail.
+std::wstring widen_ascii(std::string_view text) {
+    std::wstring wide;
+    wide.reserve(text.size());
+    for (const char character : text) {
+        wide.push_back(
+            static_cast<wchar_t>(static_cast<unsigned char>(character)));
+    }
+    return wide;
+}
+
+void notify_pairing_view() noexcept {
+    if (g_pairing_window != nullptr) {
+        PostMessageW(g_pairing_window, kPairingUpdatedMessage, 0, 0);
+    }
+}
+
+void show_pairing_choices(
+    std::vector<nstu::client::AgentPairingChoice> choices) {
+    {
+        std::scoped_lock lock(g_pairing_mutex);
+        g_pairing_choices = std::move(choices);
+        g_pairing_caption =
+            L"More than one NSTU server answered on this network. Ask your "
+            L"teacher which one this computer belongs to.";
+        g_pairing_code.clear();
+        g_pairing_view = PairingView::choices;
+    }
+    notify_pairing_view();
+}
+
+void show_pairing_code(const nstu::client::AgentPairingCode& code) {
+    {
+        std::scoped_lock lock(g_pairing_mutex);
+        g_pairing_code = widen_ascii(code.code);
+        // The digits are worth nothing on their own: what makes them a
+        // check is that the same six appear on the server, so the name of
+        // the server claiming them is part of the question.
+        g_pairing_caption =
+            L"Tell your teacher these digits. Approve on \"" +
+            widen_ascii(code.server_name) +
+            L"\" only if the same six digits are on that screen.";
+        g_pairing_view = PairingView::code;
+    }
+    notify_pairing_view();
+}
+
+void show_pairing_status(const nstu::client::AgentPairingStatus& status) {
+    {
+        std::scoped_lock lock(g_pairing_mutex);
+        g_pairing_caption = widen_ascii(status.detail);
+        g_pairing_code.clear();
+        g_pairing_view = PairingView::status;
+    }
+    notify_pairing_view();
+}
+
+// Nothing on this window can finish without the service, so a lost pipe
+// takes it off the screen rather than leaving a stale code up.
+void hide_pairing_view() {
+    {
+        std::scoped_lock lock(g_pairing_mutex);
+        g_pairing_view = PairingView::hidden;
+        g_pairing_choices.clear();
+        g_pairing_caption.clear();
+        g_pairing_code.clear();
+    }
+    notify_pairing_view();
 }
 
 void queue_exam_command_for_ui(nstu::client::AgentMessage message) noexcept {
@@ -748,6 +848,37 @@ void pipe_control_loop(HWND overlay) {
                                  static_cast<WPARAM>(
                                      nstu::client::AgentMessageType::exam_start),
                                  0);
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::managed_state) {
+                    if (const auto managed =
+                            nstu::control::decode_freeze_state(
+                                message->payload)) {
+                        SendMessageW(
+                            overlay, kAgentCommandMessage,
+                            static_cast<WPARAM>(message->type),
+                            static_cast<LPARAM>(*managed));
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::pairing_choices) {
+                    if (auto choices =
+                            nstu::client::decode_agent_pairing_choices(
+                                message->payload)) {
+                        show_pairing_choices(std::move(*choices));
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::pairing_code) {
+                    if (const auto code =
+                            nstu::client::decode_agent_pairing_code(
+                                message->payload)) {
+                        show_pairing_code(*code);
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::pairing_status) {
+                    if (const auto status =
+                            nstu::client::decode_agent_pairing_status(
+                                message->payload)) {
+                        show_pairing_status(*status);
+                    }
                 }
                 if (!send_agent_status(pipe)) {
                     pipe_failed = true;
@@ -784,6 +915,7 @@ void pipe_control_loop(HWND overlay) {
             }
         }
         stop_remote_control();
+        hide_pairing_view();
         pipe.close();
         if (pipe_failed && !g_agent_stopping.load()) {
             // Fail closed for exams. The host owns the WebView2 controller and
@@ -913,6 +1045,175 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
         g_chat_window = nullptr;
         g_chat_messages = nullptr;
         g_chat_input = nullptr;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+void submit_pairing_selection(HWND window) {
+    if (g_pairing_list == nullptr) {
+        return;
+    }
+    const auto index = SendMessageW(g_pairing_list, LB_GETCURSEL, 0, 0);
+    if (index == LB_ERR || index < 0) {
+        return;
+    }
+    auto payload = nstu::client::encode_agent_pairing_selection(
+        static_cast<std::uint16_t>(index));
+    if (payload.empty()) {
+        return;
+    }
+    queue_service_message(
+        {nstu::client::AgentMessageType::pairing_select,
+         std::move(payload)});
+    {
+        std::scoped_lock lock(g_pairing_mutex);
+        g_pairing_view = PairingView::waiting;
+        g_pairing_caption = L"Contacting the server...";
+        g_pairing_code.clear();
+    }
+    PostMessageW(window, kPairingUpdatedMessage, 0, 0);
+}
+
+void draw_pairing_text(HDC device, const RECT& area, int height,
+                       int weight, const wchar_t* face,
+                       COLORREF color, const std::wstring& content,
+                       UINT format) {
+    if (content.empty()) {
+        return;
+    }
+    const HFONT font = CreateFontW(
+        height, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH, face);
+    const auto previous = SelectObject(device, font);
+    SetTextColor(device, color);
+    RECT bounds = area;
+    DrawTextW(device, content.c_str(), -1, &bounds, format);
+    SelectObject(device, previous);
+    DeleteObject(font);
+}
+
+LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
+                                     WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_CREATE: {
+        g_pairing_list = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
+            WS_CHILD | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
+            16, 96, 452, 112, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPairingList)),
+            GetModuleHandleW(nullptr), nullptr);
+        const HWND connect = CreateWindowExW(
+            0, L"BUTTON", L"Connect", WS_CHILD | BS_DEFPUSHBUTTON,
+            368, 218, 100, 28, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPairingConnect)),
+            GetModuleHandleW(nullptr), nullptr);
+        const auto font = GetStockObject(DEFAULT_GUI_FONT);
+        for (const HWND control : {g_pairing_list, connect}) {
+            if (control != nullptr) {
+                SendMessageW(control, WM_SETFONT,
+                             reinterpret_cast<WPARAM>(font), TRUE);
+            }
+        }
+        return 0;
+    }
+    case kPairingUpdatedMessage: {
+        PairingView view = PairingView::hidden;
+        std::vector<nstu::client::AgentPairingChoice> choices;
+        {
+            std::scoped_lock lock(g_pairing_mutex);
+            view = g_pairing_view;
+            choices = g_pairing_choices;
+        }
+        const bool choosing = view == PairingView::choices;
+        if (g_pairing_list != nullptr) {
+            if (choosing) {
+                SendMessageW(g_pairing_list, LB_RESETCONTENT, 0, 0);
+                for (const auto& choice : choices) {
+                    // The address is shown next to the name because a name
+                    // is whatever a beacon claimed it is, and two of them
+                    // can be identical.
+                    const auto label = widen_ascii(choice.server_name) +
+                        L"  -  " + widen_ascii(choice.address);
+                    SendMessageW(g_pairing_list, LB_ADDSTRING, 0,
+                                 reinterpret_cast<LPARAM>(label.c_str()));
+                }
+                SendMessageW(g_pairing_list, LB_SETCURSEL, 0, 0);
+            }
+            ShowWindow(g_pairing_list, choosing ? SW_SHOW : SW_HIDE);
+        }
+        if (const HWND connect = GetDlgItem(window, kPairingConnect);
+            connect != nullptr) {
+            ShowWindow(connect, choosing ? SW_SHOW : SW_HIDE);
+        }
+        KillTimer(window, kPairingStatusTimer);
+        if (view == PairingView::status) {
+            // An outcome is a sentence, not a decision. Leaving it up would
+            // park a dead window in front of somebody trying to work.
+            SetTimer(window, kPairingStatusTimer, 8000, nullptr);
+        }
+        if (view == PairingView::hidden) {
+            ShowWindow(window, SW_HIDE);
+            return 0;
+        }
+        InvalidateRect(window, nullptr, TRUE);
+        ShowWindow(window, SW_SHOW);
+        SetForegroundWindow(window);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wparam == kPairingStatusTimer) {
+            KillTimer(window, kPairingStatusTimer);
+            hide_pairing_view();
+            return 0;
+        }
+        break;
+    case WM_COMMAND:
+        if ((LOWORD(wparam) == kPairingConnect &&
+             HIWORD(wparam) == BN_CLICKED) ||
+            (LOWORD(wparam) == kPairingList &&
+             HIWORD(wparam) == LBN_DBLCLK)) {
+            submit_pairing_selection(window);
+            return 0;
+        }
+        break;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        const HDC device = BeginPaint(window, &paint);
+        RECT client{};
+        GetClientRect(window, &client);
+        std::wstring caption;
+        std::wstring code;
+        {
+            std::scoped_lock lock(g_pairing_mutex);
+            caption = g_pairing_caption;
+            code = g_pairing_code;
+        }
+        SetBkMode(device, TRANSPARENT);
+        const RECT caption_area{16, 16, client.right - 16, 92};
+        draw_pairing_text(device, caption_area, -16, FW_NORMAL,
+                          L"Segoe UI", RGB(24, 24, 24), caption,
+                          DT_WORDBREAK | DT_NOPREFIX);
+        const RECT code_area{16, 100, client.right - 16, 200};
+        draw_pairing_text(device, code_area, -56, FW_BOLD, L"Consolas",
+                          RGB(0, 70, 160), code,
+                          DT_CENTER | DT_SINGLELINE | DT_VCENTER |
+                              DT_NOPREFIX);
+        EndPaint(window, &paint);
+        return 0;
+    }
+    case WM_CLOSE:
+        // Closing the window declines nothing; the request is the service's
+        // and the server still has to answer it.
+        ShowWindow(window, SW_HIDE);
+        return 0;
+    case WM_DESTROY:
+        KillTimer(window, kPairingStatusTimer);
+        g_pairing_window = nullptr;
+        g_pairing_list = nullptr;
         return 0;
     default:
         break;
@@ -1067,6 +1368,18 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             g_locked = false;
             ShowWindow(window, SW_HIDE);
             restore_control_window_order();
+        } else if (type ==
+                       nstu::client::AgentMessageType::managed_state) {
+            g_managed = lparam != 0;
+            NOTIFYICONDATAW tray{};
+            tray.cbSize = sizeof(tray);
+            tray.hWnd = window;
+            tray.uID = kTrayId;
+            tray.uFlags = NIF_TIP;
+            lstrcpyW(tray.szTip, g_managed.load()
+                                      ? L"NSTU client - Managed"
+                                      : L"NSTU client");
+            Shell_NotifyIconW(NIM_MODIFY, &tray);
         } else if (type == nstu::client::AgentMessageType::chat && lparam != 0) {
             if (exam_host_engaged()) {
                 g_exam_host.enforce_foreground();
@@ -1197,6 +1510,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     broadcast_class.lpszClassName = kBroadcastWindowClass;
     broadcast_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     RegisterClassW(&broadcast_class);
+    WNDCLASSW pairing_class{};
+    pairing_class.hInstance = instance;
+    pairing_class.lpfnWndProc = pairing_window_proc;
+    pairing_class.lpszClassName = kPairingWindowClass;
+    pairing_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    pairing_class.hbrBackground =
+        static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
+    RegisterClassW(&pairing_class);
     const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -1241,6 +1562,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     }
     SetLayeredWindowAttributes(g_annotation_window, RGB(1, 2, 3), 0,
                                LWA_COLORKEY);
+    // Fixed size and no maximize: this asks one question at a time and
+    // there is nothing in it worth resizing. A machine whose desktop
+    // refuses the window can still be managed once it is paired, so a
+    // failure here is not fatal - every use of it is guarded.
+    constexpr int kPairingWidth = 500;
+    constexpr int kPairingHeight = 300;
+    g_pairing_window = CreateWindowExW(
+        WS_EX_TOPMOST, kPairingWindowClass, L"NSTU setup",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        (GetSystemMetrics(SM_CXSCREEN) - kPairingWidth) / 2,
+        (GetSystemMetrics(SM_CYSCREEN) - kPairingHeight) / 2,
+        kPairingWidth, kPairingHeight, nullptr, nullptr, instance,
+        nullptr);
     NOTIFYICONDATAW tray{};
     tray.cbSize = sizeof(tray);
     tray.hWnd = window;
@@ -1266,6 +1600,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     restore_exam_suppressed_windows();
     if (control_thread.joinable()) {
         control_thread.join();
+    }
+    if (g_pairing_window != nullptr) {
+        DestroyWindow(g_pairing_window);
     }
     DestroyWindow(g_broadcast_window);
     DestroyWindow(g_annotation_window);

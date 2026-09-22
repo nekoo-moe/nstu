@@ -17,6 +17,8 @@
 [![Last commit](https://img.shields.io/github/last-commit/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/commits)
 [![Issues](https://img.shields.io/github/issues/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/issues)
 
+> **Phát triển có hỗ trợ AI:** NSTU được phát triển với hỗ trợ AI; mọi thay đổi vẫn được con người rà soát và có thể kiểm tra trong lịch sử mã nguồn công khai.
+
 NSTU là dự án quản lý lớp học và phòng máy Windows miễn phí, mã nguồn mở. Dự
 án hướng đến một máy giáo viên quản lý tập trung, client nhẹ trên máy học sinh,
 lệnh điều khiển được xác thực, chat, snapshot màn hình tiết kiệm băng thông và
@@ -325,10 +327,8 @@ Các trường dưới đây đang phối hợp với NSTU với vai trò đối
 
 <table>
   <tr>
-    <td align="center" valign="top" width="180">
-      <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Logo Trường THCS Vũng Tàu" width="112"><br>
-      <sub><b>Trường THCS Vũng Tàu</b><br>Đã hoàn thành kiểm thử; giáo viên thực hiện và cho phép</sub>
-    </td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Logo Trường THPT Chuyên Lê Quý Đôn" width="112"><br><sub><b>Trường THPT Chuyên Lê Quý Đôn</b><br>Đã xác nhận hợp tác</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="Logo Trường Phổ thông Năng khiếu, ĐHQG-HCM" width="112"><br><sub><b>Trường Phổ thông Năng khiếu, ĐHQG-HCM</b><br>Đã xác nhận hợp tác</sub></td>
   </tr>
 </table>
 
@@ -336,11 +336,7 @@ Các trường dưới đây đang phối hợp với NSTU với vai trò đối
 
 <table>
   <tr>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Logo Trường THCS Võ Trường Toản" width="112"><br><sub><b>Trường THCS Võ Trường Toản</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Logo Trường THPT Đinh Tiên Hoàng" width="112"><br><sub><b>Trường THPT Đinh Tiên Hoàng</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Logo Trường THPT Chuyên Lê Quý Đôn" width="112"><br><sub><b>Trường THPT Chuyên Lê Quý Đôn</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="Logo PTNK ĐHQG-HCM" width="112"><br><sub><b>PTNK, ĐHQG-HCM</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ben-cat-high-school.png" alt="Logo Trường THPT Bến Cát" width="112"><br><sub><b>Trường THPT Bến Cát</b><br>Đang xem xét; chưa xác nhận đối tác</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Logo Trường THPT Đinh Tiên Hoàng" width="112"><br><sub><b>Trường THPT Đinh Tiên Hoàng</b><br>Đang xác minh tình trạng hợp tác</sub></td>
   </tr>
 </table>
 
@@ -368,20 +364,30 @@ Trước khi triển khai production:
 
 1. Đặt server và client trong cùng VLAN hoặc subnet tin cậy ở lần triển khai
    đầu tiên.
-2. Nên dùng managed switch hoặc router khi có thể. IGMP snooping và một IGMP
+2. Nên reserve IP server ổn định bên ngoài DHCP pool. Giữ router/gateway ở `.1`
+   và dùng địa chỉ khác như `.10` cho máy giáo viên.
+3. Nên dùng managed switch hoặc router khi có thể. IGMP snooping và một IGMP
    querier chỉ bắt buộc cho thử nghiệm H.264/multicast liên tục trong tương
    lai; đường snapshot được hỗ trợ dùng kết nối TCP xác thực thông thường.
-3. Không expose trực tiếp control/video traffic của NSTU ra Internet.
-4. Ưu tiên Ethernet có dây. Nếu thử nghiệm bằng Wi-Fi, tắt AP client isolation
+4. Không expose trực tiếp control/video traffic của NSTU ra Internet.
+5. Ưu tiên Ethernet có dây. Nếu thử nghiệm bằng Wi-Fi, tắt AP client isolation
    và kiểm tra switch/AP đáp ứng được lưu lượng snapshot TCP dự kiến.
-5. Với triển khai chỉ dùng snapshot, switch thông thường là đủ nếu đáp ứng số
+6. Với triển khai chỉ dùng snapshot, switch thông thường là đủ nếu đáp ứng số
    client và dung lượng uplink đã đo. Không bật multicast chỉ để discovery hoạt
    động. Nếu sau này bật thử nghiệm H.264 tùy chọn, phải kiểm tra riêng IGMP
    snooping, querier, flooding và unicast fallback.
-6. Luôn bật Windows Firewall. TCP `47001` là control và snapshot port đã xác
-   thực bắt buộc. UDP `47000` dành cho continuous video tùy chọn trong tương
-   lai và nên đóng nếu chưa bật tính năng. Chỉ mở rule cho VLAN phòng học và
-   executable cần thiết; không expose rule rộng ra Internet.
+7. Luôn bật Windows Firewall. TCP `47001` là control và snapshot port đã xác
+   thực bắt buộc; UDP `47001` dùng để tìm lại địa chỉ server có xác thực trong
+   cùng VLAN. UDP `47000` dành cho continuous video tùy chọn trong tương lai và
+   nên đóng nếu chưa bật tính năng. Chỉ mở rule cho VLAN phòng học và executable
+   cần thiết; không expose rule rộng ra Internet.
+
+Sau khi enroll, client chỉ xem IPv4 server đã lưu là cache. Nếu endpoint đó lỗi,
+client broadcast yêu cầu discovery được xác thực bằng PSK trong cùng VLAN, thực
+hiện mutual TCP handshake với candidate rồi mới lưu địa chỉ mới. Router có thể
+dùng MAC server cho DHCP reservation, nhưng NSTU không xem IP hoặc MAC là bằng
+chứng danh tính server. Broadcast recovery không đi xuyên router, vì vậy các
+VLAN tách biệt vẫn cần địa chỉ ổn định hoặc routing được quản lý.
 
 Multicast qua nhiều VLAN không thuộc triển khai snapshot được hỗ trợ. Nếu thử
 continuous video trong tương lai, phải cấu hình multicast routing có chủ đích
@@ -403,16 +409,19 @@ Get-FileHash .\nstu-*-setup.exe -Algorithm SHA256
 1. Tải `nstu-<version>-setup.exe` từ pre-release mới nhất.
 2. Chạy installer hợp nhất, chọn **Install for Server** và chấp nhận UAC nếu
    Windows yêu cầu.
-3. Khởi động:
+3. Nếu muốn dùng ngay mà không đăng xuất, hãy mở server một lần:
 
    ```powershell
    & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
    ```
 
-Server không được đăng ký thành Windows service và mặc định không tự chạy khi
-Windows khởi động; kỹ thuật viên mở thủ công hoặc tạo shortcut/task do trường
-quản lý trên máy giáo viên. Helper diagnostics đi kèm installer có thể chạy lại
-để kiểm tra phần cứng và mạng khi máy đang ở trạng thái thawed.
+Installer đăng ký `NSTU Server` là ứng dụng startup toàn máy. `nstu-server.exe`
+tự mở trong session tương tác của giáo viên mỗi khi người dùng đăng nhập
+Windows; server vẫn là ứng dụng desktop, không phải Windows service chạy trong
+Session 0. Minimize hoặc đóng cửa sổ chỉ đưa server xuống notification area.
+Chọn **Exit** sẽ dừng server cho tới khi mở thủ công hoặc đăng nhập Windows lần
+sau. Helper diagnostics đi kèm installer có thể chạy lại để kiểm tra phần cứng
+và mạng khi máy đang ở trạng thái thawed.
 
 Để gỡ server, dùng **Installed apps** của Windows hoặc server uninstaller.
 Lần gọi đầu chỉ stage việc gỡ và yêu cầu restart; không xóa service, process hay
@@ -500,98 +509,112 @@ Gỡ service thủ công không phải quy trình được hỗ trợ.
 
 ## Kết nối một phòng máy
 
-Quy trình enrollment hiện dùng command line và phải thực hiện khi máy đang
-thawed, trong PowerShell chạy bằng quyền Administrator. Chạy cùng installer hợp
-nhất trên mỗi máy, chọn Server cho máy giáo viên và Client cho từng máy học
-sinh. Đặt các máy trong cùng VLAN tin cậy và cho phép TCP port `47001` giữa
-client với server.
+Chạy cùng installer hợp nhất trên mỗi máy, chọn Server cho máy giáo viên và
+Client cho từng máy học sinh. Đặt các máy trong cùng VLAN tin cậy và cho phép
+TCP port `47001` giữa client với server, đồng thời cho phép UDP `47001` để tìm
+lại endpoint. Bản thân việc enroll diễn ra trên màn hình: không chép file secret
+nào lên máy học sinh, và không chạy lệnh nào cho từng client.
 
-Các lệnh dưới đây dùng script được đóng gói cùng installer. Installer đầy đủ
-đặt script tại `C:\Program Files\NSTU\docs\deployment`; file tải riêng
-`nstu-server.exe` hoặc `nstu-client.exe` không chứa PowerShell script. Nếu chỉ
-có binary riêng, hãy tải installer hợp nhất hoặc checkout source đúng phiên bản
-trước khi tiếp tục. Trong source checkout, các file tương ứng
-nằm trong thư mục `packaging\`.
-
-Nếu dùng source checkout, thay `$deployment` trong ví dụ bằng thư mục
-`packaging` của checkout, ví dụ:
-
-```powershell
-$deployment = Join-Path (Get-Location) "packaging"
-& (Join-Path $deployment "configure-data-root.ps1") -DataRoot "D:\NSTUData"
-& (Join-Path $deployment "new-enrollment-secret.ps1") `
-  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
-```
+Server vẫn cần data root được bảo vệ, do các helper script của người vận hành
+nằm trong thư mục `packaging\` của repository tạo ra. Installer hợp nhất chỉ đóng
+gói binary theo vai trò, runtime đi kèm, helper diagnostics và tài nguyên runtime
+bài thi; nó không cài PowerShell script hay tài liệu. Hãy chạy các helper này từ
+source checkout đúng phiên bản release và đặt `$deployment` là thư mục
+`packaging` của checkout.
 
 ### 1. Chuẩn bị server
 
-Chạy các lệnh sau trên máy giáo viên bằng quyền Administrator. Lệnh đầu tạo
-data root được bảo vệ; lệnh thứ hai cài enrollment secret đã mã hóa cho server
-và xuất secret dùng một lần để provision client:
+Chạy lệnh sau trên máy giáo viên bằng quyền Administrator để tạo data root được
+bảo vệ, rồi khởi động `nstu-server.exe`:
 
 ```powershell
-$deployment = Join-Path $env:ProgramFiles "NSTU\docs\deployment"
+$deployment = Join-Path (Get-Location) "packaging"
 if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
-  throw "Thiếu script triển khai NSTU; hãy cài lại NSTU và chọn vai trò Server."
+  throw "Hãy chạy từ source checkout: helper trong packaging không nằm trong sản phẩm đã cài."
 }
-New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
 & (Join-Path $deployment "configure-data-root.ps1") `
   -DataRoot "$env:ProgramData\NSTU"
-& (Join-Path $deployment "new-enrollment-secret.ps1") `
-  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
 ```
 
-Restart `nstu-server.exe` để nạp enrollment secret đã bảo vệ. Giữ file export
-trong vị trí removable/thawed được bảo vệ cho đến khi provision xong toàn bộ
-client. `new-enrollment-secret.ps1` chỉ chạy trên server, không cần chạy trên
-máy học sinh.
+Luồng pairing trên màn hình không tạo enrollment secret nào — server tự mint và
+lưu key của từng client khi người vận hành duyệt yêu cầu.
 
-### 2. Provision từng client
+### 2. Enroll từng client bằng pairing
 
-Trên từng máy học sinh, khi server đang chạy, dùng identity 128-bit và key ID
-riêng. `nstu-provision.exe` được cài khi chọn vai trò Client:
+Trên server, mở cửa sổ pairing ("Thêm máy"). Agent trên mỗi máy học sinh quét
+LAN tìm server đang mở cửa sổ pairing, tự chạy trao đổi có xác thực hai chiều, và
+hiển thị mã sáu chữ số ngay trên màn hình máy đó. Cùng mã đó xuất hiện trong danh
+sách chờ của server; người vận hành chỉ duyệt yêu cầu khi hai mã trùng nhau.
+**Phép so sánh sáu chữ số đó là gốc tin cậy** — không có gì được chép giữa các
+máy để thiết lập nó.
 
-```powershell
-$clientId = [guid]::NewGuid().ToString("N")
-& "$env:ProgramFiles\NSTU\client\nstu-provision.exe" `
-  192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
-```
-
-Tool xác thực enrollment transcript, derive PSK mà không truyền PSK trên mạng,
-và lưu cấu hình client bằng machine-scope DPAPI. Sau khi lệnh thành công, restart
-client service hoặc Windows. Khi đã enroll toàn bộ client, xóa mọi bản copy của
-file export dùng một lần. Quy trình client tin cậy:
+Khi được duyệt, client dẫn xuất protocol key từ transcript (key không bao giờ
+được truyền đi), lưu cấu hình DPAPI phạm vi machine mà `nstu-service` dùng, rồi
+kết nối. Quy trình client tin cậy:
 
 ```text
 Cài client
-  -> cấp danh tính riêng và enrollment credential được bảo vệ
+  -> agent quét LAN và hiển thị mã sáu chữ số
+  -> người vận hành duyệt mã trùng khớp trên server (gốc tin cậy)
+  -> server mint key cho client; client lưu cấu hình được bảo vệ
   -> xác thực với server qua TCP
-  -> đăng ký thiết bị và nhận room policy
-  -> nhận snapshot schedule và room policy đã được xác thực
+  -> đăng ký thiết bị và nhận snapshot schedule cùng room policy đã xác thực
   -> chụp JPEG có giới hạn qua kết nối TCP đã xác thực
 ```
+
+Trên VLAN dùng chung nơi nhiều server cùng trả lời, gán nhãn phòng cho mỗi server
+trong giao diện server và gán cho mỗi máy học sinh phòng của nó qua trường
+**Room name** tùy chọn của installer hoặc `/ROOM=` khi cài im lặng (ghi
+`HKLM\Software\NSTU\PreferredRoom`). Agent khi đó tự chọn server quảng bá đúng
+phòng, quay về menu chọn — hoặc pair im lặng khi chỉ một server trả lời — nếu
+không đặt phòng hoặc không có server đơn lẻ nào mang phòng đó. Tên phòng chỉ là
+gợi ý định tuyến; phép duyệt sáu chữ số vẫn kiểm soát mọi lần pairing, nên phòng
+sai hoặc thiếu chỉ hạ xuống menu, không bao giờ dẫn tới pairing nhầm âm thầm.
 
 Đường continuous H.264 tùy chọn chưa nằm trong quy trình enrollment này. Sau
 này có thể bổ sung group membership và multicast/unicast đã xác thực, chỉ sau
 khi vượt qua các gate kiểm tra switch, decoder và loss-recovery riêng.
 
 Connection preamble chỉ giúp loại nhanh peer sai rõ ràng. Danh tính máy chỉ
-được chấp nhận sau khi cryptographic handshake thành công. Installer là cách
-phân phối được hỗ trợ cho các script này; chỉ chép riêng file EXE là không đủ
-để thiết lập enrollment.
+được chấp nhận sau khi cryptographic handshake thành công.
+
+### Enrollment thủ công dự phòng (nâng cao)
+
+Đường enroll bằng chép file trước đây đã bị deprecate và không còn được đóng gói
+trong installer, nhưng các tool vẫn ở trong repository để phục hồi khi pairing
+trên màn hình không khả dụng (ví dụ máy không có phiên tương tác). Từ một source
+checkout, xuất secret bootstrap một lần trên server, rồi chạy tool provision trên
+từng máy với identity 128-bit và key ID riêng:
+
+```powershell
+$deployment = Join-Path (Get-Location) "packaging"
+New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
+& (Join-Path $deployment "new-enrollment-secret.ps1") `
+  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
+# Restart nstu-server.exe để nạp enrollment secret đã bảo vệ, rồi trên từng
+# client (nstu-provision.exe không được cài; hãy build hoặc chép từ source
+# checkout):
+$clientId = [guid]::NewGuid().ToString("N")
+& ".\nstu-provision.exe" 192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+Tool xác thực enrollment transcript, derive PSK mà không truyền PSK trên mạng,
+và lưu cùng cấu hình DPAPI phạm vi machine đó. Giữ file export trong vị trí
+removable/thawed được bảo vệ và xóa mọi bản copy khi enroll xong.
+`new-enrollment-secret.ps1` chỉ chạy trên server, không cần chạy trên máy học
+sinh.
 
 ### Staging package bài thi
 
 Archive bài thi chỉ được staging trên client bằng helper do administrator quản
-lý, được đóng gói tại
-`C:\Program Files\NSTU\docs\deployment\stage-exam-package.ps1`. Server
-vẫn giữ package gốc và answer journal trên storage bền vững. Helper bắt buộc có
-cả archive SHA-256 và unpacked content SHA-256, từ chối ZIP không an toàn và
-zip bomb, rồi publish vào thư mục content-addressed bên dưới data root bền
-vững của client:
+lý `stage-exam-package.ps1`, chạy từ thư mục `packaging\` của source checkout.
+Server vẫn giữ package gốc và answer journal trên storage bền vững. Helper bắt
+buộc có cả archive SHA-256 và unpacked content SHA-256, từ chối ZIP không an
+toàn và zip bomb, rồi publish vào thư mục content-addressed bên dưới data root
+bền vững của client:
 
 ~~~powershell
-$stager = "$env:ProgramFiles\NSTU\docs\deployment\stage-exam-package.ps1"
+$stager = Join-Path (Get-Location) "packaging\stage-exam-package.ps1"
 & $stager -ArchivePath "D:\SecureTransfer\exam.nstuexam" -PublishRoot "$env:ProgramData\NSTU\exams\packages" -ExpectedArchiveSha256 "<archive-sha256>" -ExpectedContentSha256 "<content-sha256>" -TrustedPublisherThumbprint "<publisher-thumbprint>"
 ~~~
 
@@ -612,8 +635,8 @@ thức.
 - Cài binary vào vị trí Windows được bảo vệ thông thường.
 - Dành riêng một thawed location có ACL chặt cho identity đã enroll, key material
   được bảo vệ, cấu hình, audit log và update state.
-- Cấu hình vị trí đó trước enrollment bằng `configure-data-root.ps1 -DataRoot
-  "D:\NSTUData"`.
+- Cấu hình vị trí đó trước enrollment bằng helper trong `packaging\`, ví dụ
+  `packaging\configure-data-root.ps1 -DataRoot "D:\NSTUData"`.
 - Tuyệt đối không đưa PSK, certificate, dump, screen capture hay runtime secret
   vào repository.
 - Không đóng băng image production trước khi đã kiểm thử persistence của
@@ -662,6 +685,8 @@ thích license permissive; dự án không chấp nhận GPL dependency.
   cung cấp thiết bị kiểm thử và review đảm bảo chất lượng cho output cuối.
 - **Lê Anh Tuấn (`ssdarealest`)**: chịu trách nhiệm quản lý dự án, hỗ trợ pháp
   lý, xây dựng ý tưởng, quản lý tiến trình và phát triển dự án.
+- **Nguyễn Thị Hồng Quyên**: giáo viên môn Tin học tại Trường THPT Chuyên Lê
+  Quý Đôn, Thành phố Hồ Chí Minh.
 
 ## Bản quyền
 

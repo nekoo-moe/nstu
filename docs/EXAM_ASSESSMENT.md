@@ -361,3 +361,17 @@ a pre-production security blocker.
 The sample manifest is in `exam/examples/ielts-sample.json`. This UI is the
 interaction layer; scoring rules, teacher authoring, proctor controls, and
 server-side finalization remain separate milestones in the roadmap.
+
+## Reboot-to-restore protection gate
+
+Exam mode is authorized by the server only when the target client has proven
+current-session UWF (reboot-to-restore) protection. The gate is server-side and
+fails closed: the client never asserts a protection flag, and nothing about
+protection is carried in the exam start request. See
+[REBOOT_TO_RESTORE.md](REBOOT_TO_RESTORE.md) for how the boot-bound proof is
+established and why a reconnect retires it.
+
+The publicly released `NSTU DEV (UNPROTECTED)` build bypasses this one gate for
+testing and nothing else; every bypassed start is audited at `severity=warning`
+and the build is conspicuously labeled in the UI and installer. Release builds
+cannot start an exam on an unprotected client.

@@ -20,20 +20,50 @@ set(NSTU_WEBVIEW2_SDK_DIR "" CACHE PATH
 option(NSTU_INTERNAL_TEST_BUILD
     "Build an explicitly labeled installer that permits undersized VM RAM"
     OFF)
+# Publicly released DEV build. It bypasses ONLY the UWF/Exam readiness gate so
+# features can be exercised without entering the reboot-to-restore protected
+# state. It never relaxes authentication, pairing, package digest validation or
+# answer durability. The bypass is compile-time and cannot be toggled at
+# runtime, and every bypassed exam start is audited at severity=warning.
+option(NSTU_DEV_UNPROTECTED_BUILD
+    "Build a publicly labeled DEV build that bypasses only the UWF/Exam gate"
+    OFF)
+
+if(NSTU_INTERNAL_TEST_BUILD AND NSTU_DEV_UNPROTECTED_BUILD)
+    message(FATAL_ERROR
+        "NSTU_INTERNAL_TEST_BUILD and NSTU_DEV_UNPROTECTED_BUILD are mutually "
+        "exclusive: the DEV channel is a distinct public release.")
+endif()
 
 if(NSTU_INTERNAL_TEST_BUILD)
     set(NSTU_INTERNAL_TEST_BUILD_VALUE 1)
+    set(NSTU_DEV_UNPROTECTED_EXAM_VALUE 0)
     set(NSTU_INSTALLER_DISPLAY_NAME "NSTU Internal VM Test")
     set(NSTU_INSTALLER_FILE_SUFFIX "-internal-vm")
     set(NSTU_INSTALLER_CHANNEL "InternalVmTest")
     set(NSTU_INSTALLER_ROLE_SUFFIX " (Internal VM Test)")
+elseif(NSTU_DEV_UNPROTECTED_BUILD)
+    set(NSTU_INTERNAL_TEST_BUILD_VALUE 0)
+    set(NSTU_DEV_UNPROTECTED_EXAM_VALUE 1)
+    set(NSTU_INSTALLER_DISPLAY_NAME "NSTU DEV (UNPROTECTED)")
+    set(NSTU_INSTALLER_FILE_SUFFIX "-dev-unprotected")
+    set(NSTU_INSTALLER_CHANNEL "DevUnprotected")
+    set(NSTU_INSTALLER_ROLE_SUFFIX " (DEV UNPROTECTED)")
 else()
     set(NSTU_INTERNAL_TEST_BUILD_VALUE 0)
+    set(NSTU_DEV_UNPROTECTED_EXAM_VALUE 0)
     set(NSTU_INSTALLER_DISPLAY_NAME "NSTU")
     set(NSTU_INSTALLER_FILE_SUFFIX "")
     set(NSTU_INSTALLER_CHANNEL "Release")
     set(NSTU_INSTALLER_ROLE_SUFFIX "")
 endif()
+
+# The exam gate reads this define. It is set globally so the server library, the
+# server UI and the client service are compiled with one consistent value; a
+# mismatch between the gate in the library and its callers is exactly the kind
+# of split that must never happen.
+add_compile_definitions(
+    NSTU_DEV_UNPROTECTED_EXAM=${NSTU_DEV_UNPROTECTED_EXAM_VALUE})
 
 # Keep release installers self-contained on clean school images.  The static
 # MSVC runtime avoids requiring a separately deployed Visual C++ Redistributable
@@ -59,6 +89,15 @@ include(NstuSigning)
 
 add_subdirectory(common)
 
+# UWF mutation is shared by the client service and diagnostics, so keep its
+# narrow WMI writer independent of the diagnostics application target.
+if(WIN32 AND (NSTU_BUILD_CLIENT OR NSTU_BUILD_SETUP))
+    add_library(nstu_uwf STATIC setup/src/uwf.cpp)
+    target_include_directories(nstu_uwf PUBLIC setup/include)
+    target_link_libraries(nstu_uwf PUBLIC nstu_common ole32 oleaut32 wbemuuid)
+    nstu_enable_warnings(nstu_uwf)
+endif()
+
 if(WIN32 AND NSTU_BUILD_VIDEO)
     add_subdirectory(video)
 endif()
@@ -71,7 +110,7 @@ if(NSTU_BUILD_SERVER AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/server/CMakeLists.t
     add_subdirectory(server)
 endif()
 
-if(WIN32 AND NSTU_BUILD_SETUP AND EXISTS
+if(WIN32 AND (NSTU_BUILD_CLIENT OR NSTU_BUILD_SETUP) AND EXISTS
    "${CMAKE_CURRENT_SOURCE_DIR}/setup/CMakeLists.txt")
     add_subdirectory(setup)
 endif()
@@ -136,16 +175,14 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         endif()
     endif()
     if(TARGET nstu-service)
-        install(TARGETS nstu-service nstu-agent nstu-provision
+        # nstu-provision (the legacy file-copy enrollment tool) is intentionally
+        # NOT staged into the shipped client payload. UI-driven pairing by room
+        # name has replaced hand-copied enrollment secrets, so the tool is
+        # deprecated. The target stays buildable in the repo
+        # (client/CMakeLists.txt) as a manual fallback for advanced operators;
+        # it is simply no longer installed into the client component.
+        install(TARGETS nstu-service nstu-agent
             RUNTIME DESTINATION client
-            COMPONENT client)
-        install(FILES
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/install-client-service.ps1"
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/uninstall-client-service.ps1"
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/verify-client-connection.ps1"
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/configure-data-root.ps1"
-            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-system-setup.ps1"
-            DESTINATION client
             COMPONENT client)
         # The client-side exam host loads these files from the installed
         # package. Keep the documentation copy below as well so technicians
@@ -215,9 +252,14 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
     if(NSTU_MAKENSIS_EXECUTABLE)
         set(nstu_unified_dependencies)
         foreach(nstu_target IN ITEMS nstu-server nstu-service nstu-agent
-                nstu-provision nstu-diagnostics)
+                nstu-diagnostics)
             if(TARGET ${nstu_target})
-                list(APPEND nstu_unified_dependencies ${nstu_target})
+                if(TARGET nstu-sign-${nstu_target})
+                    list(APPEND nstu_unified_dependencies
+                        nstu-sign-${nstu_target})
+                else()
+                    list(APPEND nstu_unified_dependencies ${nstu_target})
+                endif()
             endif()
         endforeach()
         add_custom_target(nstu-package-build

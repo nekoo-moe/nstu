@@ -62,6 +62,37 @@ enum class CommandType : std::uint16_t {
     // start/stop request over the existing control channel.
     exam_start = 36,
     exam_stop = 37,
+    // Verified pairing. An unenrolled client opens the exchange; the server
+    // answers with its ephemeral key, both sides show the same six-digit code,
+    // and the teacher approves or refuses it in the server UI. These frames
+    // are unauthenticated by construction - that is what pairing establishes -
+    // so they are only accepted before a connection reaches auth_hello.
+    pairing_hello = 38,
+    pairing_offer = 39,
+    pairing_confirm = 40,
+    pairing_accept = 41,
+    pairing_reject = 42,
+    // Managed mode. The server asks a client to hold itself frozen or to let
+    // go; the client answers with what it actually is now, which is not
+    // always what it was asked to be.
+    freeze_set = 43,
+    freeze_report = 44,
+    // Reboot-to-restore. The request carries an explicit checkpoint
+    // acknowledgement; the client runs readiness checks and reports what it
+    // actually changed instead of the server assuming success.
+    uwf_configure = 45,
+    uwf_report = 46,
+    // Fleet reboot-to-restore. uwf_configure/uwf_report only describe a
+    // pre-reboot configuration attempt. These carry a server-issued operation
+    // id and the client's current boot identity, so the server can tell "I
+    // armed UWF and intend to reboot" apart from "I rebooted and am protected
+    // right now". Exam authorization depends on that distinction.
+    uwf_fleet_configure = 47,
+    uwf_fleet_status = 48,
+    // Client-side activity log shipped to the teacher machine. Bounded,
+    // sanitized, sequence-acknowledged, and rate limited on the server.
+    audit_upload = 49,
+    audit_ack = 50,
 };
 
 enum class ConnectionRole : std::uint8_t {

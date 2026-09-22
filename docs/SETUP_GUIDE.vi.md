@@ -48,10 +48,49 @@ máy đang thawed rồi cho installer restart Windows. Cách này giữ tương 
 với phần mềm đóng băng hiện có; boot check của client chỉ quan sát trạng thái
 sau đó.
 
+### Địa chỉ ổn định và tự phục hồi
+
+Nên cấp DHCP reservation hoặc IP tĩnh ngoài DHCP pool cho máy giáo viên. Một
+sơ đồ dễ quản trị là giữ router/gateway ở `.1` và dành địa chỉ như `.10` cho
+NSTU Server; không gán địa chỉ gateway cho server. Đây vẫn là cấu hình production
+đơn giản và dễ chẩn đoán nhất.
+
+Sau khi một client được enroll, `nstu-service` chỉ xem IP server đã lưu là cache.
+Nếu kết nối TCP hoặc mutual authentication thất bại, client gửi UDP discovery
+được xác thực bằng HMAC trên chính control port, kiểm tra response bằng PSK đã
+enroll, hoàn tất mutual TCP handshake rồi mới lưu IPv4 mới bằng DPAPI phạm vi
+machine. Service cũng cập nhật địa chỉ registry không chứa secret cho diagnostics
+sau đăng nhập. NSTU không tin hoặc dùng địa chỉ MAC của server làm yếu tố xác
+thực.
+
+Cho phép **TCP và UDP `47001`** inbound tới executable NSTU Server, chỉ từ VLAN
+phòng máy được quản lý. TCP mang control và snapshot; UDP `47001` chỉ dùng cho
+trao đổi tìm lại endpoint có giới hạn. UDP `47000` vẫn dành cho đường video liên
+tục đang trì hoãn và nên đóng khi không thử nghiệm tính năng đó.
+
+Broadcast IPv4 không đi xuyên router. Hai phòng máy trong cùng VLAN có thể tìm
+cùng server đã enroll; nếu khác VLAN thì phải dùng IP reservation ổn định hoặc
+DNS/cấu hình thủ công do quản trị viên quản lý cho tới khi có relay xác thực.
+Khi router, switch, DHCP hoặc server không hoạt động, client vẫn giữ enrollment
+và retry có jitter nhưng control phòng học sẽ offline. Khi mất kết nối, trạng
+thái exam, lock, broadcast, annotation và remote control tạm thời được dọn thay
+vì bị giữ vô thời hạn.
+
+Installer vẫn cần địa chỉ đang truy cập được cho TCP preflight ban đầu; discovery
+chỉ hoạt động sau khi enrollment một lần đã cài PSK cho client.
+
 Với server, diagnostics kiểm tra display, link mạng và encoder H.264 phần cứng
 trước khi cài file server và data root được bảo vệ. UWF được báo là không áp
 dụng cho role server vì dữ liệu server phải bền vững. Chạy qualification UWF
 bằng `--target=client` trên image client riêng.
+
+Installer server đồng thời tạo giá trị startup toàn máy `NSTU Server` tại
+`HKLM\Software\Microsoft\Windows\CurrentVersion\Run`. Vì vậy ứng dụng desktop
+server tự chạy trong session tương tác của giáo viên ở mỗi lần đăng nhập
+Windows; nó không được cài thành service trong Session 0. Đóng hoặc thu nhỏ cửa
+sổ chính vẫn giữ tiến trình trong khay hệ thống. Chọn **Exit** sẽ dừng server cho
+tới khi mở thủ công hoặc đăng nhập lần sau. Unified uninstaller xóa giá trị
+startup này.
 
 ## Diagnostics tích hợp
 
@@ -97,24 +136,28 @@ input phải chạy trong interactive user session.
 Diagnostics không enrollment và không tạo key chỉ từ IP. Enrollment authenticated
 một lần vẫn thực hiện theo phần dưới.
 
-## Script và installer
+## Payload installer và script vận hành
 
-Gói đầy đủ chứa lifecycle script trong `client\` và `docs\deployment\`, cùng
-các tài liệu Markdown nhưng không đóng gói ảnh chỉ dùng cho repository trong
-`docs\assets\` như screenshot và logo đối tác. Standalone EXE không đăng ký
-service và không phải nguồn cài đặt được hỗ trợ.
-Hai vai trò đều được kiểm tra trước khi cài để tránh xung đột.
-Helper client cấu hình service, data root, recovery policy và ACL bảo vệ.
-Helper server kiểm tra role và data root được bảo vệ.
+Installer hợp nhất chỉ đóng gói binary theo vai trò (`nstu-service` và
+`nstu-agent` cho client; `nstu-server` cho server), runtime
+MinGW đi kèm, helper diagnostics độc lập và tài nguyên runtime bài thi
+(`exam/web`, `exam/schema`, `exam/examples`). Nó **không** đóng gói PowerShell
+script, tài liệu hay ảnh chỉ dùng cho repository trong `docs\assets\`. Standalone
+EXE không đăng ký service và không phải nguồn cài đặt được hỗ trợ.
 
-Payload deployment cũng có `stage-exam-package.ps1`. Chạy script từ
-PowerShell elevated trên client sau khi chép archive `.nstuexam` và metadata
-release đã được phê duyệt. Phải cung cấp cả archive SHA-256 và unpacked content
-SHA-256; package production phải có detached publisher signature
-`manifest.p7s` cùng thumbprint certificate được phê duyệt. Truyền `-PublishRoot`
-là đường dẫn tuyệt đối bên dưới data root bền vững đã cấu hình cho client
-(mặc định khi cài là `%ProgramData%\NSTU\exams\packages`); helper không tự dò
-root hoặc tải/copy archive từ server. `-RequireAuthenticode` là policy bổ sung
+Các helper script vận hành nằm trong thư mục `packaging\` của repository và được
+chạy từ source checkout đúng phiên bản release, không phải từ sản phẩm đã cài.
+Helper vai trò client cấu hình service, data root, recovery policy và ACL bảo
+vệ. Helper vai trò server kiểm tra role và data root được bảo vệ.
+
+`packaging\stage-exam-package.ps1` staging package bài thi trên client. Chạy
+script từ PowerShell elevated trong source checkout sau khi chép archive
+`.nstuexam` và metadata release đã được phê duyệt. Phải cung cấp cả archive
+SHA-256 và unpacked content SHA-256; package production phải có detached
+publisher signature `manifest.p7s` cùng thumbprint certificate được phê duyệt.
+Truyền `-PublishRoot` là đường dẫn tuyệt đối bên dưới data root bền vững đã cấu
+hình cho client (mặc định là `%ProgramData%\NSTU\exams\packages`); helper không
+tự dò root hoặc tải/copy archive từ server. `-RequireAuthenticode` là policy bổ sung
 tùy chọn cho các file `.exe` và `.dll` trong package, tách biệt với detached
 manifest signature bắt buộc. Chỉ dùng helper để staging trên client, không dùng
 server data root. Helper không bật UWF hoặc thay đổi Deep Freeze. Package phải
@@ -136,11 +179,42 @@ khi stage gỡ.
 
 ## Enrollment
 
-Sau khi cài server, tạo secret một lần bằng
-`docs\deployment\new-enrollment-secret.ps1`, sau đó provision từng client bằng
-`client\nstu-provision.exe`. Provisioning ghi cấu hình runtime được DPAPI bảo vệ
-mà `nstu-service` sử dụng; IP nhập trong installer chỉ phục vụ diagnostics cho
-đến khi trao đổi có xác thực này thành công.
+Client enroll bằng pairing trên màn hình; không chép file secret nào lên máy học
+sinh. Trên máy giáo viên, mở cửa sổ pairing của server ("Thêm máy"). Agent trên
+mỗi máy học sinh quét LAN tìm server đang mở cửa sổ pairing, tự chạy trao đổi có
+xác thực hai chiều, và hiển thị mã sáu chữ số ngay trên màn hình máy đó. Cùng mã
+đó xuất hiện trong danh sách chờ của server; người vận hành chỉ duyệt yêu cầu khi
+hai mã trùng nhau. Phép so sánh sáu chữ số đó là gốc tin cậy. Khi được duyệt,
+client dẫn xuất protocol key từ transcript (key không bao giờ được truyền đi) và
+lưu cấu hình runtime được DPAPI bảo vệ mà `nstu-service` sử dụng. IP nhập trong
+installer chỉ phục vụ diagnostics cho đến khi pairing thành công.
+
+### Nhắm phòng theo tên
+
+Trên VLAN dùng chung nơi nhiều server cùng trả lời, gán cho mỗi máy học sinh
+phòng mà nó thuộc về và máy sẽ pair mà không ai phải đọc menu. Người vận hành
+đặt nhãn phòng tùy chọn trong giao diện server; nhãn được quảng bá trên pairing
+beacon và hiển thị cạnh yêu cầu chờ. Trên client, trường **Room name** tùy chọn
+của installer (hoặc `/ROOM=` khi cài im lặng) ghi
+`HKLM\Software\NSTU\PreferredRoom`, và agent tự chọn server quảng bá đúng phòng
+đó (đã trim, không phân biệt hoa thường). Khi không đặt phòng, hoặc khi không có
+server đơn lẻ nào mang phòng đó, client quay về hành vi hiện tại: pair im lặng
+khi chỉ một server trả lời, ngược lại hiển thị menu chọn. Tên phòng chỉ là gợi ý
+định tuyến — phép duyệt sáu chữ số vẫn kiểm soát mọi lần pairing, nên phòng sai
+hoặc thiếu chỉ hạ xuống menu hoặc một lượt quét tạm dừng, không bao giờ dẫn tới
+pairing nhầm âm thầm.
+
+### Enrollment thủ công dự phòng (nâng cao)
+
+Đường enroll bằng chép file trước đây đã bị deprecate và không còn được đóng gói
+trong installer, nhưng các tool vẫn ở trong repository để phục hồi khi pairing
+trên màn hình không khả dụng (ví dụ máy không có phiên tương tác). Từ một source
+checkout đúng phiên bản release, tạo secret bootstrap một lần bằng
+`packaging\new-enrollment-secret.ps1`, rồi chạy `client\nstu-provision.exe
+<server-ip> <port> <32-hex-client-id> <key-id> <enrollment-secret-file>` trên
+từng máy. Nó thực hiện cùng trao đổi có xác thực, dẫn xuất PSK mà không gửi đi,
+và ghi cấu hình được DPAPI bảo vệ. Phân phối file bootstrap ngoài băng và xóa mọi
+bản sao sau khi enroll xong.
 
 ## Build
 

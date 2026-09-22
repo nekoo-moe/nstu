@@ -10,8 +10,18 @@ namespace nstu::client {
 namespace {
 
 inline constexpr std::uint32_t kConfigMagic = 0x31474643u; // "CFG1"
-inline constexpr std::uint16_t kConfigVersion = 1;
+// Version 2 appends a length-prefixed preferred-room string. Version 1 blobs
+// (no room) still load, so an install that paired before this change keeps
+// working and simply carries no room preference.
+inline constexpr std::uint16_t kConfigVersion = 2;
+inline constexpr std::uint16_t kConfigVersionLegacy = 1;
 inline constexpr std::size_t kMaximumAddressBytes = 255;
+// Mirrors discovery::kMaximumServerNameBytes (the bound the pairing beacon
+// enforces on the label this room string is matched against). Kept as a local
+// wire limit so the config codec does not depend on the discovery header; the
+// room is clamped to it on save and a larger value in a blob is treated as
+// corruption on load.
+inline constexpr std::size_t kMaximumRoomBytes = 64;
 
 void set_error(std::string* error, const char* message) {
     if (error != nullptr) {
@@ -63,9 +73,15 @@ bool save_client_runtime_config(
         set_error(error, "invalid client runtime configuration");
         return false;
     }
+    // The room is a non-secret hint; clamp (not reject) an over-long value to
+    // the wire bound so a stray long string never fails an otherwise valid
+    // save. Empty is fine and common (no room preference).
+    const std::string_view room(
+        config.preferred_room.data(),
+        std::min(config.preferred_room.size(), kMaximumRoomBytes));
     std::vector<std::byte> wire;
-    wire.reserve(32 + config.server_address.size() +
-                 config.pre_shared_key.size());
+    wire.reserve(34 + config.server_address.size() +
+                 config.pre_shared_key.size() + room.size());
     append_le(wire, kConfigMagic);
     append_le(wire, kConfigVersion);
     append_le(wire, config.server_port);
@@ -73,12 +89,15 @@ bool save_client_runtime_config(
     wire.insert(wire.end(), config.client_id.begin(), config.client_id.end());
     append_le(wire, static_cast<std::uint16_t>(config.server_address.size()));
     append_le(wire, static_cast<std::uint16_t>(config.pre_shared_key.size()));
+    append_le(wire, static_cast<std::uint16_t>(room.size()));
     wire.insert(wire.end(),
                 reinterpret_cast<const std::byte*>(config.server_address.data()),
                 reinterpret_cast<const std::byte*>(config.server_address.data()) +
                     config.server_address.size());
     wire.insert(wire.end(), config.pre_shared_key.begin(),
                 config.pre_shared_key.end());
+    wire.insert(wire.end(), reinterpret_cast<const std::byte*>(room.data()),
+                reinterpret_cast<const std::byte*>(room.data()) + room.size());
     const bool succeeded = security::save_machine_secret(
         path, wire, optional_entropy, error);
     security::secure_zero(wire);
@@ -97,10 +116,12 @@ bool load_client_runtime_config(
     std::uint16_t version = 0;
     std::uint16_t address_bytes = 0;
     std::uint16_t key_bytes = 0;
+    std::uint16_t room_bytes = 0;
     ClientRuntimeConfig loaded;
     const bool header_valid =
         read_le(wire, offset, magic) && magic == kConfigMagic &&
-        read_le(wire, offset, version) && version == kConfigVersion &&
+        read_le(wire, offset, version) &&
+        (version == kConfigVersion || version == kConfigVersionLegacy) &&
         read_le(wire, offset, loaded.server_port) &&
         read_le(wire, offset, loaded.key_id) &&
         wire.size() - offset >= loaded.client_id.size();
@@ -112,12 +133,19 @@ bool load_client_runtime_config(
     std::copy_n(wire.begin() + static_cast<std::ptrdiff_t>(offset),
                 loaded.client_id.size(), loaded.client_id.begin());
     offset += loaded.client_id.size();
+    // Version 2 carries an extra room-length field; version 1 has none and
+    // leaves the preferred room empty. The pre-shared key is read by its
+    // explicit length (not "to the end") so the trailing room bytes in a
+    // version-2 blob are never folded into the key.
+    const bool has_room = version == kConfigVersion;
     if (!read_le(wire, offset, address_bytes) ||
-        !read_le(wire, offset, key_bytes) || address_bytes == 0 ||
-        address_bytes > kMaximumAddressBytes ||
+        !read_le(wire, offset, key_bytes) ||
+        (has_room && !read_le(wire, offset, room_bytes)) ||
+        address_bytes == 0 || address_bytes > kMaximumAddressBytes ||
         key_bytes < security::kMinimumProtocolKeyBytes ||
-        wire.size() - offset !=
-            static_cast<std::size_t>(address_bytes) + key_bytes) {
+        room_bytes > kMaximumRoomBytes ||
+        wire.size() - offset != static_cast<std::size_t>(address_bytes) +
+                                    key_bytes + room_bytes) {
         security::secure_zero(wire);
         set_error(error, "invalid client configuration body");
         return false;
@@ -126,7 +154,13 @@ bool load_client_runtime_config(
         reinterpret_cast<const char*>(wire.data() + offset), address_bytes);
     offset += address_bytes;
     loaded.pre_shared_key.assign(
-        wire.begin() + static_cast<std::ptrdiff_t>(offset), wire.end());
+        wire.begin() + static_cast<std::ptrdiff_t>(offset),
+        wire.begin() + static_cast<std::ptrdiff_t>(offset + key_bytes));
+    offset += key_bytes;
+    if (room_bytes != 0) {
+        loaded.preferred_room.assign(
+            reinterpret_cast<const char*>(wire.data() + offset), room_bytes);
+    }
     security::secure_zero(wire);
     if (!valid(loaded)) {
         clear_client_runtime_config(loaded);

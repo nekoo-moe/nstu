@@ -22,6 +22,9 @@ public:
 
     [[nodiscard]] bool connect(const std::string& address, std::uint16_t port,
                                std::string* error = nullptr);
+    [[nodiscard]] bool connect_with_timeout(
+        const std::string& address, std::uint16_t port,
+        std::uint32_t timeout_ms, std::string* error = nullptr);
     [[nodiscard]] bool listen(std::uint16_t port, int backlog = 64,
                               std::string* error = nullptr);
     [[nodiscard]] TcpSocket accept(std::string* error = nullptr) const;

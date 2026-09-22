@@ -5,6 +5,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($null -eq ("System.Security.Cryptography.ProtectedData" -as [type])) {
+    Add-Type -AssemblyName System.Security -ErrorAction Stop
+}
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -19,10 +22,15 @@ if ([string]::IsNullOrWhiteSpace($DataRoot)) {
 New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
 
 $secret = [byte[]]::new(32)
-[Security.Cryptography.RandomNumberGenerator]::Fill($secret)
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
 try {
-    $protected = [Security.Cryptography.ProtectedData]::Protect(
-        $secret, $null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+    $rng.GetBytes($secret)
+} finally {
+    $rng.Dispose()
+}
+try {
+    $protected = [System.Security.Cryptography.ProtectedData]::Protect(
+        $secret, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
     $protectedPath = Join-Path $DataRoot "server-enrollment.bin"
     [IO.File]::WriteAllBytes($protectedPath, $protected)
     [IO.File]::WriteAllBytes([IO.Path]::GetFullPath($ExportPath), $secret)

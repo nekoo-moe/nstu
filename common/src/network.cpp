@@ -45,6 +45,13 @@ TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept {
 
 bool TcpSocket::connect(const std::string& address, std::uint16_t port,
                         std::string* error) {
+    return connect_with_timeout(address, port, 5000, error);
+}
+
+bool TcpSocket::connect_with_timeout(const std::string& address,
+                                     std::uint16_t port,
+                                     std::uint32_t timeout_ms,
+                                     std::string* error) {
 #if defined(_WIN32)
     close();
     sockaddr_in endpoint{};
@@ -60,10 +67,57 @@ bool TcpSocket::connect(const std::string& address, std::uint16_t port,
         set_error(error, "TCP socket creation failed");
         return false;
     }
-    if (::connect(socket_handle, reinterpret_cast<const sockaddr*>(&endpoint),
-                  sizeof(endpoint)) == SOCKET_ERROR) {
+    u_long nonblocking = 1;
+    if (ioctlsocket(socket_handle, FIONBIO, &nonblocking) == SOCKET_ERROR) {
         closesocket(socket_handle);
-        set_error(error, "TCP connect failed");
+        set_error(error, "TCP nonblocking setup failed");
+        return false;
+    }
+    const int connect_result = ::connect(
+        socket_handle, reinterpret_cast<const sockaddr*>(&endpoint),
+        sizeof(endpoint));
+    if (connect_result == SOCKET_ERROR) {
+        const int connect_error = WSAGetLastError();
+        if (connect_error != WSAEWOULDBLOCK &&
+            connect_error != WSAEINPROGRESS &&
+            connect_error != WSAEINVAL) {
+            closesocket(socket_handle);
+            set_error(error, "TCP connect failed");
+            return false;
+        }
+        fd_set writable;
+        fd_set failed;
+        FD_ZERO(&writable);
+        FD_ZERO(&failed);
+        FD_SET(socket_handle, &writable);
+        FD_SET(socket_handle, &failed);
+        const auto bounded_timeout = std::max<std::uint32_t>(timeout_ms, 1);
+        timeval timeout{
+            static_cast<long>(bounded_timeout / 1000u),
+            static_cast<long>((bounded_timeout % 1000u) * 1000u),
+        };
+        const int ready = select(0, nullptr, &writable, &failed, &timeout);
+        if (ready <= 0) {
+            closesocket(socket_handle);
+            set_error(error, ready == 0 ? "TCP connect timed out"
+                                        : "TCP connect wait failed");
+            return false;
+        }
+        int socket_error = 0;
+        int socket_error_bytes = sizeof(socket_error);
+        if (getsockopt(socket_handle, SOL_SOCKET, SO_ERROR,
+                       reinterpret_cast<char*>(&socket_error),
+                       &socket_error_bytes) == SOCKET_ERROR ||
+            socket_error != 0 || FD_ISSET(socket_handle, &failed)) {
+            closesocket(socket_handle);
+            set_error(error, "TCP connect failed");
+            return false;
+        }
+    }
+    nonblocking = 0;
+    if (ioctlsocket(socket_handle, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+        closesocket(socket_handle);
+        set_error(error, "TCP blocking mode restore failed");
         return false;
     }
     handle_ = static_cast<std::uintptr_t>(socket_handle);
@@ -71,6 +125,7 @@ bool TcpSocket::connect(const std::string& address, std::uint16_t port,
 #else
     (void)address;
     (void)port;
+    (void)timeout_ms;
     set_error(error, "TCP transport requires Windows");
     return false;
 #endif

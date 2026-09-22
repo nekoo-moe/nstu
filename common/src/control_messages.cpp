@@ -1,6 +1,7 @@
 #include "nstu/control_messages.hpp"
 
 #include <algorithm>
+#include <string_view>
 #include <type_traits>
 
 namespace nstu::control {
@@ -35,6 +36,16 @@ bool read_le(std::span<const std::byte> input, std::size_t& offset, T& value) {
                  << (index * 8u);
     }
     return true;
+}
+
+// Detail strings cross a trust boundary and are rendered in the teacher UI.
+// Restricting them to printable ASCII keeps control characters and partial
+// UTF-8 sequences out of the renderer entirely.
+bool printable_ascii(std::string_view text) {
+    return std::all_of(text.begin(), text.end(), [](char value) {
+        const auto byte = static_cast<unsigned char>(value);
+        return byte >= 0x20 && byte < 0x7f;
+    });
 }
 
 } // namespace
@@ -167,6 +178,208 @@ std::optional<std::uint16_t> decode_snapshot_schedule(
         return std::nullopt;
     }
     return interval_seconds;
+}
+
+std::vector<std::byte> encode_freeze_state(bool frozen) {
+    return {static_cast<std::byte>(frozen ? 1 : 0)};
+}
+
+std::optional<bool> decode_freeze_state(std::span<const std::byte> payload) {
+    if (payload.size() != 1) {
+        return std::nullopt;
+    }
+    const auto value = std::to_integer<std::uint8_t>(payload[0]);
+    // Anything other than the two states this has is a sender that does not
+    // agree with us about what the message means, which is not a third state.
+    return value <= 1 ? std::optional{value != 0} : std::nullopt;
+}
+
+std::vector<std::byte> encode_uwf_configure_request(
+    bool checkpoint_acknowledged) {
+    return {static_cast<std::byte>(checkpoint_acknowledged ? 1 : 0)};
+}
+
+std::optional<bool> decode_uwf_configure_request(
+    std::span<const std::byte> payload) {
+    return decode_freeze_state(payload);
+}
+
+std::vector<std::byte> encode_uwf_configure_report(
+    const UwfConfigureReport& report) {
+    const auto outcome = static_cast<std::uint8_t>(report.outcome);
+    if (outcome < static_cast<std::uint8_t>(UwfConfigureOutcome::armed) ||
+        outcome > static_cast<std::uint8_t>(UwfConfigureOutcome::busy) ||
+        report.detail.empty() ||
+        report.detail.size() > kMaximumUwfDetailBytes ||
+        !std::all_of(report.detail.begin(), report.detail.end(), [](char value) {
+            const auto byte = static_cast<unsigned char>(value);
+            return byte >= 0x20 && byte < 0x7f;
+        })) {
+        return {};
+    }
+    const auto* detail = reinterpret_cast<const std::byte*>(report.detail.data());
+    std::vector<std::byte> payload;
+    payload.reserve(5 + report.detail.size());
+    append_le(payload, outcome);
+    std::uint8_t flags = report.reboot_required ? 1u : 0u;
+    flags |= report.data_exclusion_ready ? 2u : 0u;
+    flags |= report.registry_exclusion_ready ? 4u : 0u;
+    append_le(payload, flags);
+    append_le(payload, static_cast<std::uint16_t>(report.detail.size()));
+    payload.insert(payload.end(), detail, detail + report.detail.size());
+    return payload;
+}
+
+std::optional<UwfConfigureReport> decode_uwf_configure_report(
+    std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    std::uint8_t outcome = 0;
+    std::uint8_t flags = 0;
+    std::uint16_t detail_bytes = 0;
+    if (!read_le(payload, offset, outcome) ||
+        outcome < static_cast<std::uint8_t>(UwfConfigureOutcome::armed) ||
+        outcome > static_cast<std::uint8_t>(UwfConfigureOutcome::busy) ||
+        !read_le(payload, offset, flags) || (flags & ~0x07u) != 0 ||
+        !read_le(payload, offset, detail_bytes) || detail_bytes == 0 ||
+        detail_bytes > kMaximumUwfDetailBytes ||
+        payload.size() - offset != detail_bytes) {
+        return std::nullopt;
+    }
+    UwfConfigureReport report;
+    report.outcome = static_cast<UwfConfigureOutcome>(outcome);
+    report.reboot_required = (flags & 1u) != 0;
+    report.data_exclusion_ready = (flags & 2u) != 0;
+    report.registry_exclusion_ready = (flags & 4u) != 0;
+    report.detail.assign(
+        reinterpret_cast<const char*>(payload.data() + offset), detail_bytes);
+    if (!std::all_of(report.detail.begin(), report.detail.end(), [](char value) {
+            const auto byte = static_cast<unsigned char>(value);
+            return byte >= 0x20 && byte < 0x7f;
+        })) {
+        return std::nullopt;
+    }
+    return report;
+}
+
+std::vector<std::byte> encode_uwf_fleet_configure_request(
+    const UwfFleetConfigureRequest& request) {
+    // A zero operation id would make every later report unattributable, so it
+    // is rejected at the encoder rather than papered over on receipt.
+    if (request.operation_id == 0) {
+        return {};
+    }
+    std::vector<std::byte> payload;
+    payload.reserve(sizeof(std::uint64_t) + 1);
+    append_le(payload, request.operation_id);
+    std::uint8_t flags = request.checkpoint_acknowledged ? 1u : 0u;
+    flags |= request.restart_requested ? 2u : 0u;
+    append_le(payload, flags);
+    return payload;
+}
+
+std::optional<UwfFleetConfigureRequest> decode_uwf_fleet_configure_request(
+    std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    std::uint64_t operation_id = 0;
+    std::uint8_t flags = 0;
+    if (!read_le(payload, offset, operation_id) || operation_id == 0 ||
+        !read_le(payload, offset, flags) || (flags & ~0x03u) != 0 ||
+        offset != payload.size()) {
+        return std::nullopt;
+    }
+    UwfFleetConfigureRequest request;
+    request.operation_id = operation_id;
+    request.checkpoint_acknowledged = (flags & 1u) != 0;
+    request.restart_requested = (flags & 2u) != 0;
+    return request;
+}
+
+std::vector<std::byte> encode_uwf_fleet_status_report(
+    const UwfFleetStatusReport& report) {
+    const auto phase = static_cast<std::uint8_t>(report.phase);
+    if (phase < static_cast<std::uint8_t>(UwfFleetPhase::idle) ||
+        phase > static_cast<std::uint8_t>(UwfFleetPhase::unsupported) ||
+        report.detail.empty() ||
+        report.detail.size() > kMaximumUwfDetailBytes ||
+        !printable_ascii(report.detail)) {
+        return {};
+    }
+    // Unlike the request, operation_id may be zero here. A client that has
+    // just rebooted has lost the id along with the rest of its memory, so its
+    // first report after coming back is an unsolicited statement of current
+    // state. The server re-attaches it to the pending operation by comparing
+    // boot identity, which is the only evidence a restart really happened.
+    std::uint8_t probe_flags = report.probe.probe_succeeded ? 0x01u : 0u;
+    probe_flags |= report.probe.filter_current_enabled ? 0x02u : 0u;
+    probe_flags |= report.probe.filter_next_enabled ? 0x04u : 0u;
+    probe_flags |= report.probe.system_volume_current_protected ? 0x08u : 0u;
+    probe_flags |= report.probe.data_exclusion_present ? 0x10u : 0u;
+    probe_flags |= report.probe.registry_exclusion_present ? 0x20u : 0u;
+    const auto* detail =
+        reinterpret_cast<const std::byte*>(report.detail.data());
+    std::vector<std::byte> payload;
+    payload.reserve(sizeof(std::uint64_t) + kBootIdBytes + 4 +
+                    report.detail.size());
+    append_le(payload, report.operation_id);
+    payload.insert(payload.end(), report.boot_id.begin(), report.boot_id.end());
+    append_le(payload, phase);
+    append_le(payload, probe_flags);
+    append_le(payload, static_cast<std::uint16_t>(report.detail.size()));
+    payload.insert(payload.end(), detail, detail + report.detail.size());
+    return payload;
+}
+
+std::optional<UwfFleetStatusReport> decode_uwf_fleet_status_report(
+    std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    std::uint64_t operation_id = 0;
+    if (!read_le(payload, offset, operation_id) ||
+        offset + kBootIdBytes > payload.size()) {
+        return std::nullopt;
+    }
+    UwfFleetStatusReport report;
+    report.operation_id = operation_id;
+    std::copy_n(payload.begin() + static_cast<std::ptrdiff_t>(offset),
+                kBootIdBytes, report.boot_id.begin());
+    offset += kBootIdBytes;
+    std::uint8_t phase = 0;
+    std::uint8_t probe_flags = 0;
+    std::uint16_t detail_bytes = 0;
+    if (!read_le(payload, offset, phase) ||
+        phase < static_cast<std::uint8_t>(UwfFleetPhase::idle) ||
+        phase > static_cast<std::uint8_t>(UwfFleetPhase::unsupported) ||
+        !read_le(payload, offset, probe_flags) ||
+        (probe_flags & ~0x3fu) != 0 ||
+        !read_le(payload, offset, detail_bytes) || detail_bytes == 0 ||
+        detail_bytes > kMaximumUwfDetailBytes ||
+        payload.size() - offset != detail_bytes) {
+        return std::nullopt;
+    }
+    // A probe that did not complete cannot also have made observations.
+    // Rejecting the combination keeps "unknown" from ever decoding into a
+    // state that reads as evidence of protection.
+    if ((probe_flags & 0x01u) == 0 && (probe_flags & ~0x01u) != 0) {
+        return std::nullopt;
+    }
+    report.phase = static_cast<UwfFleetPhase>(phase);
+    report.probe.probe_succeeded = (probe_flags & 0x01u) != 0;
+    report.probe.filter_current_enabled = (probe_flags & 0x02u) != 0;
+    report.probe.filter_next_enabled = (probe_flags & 0x04u) != 0;
+    report.probe.system_volume_current_protected = (probe_flags & 0x08u) != 0;
+    report.probe.data_exclusion_present = (probe_flags & 0x10u) != 0;
+    report.probe.registry_exclusion_present = (probe_flags & 0x20u) != 0;
+    report.detail.assign(
+        reinterpret_cast<const char*>(payload.data() + offset), detail_bytes);
+    if (!printable_ascii(report.detail)) {
+        return std::nullopt;
+    }
+    // The verified phase is the exam gate. Never let it decode out of a report
+    // whose own probe does not support it.
+    if (report.phase == UwfFleetPhase::verified_protected &&
+        !probe_proves_protection(report.probe)) {
+        return std::nullopt;
+    }
+    return report;
 }
 
 std::vector<std::byte> encode_snapshot_frame(const SnapshotFrame& frame) {

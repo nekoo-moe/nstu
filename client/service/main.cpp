@@ -1,18 +1,29 @@
 #include "nstu/agent_protocol.hpp"
+#include "nstu/audit.hpp"
 #include "nstu/client_config.hpp"
 #include "nstu/client_control.hpp"
+#include "nstu/client_freeze.hpp"
+#include "nstu/client_pairing.hpp"
+#include "nstu/client_uwf_request.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/deployment.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
 #include "nstu/session.hpp"
+#include "nstu/service_install.hpp"
+#include "nstu/setup/diagnostics.hpp"
+#include "nstu/setup/uwf.hpp"
 
 #include <windows.h>
+#include <reason.h>
 #include <wtsapi32.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdio>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <map>
@@ -26,10 +37,14 @@
 
 namespace {
 
-constexpr wchar_t kServiceName[] = L"nstu-service";
+constexpr const wchar_t* kServiceName = nstu::client::kManagedServiceName;
 constexpr DWORD kServiceControlLock = 128;
 constexpr DWORD kServiceControlUnlock = 129;
+constexpr DWORD kServiceControlReloadFreeze =
+    static_cast<DWORD>(nstu::client::kFreezeReloadControl);
 SERVICE_STATUS_HANDLE g_status_handle = nullptr;
+std::mutex g_service_status_mutex;
+DWORD g_service_state = SERVICE_STOPPED;
 HANDLE g_stop_event = nullptr;
 std::filesystem::path g_agent_path;
 std::mutex g_agent_path_mutex;
@@ -37,6 +52,10 @@ std::mutex g_agent_queue_mutex;
 std::deque<nstu::client::AgentMessage> g_agent_queue;
 std::mutex g_outbound_queue_mutex;
 std::deque<nstu::client::ClientOutboundCommand> g_outbound_queue;
+// Client-side NSTU activity audit. The spool is internally synchronised; the
+// upload cadence timer is only touched on the single control-session thread.
+nstu::audit::Spool g_audit_spool;
+std::chrono::steady_clock::time_point g_audit_next_upload{};
 nstu::exam::AnswerOutbox g_exam_outbox;
 std::mutex g_exam_inflight_mutex;
 // The value is the complete exam context key.  Keeping it alongside the
@@ -55,6 +74,26 @@ std::mutex g_exam_outbox_state_mutex;
 bool g_exam_outbox_ready = false;
 std::atomic_bool g_stop_requested = false;
 std::atomic_bool g_agent_connected = false;
+// Managed mode as this service currently believes it to be. The registry
+// value is the source of truth; this is the copy the control handler can
+// consult without touching the registry on every SCM callback.
+std::atomic_bool g_frozen = false;
+std::atomic_bool g_uwf_configuring = false;
+std::mutex g_uwf_worker_mutex;
+std::thread g_uwf_worker;
+// Boot identity for the fleet reboot-to-restore workflow.  Random, generated
+// once when the service starts, and held in memory only: it therefore differs
+// after every restart without needing persistence or a trustworthy clock.  A
+// client claiming UWF protection under the same boot identity the server
+// configured has not actually rebooted, whatever else its report says.
+nstu::control::BootId g_boot_id{};
+std::mutex g_fleet_mutex;
+nstu::control::UwfFleetPhase g_fleet_phase =
+    nstu::control::UwfFleetPhase::idle;
+std::uint64_t g_fleet_operation_id = 0;
+std::mutex g_server_endpoint_mutex;
+std::string g_server_address;
+std::uint16_t g_server_port = 0;
 std::atomic_bool g_agent_locked = false;
 std::atomic_bool g_agent_streaming = false;
 std::atomic<std::uint8_t> g_agent_stream_fps = 0;
@@ -64,12 +103,63 @@ std::atomic_bool g_agent_viewing_broadcast = false;
 std::atomic_bool g_desired_locked = false;
 std::mutex g_agent_launch_mutex;
 std::chrono::steady_clock::time_point g_next_agent_launch{};
+// Pairing state. Only the control loop runs an attempt, but the answer
+// to the selection menu arrives on the pipe thread, so the handoff is
+// guarded.
+std::mutex g_pairing_mutex;
+std::condition_variable g_pairing_signal;
+std::optional<std::uint16_t> g_pairing_selection;
+std::size_t g_pairing_choice_count = 0;
+std::chrono::steady_clock::time_point g_next_pairing_sweep{};
 constexpr std::size_t kMaximumQueuedAgentMessages = 256;
 constexpr std::size_t kMaximumQueuedOutboundMessages = 32;
 constexpr std::size_t kMaximumQueuedExamIngress = 64;
 constexpr auto kExamTransientRetryDelay = std::chrono::seconds(2);
 constexpr auto kExamRejectedRetryDelay = std::chrono::seconds(30);
 constexpr auto kExamAckTimeout = std::chrono::seconds(5);
+// An unenrolled machine sweeps the LAN until it finds a server. Doing
+// that on the reconnect cadence would put a broadcast from every machine
+// in a lab on the wire every few seconds at bell time, which is noise
+// nobody benefits from: a teacher opening the pairing window is not in a
+// hurry.
+constexpr auto kPairingSweepInterval = std::chrono::seconds(10);
+// Long enough for somebody to read a short list and point at a name.
+constexpr auto kPairingSelectionTimeout = std::chrono::seconds(120);
+constexpr auto kPairingSelectionSlice = std::chrono::milliseconds(200);
+
+void report_status(DWORD state, DWORD error = NO_ERROR);
+void refresh_running_status();
+void reload_local_freeze_state();
+bool apply_remote_freeze_state(bool frozen, std::string* error);
+bool begin_service_stop();
+
+void update_diagnostic_endpoint_cache(
+    const nstu::discovery::ServerEndpoint& endpoint) noexcept {
+    HKEY key = nullptr;
+    const LONG opened = RegOpenKeyExW(
+        HKEY_LOCAL_MACHINE, L"Software\\NSTU", 0,
+        KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
+    if (opened != ERROR_SUCCESS) {
+        OutputDebugStringA(
+            "NSTU diagnostic endpoint registry cache could not be opened\n");
+        return;
+    }
+    const std::wstring address(endpoint.address.begin(), endpoint.address.end());
+    const DWORD address_bytes = static_cast<DWORD>(
+        (address.size() + 1) * sizeof(wchar_t));
+    const DWORD port = endpoint.port;
+    const LONG address_result = RegSetValueExW(
+        key, L"ServerAddress", 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(address.c_str()), address_bytes);
+    const LONG port_result = RegSetValueExW(
+        key, L"ServerPort", 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&port), sizeof(port));
+    RegCloseKey(key);
+    if (address_result != ERROR_SUCCESS || port_result != ERROR_SUCCESS) {
+        OutputDebugStringA(
+            "NSTU diagnostic endpoint registry cache update failed\n");
+    }
+}
 
 std::string exam_inflight_key(const nstu::exam::AnswerEvent& event) {
     // Keep the session/sequence/hash prefix fixed so an ACK can retire only
@@ -354,6 +444,20 @@ void drain_exam_ingress() {
     }
 }
 
+void emit_audit(nstu::audit::Category category, nstu::audit::Severity severity,
+                std::string component, std::string action, std::string result,
+                std::string detail = {}, std::uint64_t operation_id = 0) {
+    nstu::audit::Event event;
+    event.category = category;
+    event.severity = severity;
+    event.component = std::move(component);
+    event.action = std::move(action);
+    event.result = std::move(result);
+    event.operation_id = operation_id;
+    event.detail = std::move(detail);
+    (void)g_audit_spool.emit(event);
+}
+
 void queue_outbound_message(nstu::protocol::CommandType type,
                             std::vector<std::byte> payload) {
     std::scoped_lock lock(g_outbound_queue_mutex);
@@ -375,6 +479,26 @@ std::optional<nstu::client::ClientOutboundCommand> pop_outbound_message() {
             auto message = std::move(g_outbound_queue.front());
             g_outbound_queue.pop_front();
             return message;
+        }
+    }
+
+    // Drain the audit spool at a bounded cadence, behind the higher-priority
+    // command queue above. Records are peeked, not removed: an audit_ack from
+    // the server advances the spool, so a lost upload is retried rather than
+    // lost, and a client that cannot reach the server bounds its own memory.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (!g_audit_spool.empty() && now >= g_audit_next_upload) {
+            const auto chunk = g_audit_spool.peek_chunk();
+            if (!chunk.empty()) {
+                auto payload = nstu::audit::encode_audit_chunk(chunk);
+                if (!payload.empty()) {
+                    g_audit_next_upload = now + std::chrono::seconds(5);
+                    return nstu::client::ClientOutboundCommand{
+                        nstu::protocol::CommandType::audit_upload,
+                        std::move(payload)};
+                }
+            }
         }
     }
 
@@ -455,6 +579,77 @@ void queue_agent_message(nstu::client::AgentMessage message) {
     g_agent_queue.push_back(std::move(message));
 }
 
+void queue_pairing_status(nstu::client::PairingOutcome outcome,
+                          std::string_view detail) {
+    nstu::client::AgentPairingStatus status;
+    status.outcome = static_cast<std::uint8_t>(outcome);
+    status.detail = detail.empty()
+        ? std::string(nstu::client::pairing_outcome_text(outcome))
+        : std::string(detail.substr(
+              0, std::min(detail.size(),
+                          nstu::client::kMaximumPairingTextBytes)));
+    auto payload = nstu::client::encode_agent_pairing_status(status);
+    if (payload.empty()) {
+        // The detail is whatever the failing layer wrote, so it can carry
+        // characters the codec will not put on a screen. The outcome
+        // still has to reach the agent, so fall back to the sentence that
+        // goes with it.
+        status.detail = nstu::client::pairing_outcome_text(outcome);
+        payload = nstu::client::encode_agent_pairing_status(status);
+    }
+    if (!payload.empty()) {
+        queue_agent_message(
+            {nstu::client::AgentMessageType::pairing_status,
+             std::move(payload)});
+    }
+}
+
+void open_pairing_menu(std::size_t choices) {
+    std::scoped_lock lock(g_pairing_mutex);
+    g_pairing_choice_count = choices;
+    g_pairing_selection.reset();
+}
+
+// An index for a menu nobody is showing, or one past its end, is dropped
+// rather than trusted. The agent runs as the interactive user, and this
+// is the service deciding which server it is about to hand an identity.
+void record_pairing_selection(std::span<const std::byte> payload) {
+    const auto index =
+        nstu::client::decode_agent_pairing_selection(payload);
+    std::scoped_lock lock(g_pairing_mutex);
+    if (!index || *index >= g_pairing_choice_count) {
+        return;
+    }
+    g_pairing_selection = *index;
+    g_pairing_signal.notify_all();
+}
+
+void cancel_pairing_menu() {
+    std::scoped_lock lock(g_pairing_mutex);
+    g_pairing_choice_count = 0;
+    g_pairing_selection.reset();
+    g_pairing_signal.notify_all();
+}
+
+std::optional<std::uint16_t> await_pairing_selection(
+    const std::stop_token& stop_token) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + kPairingSelectionTimeout;
+    std::unique_lock lock(g_pairing_mutex);
+    while (!g_pairing_selection && !stop_token.stop_requested() &&
+           g_agent_connected.load() &&
+           std::chrono::steady_clock::now() < deadline) {
+        // A desktop that goes away mid-menu never signals the condition
+        // variable, so the wait is sliced rather than left to a wake-up
+        // that may never arrive.
+        g_pairing_signal.wait_for(lock, kPairingSelectionSlice);
+    }
+    auto selection = g_pairing_selection;
+    g_pairing_selection.reset();
+    g_pairing_choice_count = 0;
+    return selection;
+}
+
 void set_desired_lock(bool locked) {
     g_desired_locked = locked;
     queue_agent_message({locked ? nstu::client::AgentMessageType::lock
@@ -511,6 +706,9 @@ void agent_pipe_loop() {
                                  ? nstu::client::AgentMessageType::lock
                                  : nstu::client::AgentMessageType::unlock,
                              {}});
+        queue_agent_message(
+            {nstu::client::AgentMessageType::managed_state,
+             nstu::control::encode_freeze_state(g_frozen.load())});
         queue_agent_message(
             {nstu::client::AgentMessageType::status_request, {}});
         while (!g_stop_requested.load()) {
@@ -576,6 +774,9 @@ void agent_pipe_loop() {
                            nstu::client::AgentMessageType::exam_answer_event) {
                     (void)queue_exam_event_payload(message->payload);
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::pairing_select) {
+                    record_pairing_selection(message->payload);
+                } else if (message->type ==
                            nstu::client::AgentMessageType::exam_state_request) {
                     const auto request =
                         nstu::exam::decode_state_request(message->payload);
@@ -590,6 +791,7 @@ void agent_pipe_loop() {
             Sleep(25);
         }
         g_agent_connected = false;
+        cancel_pairing_menu();
         pipe.close();
         if (!g_stop_requested.load()) {
             // A replacement agent must never inherit an active exam from a
@@ -641,6 +843,488 @@ nstu::control::ClientStatusReport current_status() {
         g_agent_snapshot_interval_seconds.load();
     status.session_id = WTSGetActiveConsoleSessionId();
     return status;
+}
+
+nstu::control::UwfConfigureOutcome wire_uwf_outcome(
+    nstu::setup::UwfConfigureOutcome outcome) noexcept {
+    using Setup = nstu::setup::UwfConfigureOutcome;
+    using Wire = nstu::control::UwfConfigureOutcome;
+    switch (outcome) {
+    case Setup::armed: return Wire::armed;
+    case Setup::already_enabled: return Wire::already_enabled;
+    case Setup::unsupported_edition: return Wire::unsupported_edition;
+    case Setup::feature_missing: return Wire::feature_missing;
+    case Setup::probe_unavailable: return Wire::probe_unavailable;
+    case Setup::provider_unavailable: return Wire::provider_unavailable;
+    case Setup::reboot_pending: return Wire::reboot_pending;
+    case Setup::invalid_data_root: return Wire::invalid_data_root;
+    case Setup::readiness_failed: return Wire::readiness_failed;
+    case Setup::checkpoint_required: return Wire::checkpoint_required;
+    case Setup::access_denied: return Wire::access_denied;
+    case Setup::failed: return Wire::failed;
+    }
+    return Wire::failed;
+}
+
+void queue_uwf_report(nstu::control::UwfConfigureReport report) {
+    auto payload = nstu::control::encode_uwf_configure_report(report);
+    if (!payload.empty()) {
+        queue_outbound_message(nstu::protocol::CommandType::uwf_report,
+                               std::move(payload));
+    }
+}
+
+bool schedule_uwf_restart() noexcept {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+        return false;
+    }
+    TOKEN_PRIVILEGES requested{};
+    requested.PrivilegeCount = 1;
+    if (!LookupPrivilegeValueW(nullptr, L"SeShutdownPrivilege",
+                               &requested.Privileges[0].Luid)) {
+        CloseHandle(token);
+        return false;
+    }
+    requested.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    TOKEN_PRIVILEGES previous{};
+    DWORD previous_bytes = sizeof(previous);
+    SetLastError(ERROR_SUCCESS);
+    const bool enabled =
+        AdjustTokenPrivileges(token, FALSE, &requested, sizeof(previous),
+                              &previous, &previous_bytes) != FALSE &&
+        GetLastError() == ERROR_SUCCESS;
+    bool scheduled = false;
+    if (enabled) {
+        // Visible countdown, no forced app close. The operator can cancel with
+        // `shutdown /a` during the minute if work still needs saving.
+        // Sources:
+        // https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-initiatesystemshutdownexw
+        // https://learn.microsoft.com/en-us/windows/win32/shutdown/system-shutdown-reason-codes
+        scheduled = InitiateSystemShutdownExW(
+            nullptr,
+            const_cast<wchar_t*>(
+                L"NSTU reboot-to-restore setup completed. Save work; this "
+                L"computer will restart in 60 seconds."),
+            60, FALSE, TRUE,
+            SHTDN_REASON_MAJOR_APPLICATION |
+                SHTDN_REASON_MINOR_INSTALLATION |
+                SHTDN_REASON_FLAG_PLANNED) != FALSE;
+        if (previous.PrivilegeCount != 0) {
+            (void)AdjustTokenPrivileges(token, FALSE, &previous, 0, nullptr,
+                                        nullptr);
+        }
+    }
+    CloseHandle(token);
+    return scheduled;
+}
+
+void configure_uwf_async(bool checkpoint_acknowledged,
+                         bool clear_installer_request = false) {
+    bool expected = false;
+    if (!g_uwf_configuring.compare_exchange_strong(expected, true)) {
+        queue_uwf_report({
+            .outcome = nstu::control::UwfConfigureOutcome::busy,
+            .detail = "UWF configuration is already running",
+        });
+        return;
+    }
+    try {
+        std::scoped_lock worker_lock(g_uwf_worker_mutex);
+        if (g_uwf_worker.joinable()) {
+            g_uwf_worker.join();
+        }
+        std::string server_address;
+        std::uint16_t server_port = 0;
+        {
+            std::scoped_lock endpoint_lock(g_server_endpoint_mutex);
+            server_address = g_server_address;
+            server_port = g_server_port;
+        }
+        g_uwf_worker = std::thread([
+            checkpoint_acknowledged, clear_installer_request,
+            server_address = std::move(server_address), server_port] {
+            struct BusyGuard {
+                ~BusyGuard() { g_uwf_configuring = false; }
+            } guard;
+            try {
+                bool readiness_passed = true;
+                nstu::setup::DiagnosticOptions options;
+                options.role = nstu::setup::DiagnosticRole::client;
+                options.boot_check = true;
+                options.server_address.assign(server_address.begin(),
+                                              server_address.end());
+                options.server_port = server_port;
+                nstu::setup::run_startup_diagnostics(
+                    options, {}, [&](nstu::setup::DiagnosticResult result) {
+                        if (result.severity ==
+                            nstu::setup::DiagnosticSeverity::failure) {
+                            readiness_passed = false;
+                        }
+                    });
+                const auto data_root = nstu::deployment::data_root(nullptr);
+                const auto result = nstu::setup::configure_uwf({
+                    .data_root = data_root,
+                    .diagnostic_readiness_passed = readiness_passed,
+                    .checkpoint_acknowledged = checkpoint_acknowledged,
+                });
+                std::string detail = result.detail;
+                if (detail.empty()) detail = "UWF configuration failed";
+                if (result.reboot_required) {
+                    detail = schedule_uwf_restart()
+                        ? "UWF is ready; restart scheduled in 60 seconds"
+                        : "UWF is ready; automatic restart failed, restart manually";
+                }
+                detail.resize(std::min(
+                    detail.size(), nstu::control::kMaximumUwfDetailBytes));
+                queue_uwf_report({
+                    .outcome = wire_uwf_outcome(result.outcome),
+                    .reboot_required = result.reboot_required,
+                    .data_exclusion_ready = result.data_exclusion_added,
+                    .registry_exclusion_ready =
+                        result.registry_exclusion_added,
+                    .detail = std::move(detail),
+                });
+            } catch (...) {
+                queue_uwf_report({
+                    .outcome = nstu::control::UwfConfigureOutcome::failed,
+                    .detail = "UWF configuration failed unexpectedly",
+                });
+            }
+            if (clear_installer_request) {
+                std::string clear_error;
+                if (!nstu::client::set_uwf_configuration_requested(
+                        false, {}, &clear_error)) {
+                    OutputDebugStringA(
+                        ("NSTU UWF installer request was not cleared: " +
+                         clear_error + "\n")
+                            .c_str());
+                }
+            }
+        });
+    } catch (...) {
+        g_uwf_configuring = false;
+        queue_uwf_report({
+            .outcome = nstu::control::UwfConfigureOutcome::failed,
+            .detail = "UWF configuration worker could not start",
+        });
+    }
+}
+
+// Fleet reboot-to-restore.
+//
+// The single-client path above reports what a configuration attempt did. That
+// report is produced before the restart, so at best it proves UWF was armed.
+// A fleet operation has to answer the stronger question the exam gate asks -
+// "is this machine protected in the session it is running right now?" - which
+// needs a read-only probe plus the boot identity showing a restart really
+// happened. Both paths share g_uwf_configuring and the single g_uwf_worker
+// slot, so only one of them can ever be touching UWF, and the shutdown join
+// already in service_main covers both.
+
+nstu::control::UwfProtectionProbe wire_uwf_probe(
+    const nstu::setup::UwfProtectionProbeResult& result) noexcept {
+    nstu::control::UwfProtectionProbe probe;
+    // A probe that never reached an answer reports nothing at all. "Unknown"
+    // and "unprotected" are different states, and the wire format refuses a
+    // report carrying observations without a completed probe.
+    if (!result.probe_succeeded) {
+        return probe;
+    }
+    probe.probe_succeeded = true;
+    probe.filter_current_enabled = result.filter_current_enabled;
+    probe.filter_next_enabled = result.filter_next_enabled;
+    probe.system_volume_current_protected =
+        result.system_volume_current_protected;
+    probe.data_exclusion_present = result.data_exclusion_present;
+    probe.registry_exclusion_present = result.registry_exclusion_present;
+    return probe;
+}
+
+// The status codec refuses a detail that is empty, oversized, or not printable
+// ASCII, and a refused encode silently drops the whole report. Every detail is
+// forced into that shape here rather than trusted to arrive in it.
+std::string fleet_detail(std::string detail, const char* fallback) {
+    constexpr char kSpace = 0x20;
+    for (char& value : detail) {
+        const auto byte = static_cast<unsigned char>(value);
+        if (byte < 0x20 || byte >= 0x7f) {
+            value = kSpace;
+        }
+    }
+    while (!detail.empty() && detail.back() == kSpace) {
+        detail.pop_back();
+    }
+    if (detail.empty()) {
+        detail = fallback;
+    }
+    if (detail.size() > nstu::control::kMaximumUwfDetailBytes) {
+        detail.resize(nstu::control::kMaximumUwfDetailBytes);
+    }
+    return detail;
+}
+
+void queue_fleet_status(nstu::control::UwfFleetPhase phase,
+                        const nstu::control::UwfProtectionProbe& probe,
+                        std::string detail) {
+    if (phase == nstu::control::UwfFleetPhase::verified_protected &&
+        !nstu::control::probe_proves_protection(probe)) {
+        // Fail closed. This phase is what authorizes an exam, so it is never
+        // claimed on the strength of anything but the probe in this report.
+        phase = nstu::control::UwfFleetPhase::failed;
+    }
+    nstu::control::UwfFleetStatusReport report;
+    {
+        std::scoped_lock lock(g_fleet_mutex);
+        g_fleet_phase = phase;
+        report.operation_id = g_fleet_operation_id;
+    }
+    report.boot_id = g_boot_id;
+    report.phase = phase;
+    report.probe = probe;
+    report.detail =
+        fleet_detail(std::move(detail), "UWF state reported without detail");
+    auto payload = nstu::control::encode_uwf_fleet_status_report(report);
+    if (payload.empty()) {
+        OutputDebugStringA(
+            "NSTU UWF fleet status could not be encoded and was dropped\n");
+        return;
+    }
+    queue_outbound_message(nstu::protocol::CommandType::uwf_fleet_status,
+                           std::move(payload));
+}
+
+// Current-session UWF state cannot change without a restart, and a restart
+// replaces g_boot_id along with this cache. The window therefore bounds how
+// often a reconnect loop hits WMI without making the answer any less current.
+constexpr auto kFleetProbeCacheLifetime = std::chrono::seconds(30);
+std::mutex g_fleet_probe_cache_mutex;
+std::optional<nstu::setup::UwfProtectionProbeResult> g_fleet_probe_cache;
+std::chrono::steady_clock::time_point g_fleet_probe_cache_expiry{};
+
+nstu::setup::UwfProtectionProbeResult probe_uwf_state() {
+    {
+        std::scoped_lock lock(g_fleet_probe_cache_mutex);
+        if (g_fleet_probe_cache &&
+            std::chrono::steady_clock::now() < g_fleet_probe_cache_expiry) {
+            return *g_fleet_probe_cache;
+        }
+    }
+    nstu::setup::UwfProtectionProbeResult result;
+    try {
+        result = nstu::setup::probe_uwf_protection(
+            nstu::deployment::data_root(nullptr));
+    } catch (...) {
+        result = {};
+        result.detail = "the UWF probe failed unexpectedly";
+    }
+    {
+        std::scoped_lock lock(g_fleet_probe_cache_mutex);
+        g_fleet_probe_cache = result;
+        g_fleet_probe_cache_expiry =
+            std::chrono::steady_clock::now() + kFleetProbeCacheLifetime;
+    }
+    return result;
+}
+
+void invalidate_uwf_probe_cache() {
+    std::scoped_lock lock(g_fleet_probe_cache_mutex);
+    g_fleet_probe_cache.reset();
+}
+
+// Reports what this machine currently is, rather than what an operation hoped
+// it would become. The server demotes a previously verified client back to
+// verifying the moment it reconnects, and this is the report that resolves it;
+// until one arrives, no exam can start here.
+void report_current_fleet_state() {
+    const auto result = probe_uwf_state();
+    const auto probe = wire_uwf_probe(result);
+    nstu::control::UwfFleetPhase phase = nstu::control::UwfFleetPhase::idle;
+    if (nstu::control::probe_proves_protection(probe)) {
+        phase = nstu::control::UwfFleetPhase::verified_protected;
+    } else if (result.probe_succeeded && !result.supported_product) {
+        phase = nstu::control::UwfFleetPhase::unsupported;
+    } else {
+        // This machine is demonstrably not protected now. Whatever step an
+        // operation had reached is still what the server needs to see, except
+        // a verified claim, which this probe has just disproved.
+        std::scoped_lock lock(g_fleet_mutex);
+        phase =
+            g_fleet_phase == nstu::control::UwfFleetPhase::verified_protected
+                ? nstu::control::UwfFleetPhase::verifying
+                : g_fleet_phase;
+    }
+    queue_fleet_status(phase, probe, result.detail);
+}
+
+void report_current_fleet_state_async() {
+    bool expected = false;
+    if (!g_uwf_configuring.compare_exchange_strong(expected, true)) {
+        // A configuration is already running and reports on its own. Probing
+        // underneath it would only describe a half-applied state.
+        return;
+    }
+    try {
+        std::scoped_lock worker_lock(g_uwf_worker_mutex);
+        if (g_uwf_worker.joinable()) {
+            g_uwf_worker.join();
+        }
+        g_uwf_worker = std::thread([] {
+            struct BusyGuard {
+                ~BusyGuard() { g_uwf_configuring = false; }
+            } guard;
+            try {
+                report_current_fleet_state();
+            } catch (...) {
+                OutputDebugStringA(
+                    "NSTU UWF fleet state could not be reported\n");
+            }
+        });
+    } catch (...) {
+        g_uwf_configuring = false;
+    }
+}
+
+void configure_uwf_fleet_async(std::uint64_t operation_id,
+                               bool checkpoint_acknowledged,
+                               bool restart_requested) {
+    if (operation_id == 0) {
+        // Every later status report is matched back by operation id, so an
+        // unattributable request is refused rather than half honoured.
+        return;
+    }
+    bool duplicate = false;
+    {
+        std::scoped_lock lock(g_fleet_mutex);
+        duplicate = g_fleet_operation_id == operation_id;
+        if (!duplicate) {
+            g_fleet_operation_id = operation_id;
+            g_fleet_phase = nstu::control::UwfFleetPhase::requested;
+        }
+    }
+    if (duplicate) {
+        // The server retransmits when a reply is lost. Re-running the arming
+        // sequence - above all re-scheduling a restart - on a duplicate would
+        // be a far worse answer than repeating where this machine got to.
+        report_current_fleet_state_async();
+        return;
+    }
+    bool expected = false;
+    if (!g_uwf_configuring.compare_exchange_strong(expected, true)) {
+        queue_fleet_status(
+            nstu::control::UwfFleetPhase::failed, {},
+            "a UWF operation is already running on this computer");
+        return;
+    }
+    try {
+        std::scoped_lock worker_lock(g_uwf_worker_mutex);
+        if (g_uwf_worker.joinable()) {
+            g_uwf_worker.join();
+        }
+        std::string server_address;
+        std::uint16_t server_port = 0;
+        {
+            std::scoped_lock endpoint_lock(g_server_endpoint_mutex);
+            server_address = g_server_address;
+            server_port = g_server_port;
+        }
+        g_uwf_worker = std::thread([checkpoint_acknowledged, restart_requested,
+                                    server_address = std::move(server_address),
+                                    server_port] {
+            struct BusyGuard {
+                ~BusyGuard() { g_uwf_configuring = false; }
+            } guard;
+            try {
+                // Proof first, mutation only where it is missing. A machine
+                // already protected in the session it is running needs
+                // nothing armed and, above all, no classroom reboot.
+                invalidate_uwf_probe_cache();
+                auto result = probe_uwf_state();
+                auto probe = wire_uwf_probe(result);
+                if (nstu::control::probe_proves_protection(probe)) {
+                    queue_fleet_status(
+                        nstu::control::UwfFleetPhase::verified_protected, probe,
+                        result.detail);
+                    return;
+                }
+                if (result.probe_succeeded && !result.supported_product) {
+                    queue_fleet_status(
+                        nstu::control::UwfFleetPhase::unsupported, probe,
+                        result.detail);
+                    return;
+                }
+                queue_fleet_status(nstu::control::UwfFleetPhase::configuring,
+                                   probe, "running UWF readiness checks");
+
+                bool readiness_passed = true;
+                nstu::setup::DiagnosticOptions options;
+                options.role = nstu::setup::DiagnosticRole::client;
+                options.boot_check = true;
+                options.server_address.assign(server_address.begin(),
+                                              server_address.end());
+                options.server_port = server_port;
+                nstu::setup::run_startup_diagnostics(
+                    options, {}, [&](nstu::setup::DiagnosticResult check) {
+                        if (check.severity ==
+                            nstu::setup::DiagnosticSeverity::failure) {
+                            readiness_passed = false;
+                        }
+                    });
+                const auto configured = nstu::setup::configure_uwf({
+                    .data_root = nstu::deployment::data_root(nullptr),
+                    .diagnostic_readiness_passed = readiness_passed,
+                    .checkpoint_acknowledged = checkpoint_acknowledged,
+                });
+
+                // Re-read afterwards so the report carries observed state
+                // rather than the opinion of the configure call itself.
+                invalidate_uwf_probe_cache();
+                result = probe_uwf_state();
+                probe = wire_uwf_probe(result);
+
+                using Outcome = nstu::setup::UwfConfigureOutcome;
+                const bool armed =
+                    configured.outcome == Outcome::armed ||
+                    configured.outcome == Outcome::already_enabled ||
+                    configured.outcome == Outcome::reboot_pending;
+                if (!armed) {
+                    queue_fleet_status(
+                        configured.outcome == Outcome::unsupported_edition
+                            ? nstu::control::UwfFleetPhase::unsupported
+                            : nstu::control::UwfFleetPhase::failed,
+                        probe, configured.detail);
+                    return;
+                }
+                if (!restart_requested) {
+                    // Armed, but the operator did not ask for the restart that
+                    // would make it real. Saying so is the honest answer, and
+                    // the exam gate still refuses this machine.
+                    queue_fleet_status(
+                        nstu::control::UwfFleetPhase::awaiting_restart, probe,
+                        "UWF is armed; restart this computer to apply it");
+                    return;
+                }
+                if (!schedule_uwf_restart()) {
+                    queue_fleet_status(
+                        nstu::control::UwfFleetPhase::awaiting_restart, probe,
+                        "UWF is armed; the automatic restart failed, restart "
+                        "this computer manually");
+                    return;
+                }
+                queue_fleet_status(
+                    nstu::control::UwfFleetPhase::restarting, probe,
+                    "UWF is armed; this computer restarts in 60 seconds");
+            } catch (...) {
+                queue_fleet_status(nstu::control::UwfFleetPhase::failed, {},
+                                   "the UWF operation failed unexpectedly");
+            }
+        });
+    } catch (...) {
+        g_uwf_configuring = false;
+        queue_fleet_status(nstu::control::UwfFleetPhase::failed, {},
+                           "the UWF operation worker could not start");
+    }
 }
 
 void handle_server_command(
@@ -838,6 +1522,66 @@ void handle_server_command(
              command.payload});
         break;
     }
+    case nstu::protocol::CommandType::uwf_configure: {
+        const auto acknowledged =
+            nstu::control::decode_uwf_configure_request(command.payload);
+        if (acknowledged) {
+            configure_uwf_async(*acknowledged);
+        }
+        break;
+    }
+    case nstu::protocol::CommandType::uwf_fleet_configure: {
+        const auto request =
+            nstu::control::decode_uwf_fleet_configure_request(command.payload);
+        if (!request) {
+            break;
+        }
+        // The recovery-checkpoint acknowledgement is not re-checked here on
+        // purpose: configure_uwf() owns that gate and reports exactly why it
+        // refused, so a teacher sees one answer rather than two.
+        emit_audit(nstu::audit::Category::uwf, nstu::audit::Severity::info,
+                   "client_uwf", "fleet_configure_received",
+                   request->restart_requested ? "restart_requested"
+                                               : "no_restart",
+                   {}, request->operation_id);
+        configure_uwf_fleet_async(request->operation_id,
+                                  request->checkpoint_acknowledged,
+                                  request->restart_requested);
+        break;
+    }
+    case nstu::protocol::CommandType::audit_ack: {
+        const auto sequence =
+            nstu::audit::decode_audit_ack(command.payload);
+        if (sequence) {
+            g_audit_spool.acknowledge(*sequence);
+        }
+        break;
+    }
+    case nstu::protocol::CommandType::freeze_set: {
+        const auto requested =
+            nstu::control::decode_freeze_state(command.payload);
+        if (!requested) {
+            break;
+        }
+        std::string freeze_error;
+        const bool applied =
+            apply_remote_freeze_state(*requested, &freeze_error);
+        if (!applied) {
+            OutputDebugStringA(("NSTU managed mode not applied: " +
+                                (freeze_error.empty()
+                                     ? std::string("registry write failed")
+                                     : freeze_error) +
+                                "\n")
+                                   .c_str());
+        }
+        // What this machine is now, not what it was asked to be. A teacher
+        // whose freeze did not take has to see that here rather than find out
+        // when a student stops the service.
+        queue_outbound_message(
+            nstu::protocol::CommandType::freeze_report,
+            nstu::control::encode_freeze_state(g_frozen.load()));
+        break;
+    }
     case nstu::protocol::CommandType::exam_state_response:
         if (const auto response =
                 nstu::exam::decode_state_response(command.payload);
@@ -850,6 +1594,127 @@ void handle_server_command(
     default:
         break;
     }
+}
+
+// One whole pairing attempt for a machine that holds no key yet. Nothing
+// here grants anything by itself: the operator at the server decides, and
+// the person at this machine has to be able to read the same six digits,
+// which is why an attempt is not started at all when no agent is on the
+// desktop to show them. Returns true only once a usable identity is on
+// disk.
+bool attempt_pairing(const std::stop_token& stop_token,
+                     const std::filesystem::path& path,
+                     std::span<const std::byte> entropy) {
+    if (!g_agent_connected.load()) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < g_next_pairing_sweep) {
+        return false;
+    }
+    g_next_pairing_sweep = now + kPairingSweepInterval;
+    auto candidates = nstu::discovery::discover_pairing_candidates();
+    if (candidates.empty() || stop_token.stop_requested()) {
+        return false;
+    }
+    // A room preference from the installer routes this machine straight to its
+    // own classroom's server when that server is answering, so a labelled fleet
+    // pairs with no menu at all. It is only a hint: the operator's six-digit
+    // approval still gates the pairing, so a wrong or absent room degrades to
+    // the menu or a paused sweep, never to a silent mis-pairing. Matching runs
+    // against the full sweep result, before the menu clamp below, so a server
+    // beyond the menu bound can still be found by name.
+    const std::string preferred_room = nstu::client::read_preferred_room_seed();
+    const auto room_selection = nstu::client::select_preferred_room_candidate(
+        candidates, preferred_room);
+    std::size_t chosen = 0;
+    if (room_selection.kind == nstu::client::RoomSelection::matched) {
+        chosen = room_selection.index;
+    } else if (room_selection.kind ==
+               nstu::client::RoomSelection::unmatched) {
+        // A room was asked for but no single server here carries it. Rather
+        // than pair to the wrong classroom, wait for the next sweep by which
+        // time the right server may have come up.
+        return false;
+    } else {
+        // No preference configured: today's behaviour. Clamp to the menu bound,
+        // then let a student skip the menu only when there is one server. One
+        // server on the LAN is the ordinary classroom, and asking a student to
+        // pick the only name on a list teaches them nothing; the approval on
+        // the far side is what makes this safe to skip, not the menu.
+        if (candidates.size() > nstu::client::kMaximumPairingChoices) {
+            candidates.resize(nstu::client::kMaximumPairingChoices);
+        }
+        if (candidates.size() > 1) {
+            std::vector<nstu::client::AgentPairingChoice> choices;
+            choices.reserve(candidates.size());
+            for (const auto& candidate : candidates) {
+                choices.push_back({candidate.server_name, candidate.address,
+                                   candidate.port});
+            }
+            auto payload =
+                nstu::client::encode_agent_pairing_choices(choices);
+            if (payload.empty()) {
+                return false;
+            }
+            open_pairing_menu(candidates.size());
+            queue_agent_message(
+                {nstu::client::AgentMessageType::pairing_choices,
+                 std::move(payload)});
+            const auto selection = await_pairing_selection(stop_token);
+            if (!selection) {
+                return false;
+            }
+            chosen = *selection;
+        }
+    }
+
+    std::string identity_error;
+    const auto uuid = nstu::client::machine_uuid(&identity_error);
+    if (uuid.empty()) {
+        queue_pairing_status(nstu::client::PairingOutcome::failed,
+                             identity_error);
+        return false;
+    }
+    std::string error;
+    auto result = nstu::client::pair_with_server(
+        candidates[chosen], uuid, nstu::client::machine_hostname(),
+        [](const std::string& code, const std::string& server_name) {
+            auto payload = nstu::client::encode_agent_pairing_code(
+                {code, server_name});
+            if (!payload.empty()) {
+                queue_agent_message(
+                    {nstu::client::AgentMessageType::pairing_code,
+                     std::move(payload)});
+            }
+        },
+        stop_token, {}, &error);
+    if (result.outcome != nstu::client::PairingOutcome::enrolled) {
+        nstu::client::clear_client_runtime_config(result.config);
+        queue_pairing_status(result.outcome, error);
+        return false;
+    }
+    // Carry the room this machine was told to prefer into its identity so a
+    // later re-pair (after a reset) keeps routing to the same classroom without
+    // needing the installer's registry seed a second time. Empty when no
+    // preference was set, which is the common case.
+    result.config.preferred_room = preferred_room;
+    std::string save_error;
+    const bool saved = nstu::client::save_client_runtime_config(
+        result.config, path.wstring(), entropy, &save_error);
+    nstu::client::clear_client_runtime_config(result.config);
+    if (!saved) {
+        // The server has recorded a key this machine can no longer
+        // produce, so claiming success would leave a computer that looks
+        // enrolled and never connects. Saying it failed is also what gets
+        // it paired again, and the server replaces the key for the same
+        // identity rather than accumulating one.
+        queue_pairing_status(nstu::client::PairingOutcome::failed,
+                             save_error);
+        return false;
+    }
+    queue_pairing_status(nstu::client::PairingOutcome::enrolled, {});
+    return true;
 }
 
 void remote_control_loop(std::stop_token stop_token) {
@@ -869,20 +1734,89 @@ void remote_control_loop(std::stop_token stop_token) {
             // Replay validated browser events that arrived before the
             // service finished opening its identity-bound outbox.
             drain_exam_ingress();
+            // A teacher reconnecting sees managed mode as the machine has it,
+            // not as the server last remembered it.
+            queue_outbound_message(
+                nstu::protocol::CommandType::freeze_report,
+                nstu::control::encode_freeze_state(g_frozen.load()));
+            // ... and reboot-to-restore protection as this machine can
+            // currently prove it, rather than as an earlier operation hoped.
+            // The probe runs off this thread so a slow WMI call cannot delay
+            // reconnecting to the teacher.
+            report_current_fleet_state_async();
             std::string ignored_error;
+            const auto endpoint_observer =
+                [&](const nstu::discovery::ServerEndpoint& endpoint) {
+                    // The observer runs only after mutual authentication. An
+                    // installer request therefore cannot mutate UWF merely
+                    // because a config file names an unreachable or spoofed
+                    // endpoint.
+                    {
+                        std::scoped_lock endpoint_lock(g_server_endpoint_mutex);
+                        g_server_address = endpoint.address;
+                        g_server_port = endpoint.port;
+                    }
+                    if (nstu::client::uwf_configuration_requested()) {
+                        configure_uwf_async(true, true);
+                    }
+                    if (endpoint.address == config.server_address &&
+                        endpoint.port == config.server_port) {
+                        return;
+                    }
+                    auto updated = config;
+                    updated.server_address = endpoint.address;
+                    updated.server_port = endpoint.port;
+                    std::string save_error;
+                    if (!nstu::client::save_client_runtime_config(
+                            updated, path.wstring(), entropy, &save_error)) {
+                        OutputDebugStringA(
+                            ("NSTU authenticated endpoint cache update failed: " +
+                             save_error + "\n")
+                                .c_str());
+                    } else {
+                        update_diagnostic_endpoint_cache(endpoint);
+                    }
+                    nstu::client::clear_client_runtime_config(updated);
+                };
+            {
+                std::scoped_lock endpoint_lock(g_server_endpoint_mutex);
+                g_server_address = config.server_address;
+                g_server_port = config.server_port;
+            }
             (void)nstu::client::run_client_control_session(
                 config, stop_token, current_status, handle_server_command,
                 pop_outbound_message,
-                &ignored_error);
+                &ignored_error, endpoint_observer);
             // Commands are only marked in-flight until the authenticated TCP
             // session successfully delivers an acknowledgement. A disconnect
             // must make every unsatisfied event eligible on the next session.
             clear_exam_inflight();
             queue_exam_stop();
+            set_desired_lock(false);
+            queue_agent_message(
+                {nstu::client::AgentMessageType::stop_stream, {}});
+            queue_agent_message(
+                {nstu::client::AgentMessageType::stop_snapshots, {}});
+            queue_agent_message(
+                {nstu::client::AgentMessageType::host_broadcast_stop, {}});
+            queue_agent_message(
+                {nstu::client::AgentMessageType::overlay_clear, {}});
             queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
             nstu::client::clear_client_runtime_config(config);
+        } else if (attempt_pairing(stop_token, path, entropy)) {
+            // A machine that just earned an identity should use it now
+            // rather than sit out the reconnect delay first.
+            continue;
         }
-        for (int tick = 0; tick < 50 && !stop_token.stop_requested(); ++tick) {
+        std::array<std::byte, 2> jitter_bytes{};
+        const bool have_jitter = nstu::security::generate_random(jitter_bytes);
+        const auto jitter = have_jitter
+            ? (std::to_integer<unsigned int>(jitter_bytes[0]) |
+               (std::to_integer<unsigned int>(jitter_bytes[1]) << 8u)) % 31u
+            : 20u;
+        const auto reconnect_ticks = 30u + jitter;
+        for (std::uint32_t tick = 0;
+             tick < reconnect_ticks && !stop_token.stop_requested(); ++tick) {
             Sleep(100);
         }
     }
@@ -928,24 +1862,95 @@ void agent_supervisor_loop(std::stop_token stop_token) {
     }
 }
 
-void report_status(DWORD state, DWORD error = NO_ERROR) {
+void publish_status(DWORD state, DWORD error) {
     SERVICE_STATUS status{};
     status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     status.dwCurrentState = state;
     status.dwWin32ExitCode = error;
-    status.dwControlsAccepted = state == SERVICE_RUNNING
-                                    ? SERVICE_ACCEPT_STOP |
-                                          SERVICE_ACCEPT_SESSIONCHANGE
-                                    : 0;
-    g_status_handle && SetServiceStatus(g_status_handle, &status);
+    // A frozen machine does not advertise stop at all, so Services and
+    // `sc stop` grey it out rather than appearing to work and then failing.
+    const DWORD running_controls = SERVICE_ACCEPT_SESSIONCHANGE |
+        (g_frozen.load() ? 0u : static_cast<DWORD>(SERVICE_ACCEPT_STOP));
+    status.dwControlsAccepted =
+        state == SERVICE_RUNNING ? running_controls : 0;
+    if (g_status_handle != nullptr) {
+        SetServiceStatus(g_status_handle, &status);
+    }
+}
+
+void report_status(DWORD state, DWORD error) {
+    std::scoped_lock lock(g_service_status_mutex);
+    g_service_state = state;
+    publish_status(state, error);
+}
+
+void refresh_running_status() {
+    std::scoped_lock lock(g_service_status_mutex);
+    // A freeze reply can race an SCM stop. Never move the service from
+    // STOP_PENDING back to RUNNING merely to update accepted controls.
+    if (g_service_state == SERVICE_RUNNING) {
+        publish_status(SERVICE_RUNNING, NO_ERROR);
+    }
+}
+
+void reload_local_freeze_state() {
+    std::scoped_lock lock(g_service_status_mutex);
+    g_frozen = nstu::client::machine_frozen();
+    if (g_service_state == SERVICE_RUNNING) {
+        publish_status(SERVICE_RUNNING, NO_ERROR);
+    }
+    queue_agent_message(
+        {nstu::client::AgentMessageType::managed_state,
+         nstu::control::encode_freeze_state(g_frozen.load())});
+}
+
+bool apply_remote_freeze_state(bool frozen, std::string* error) {
+    std::scoped_lock lock(g_service_status_mutex);
+    if (g_service_state != SERVICE_RUNNING) {
+        if (error != nullptr) {
+            *error = "service is stopping";
+        }
+        return false;
+    }
+    // Serialize persistence with the SCM stop decision. Once this write
+    // succeeds, no stop can slip through before g_frozen is enforced.
+    if (!nstu::client::set_machine_frozen(frozen, {}, error)) {
+        return false;
+    }
+    g_frozen = frozen;
+    publish_status(SERVICE_RUNNING, NO_ERROR);
+    queue_agent_message(
+        {nstu::client::AgentMessageType::managed_state,
+         nstu::control::encode_freeze_state(frozen)});
+    return true;
+}
+
+bool begin_service_stop() {
+    std::scoped_lock lock(g_service_status_mutex);
+    if (g_frozen.load() || g_service_state != SERVICE_RUNNING) {
+        return false;
+    }
+    g_service_state = SERVICE_STOP_PENDING;
+    publish_status(SERVICE_STOP_PENDING, NO_ERROR);
+    return true;
 }
 
 DWORD WINAPI control_handler(DWORD control, DWORD event_type, void*, void*) {
     if (control == SERVICE_CONTROL_STOP && g_stop_event != nullptr) {
-        report_status(SERVICE_STOP_PENDING);
+        if (!begin_service_stop()) {
+            // Refused out loud rather than ignored: whoever asked gets an
+            // error they can act on - clear managed mode from the server,
+            // or run `nstu-service.exe --thaw-local` elevated.
+            refresh_running_status();
+            return static_cast<DWORD>(ERROR_ACCESS_DENIED);
+        }
         g_stop_requested = true;
         SetEvent(g_stop_event);
         wake_pipe_listener();
+    } else if (control == kServiceControlReloadFreeze) {
+        // A local thaw writes the registry and then sends this, so the stop
+        // verb comes back without waiting for a restart.
+        reload_local_freeze_state();
     } else if (control == kServiceControlLock) {
         set_desired_lock(true);
     } else if (control == kServiceControlUnlock) {
@@ -968,6 +1973,17 @@ void WINAPI service_main(DWORD, wchar_t**) {
     g_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (g_stop_event == nullptr) {
         report_status(SERVICE_STOPPED, GetLastError());
+        return;
+    }
+    g_frozen = nstu::client::machine_frozen();
+    if (!nstu::security::generate_random(g_boot_id)) {
+        // Without a boot identity this service cannot prove that a restart
+        // ever happened, so every fleet report it made would be
+        // unverifiable.  Refusing to start is the only answer that keeps the
+        // exam gate meaningful.
+        CloseHandle(g_stop_event);
+        g_stop_event = nullptr;
+        report_status(SERVICE_STOPPED, ERROR_GEN_FAILURE);
         return;
     }
     report_status(SERVICE_START_PENDING);
@@ -1036,6 +2052,12 @@ void WINAPI service_main(DWORD, wchar_t**) {
     if (agent_supervisor_thread.joinable()) {
         agent_supervisor_thread.join();
     }
+    {
+        std::scoped_lock worker_lock(g_uwf_worker_mutex);
+        if (g_uwf_worker.joinable()) {
+            g_uwf_worker.join();
+        }
+    }
     CloseHandle(g_stop_event);
     g_stop_event = nullptr;
     {
@@ -1056,7 +2078,47 @@ void WINAPI service_main(DWORD, wchar_t**) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // The only command line this service takes. Managed mode has to be
+    // undoable on the machine itself, by someone who is already an
+    // administrator, or it would be a lock with no key for a school whose
+    // server has been reinstalled.
+    if (argc > 1) {
+        const std::string_view argument(
+            argc == 2 && argv[1] != nullptr ? argv[1] : "");
+        std::string error;
+        bool succeeded = false;
+        const char* success = nullptr;
+        if (argument == "--install") {
+            const auto root = nstu::deployment::data_root(&error);
+            succeeded = !root.empty() &&
+                nstu::deployment::ensure_data_root(root, &error) &&
+                nstu::client::install_service(&error);
+            success = "nstu-service: service registered; restart Windows to activate\n";
+        } else if (argument == "--uninstall") {
+            succeeded = nstu::client::uninstall_service(&error);
+            success = "nstu-service: service registration removed\n";
+        } else if (argument == "--thaw-local") {
+            succeeded = nstu::client::thaw_locally(&error);
+            success = "nstu-service: managed mode cleared on this computer\n";
+        } else {
+            std::fputs(
+                "usage: nstu-service [--install|--uninstall|--thaw-local]\n",
+                stderr);
+            return 2;
+        }
+        if (!succeeded) {
+            std::fputs(("nstu-service: " +
+                        (error.empty() ? std::string("operation failed")
+                                       : error) +
+                        "\n")
+                           .c_str(),
+                       stderr);
+            return 1;
+        }
+        std::fputs(success, stdout);
+        return 0;
+    }
     SERVICE_TABLE_ENTRYW table[] = {
         {const_cast<wchar_t*>(kServiceName), service_main},
         {nullptr, nullptr},

@@ -50,11 +50,51 @@ Freeze. Install while the machine is thawed, then allow the installer to
 restart Windows. This preserves compatibility with existing freeze software;
 the client boot check only observes the resulting state.
 
+### Stable addressing and automatic recovery
+
+Give the teacher server a DHCP reservation or static address outside the DHCP
+pool. A practical layout keeps the router/gateway at `.1` and reserves an
+address such as `.10` for NSTU; do not assign the server the gateway address.
+This remains the simplest and most diagnosable production configuration.
+
+After a client is enrolled, `nstu-service` treats the stored server IP
+as a cache. If TCP connection or mutual authentication fails, the client sends
+an HMAC-authenticated UDP discovery request on the configured control port,
+verifies the response with its enrollment PSK, completes the normal mutual TCP
+handshake, and only then stores the new IPv4 address using machine-scope DPAPI.
+It also refreshes the non-secret registry address used by login diagnostics.
+No server MAC address is trusted or used as an authentication factor.
+
+Allow inbound **TCP and UDP `47001`** to the NSTU server executable from the
+managed classroom VLAN. TCP carries control and snapshots; UDP `47001` is only
+the bounded endpoint-recovery exchange. UDP `47000` remains reserved for the
+deferred continuous-video path and should stay closed when that feature is not
+being tested.
+
+IPv4 broadcast discovery does not cross a router. Two labs in one VLAN can find
+the same enrolled server; separate VLANs must use a stable reserved address or
+managed DNS/manual configuration until an authenticated relay is implemented.
+If the router, switch, DHCP service, or server is unavailable, clients retain
+their enrollment and retry with jitter, but classroom control remains offline.
+Transient lock, exam, broadcast, annotation, and remote-control state is cleared
+on disconnect rather than left active indefinitely.
+
+The installer still needs a currently reachable address for its initial TCP
+preflight, and discovery is unavailable until one-time authenticated enrollment
+has installed the client PSK.
+
 For a server, diagnostics check the display, network link, and hardware H.264
 encoder before the server files and protected data root are installed. UWF is
 reported as not applicable for the server role because server data is
 persistent. Run UWF qualification with `--target=client` on a separate client
 image.
+
+The server installer also creates the machine startup value `NSTU Server`
+under `HKLM\Software\Microsoft\Windows\CurrentVersion\Run`. The desktop server
+therefore starts in the interactive teacher session at each Windows sign-in;
+it is not installed as a Session 0 service. Closing or minimizing the main
+window leaves the tray process running. **Exit** stops it until a manual launch
+or the next sign-in. The unified uninstaller removes this startup value.
 
 ## Integrated diagnostics
 
@@ -106,25 +146,30 @@ The diagnostics helper does not enroll a client or derive a protocol key from an
 IP address. Enrollment remains the authenticated one-time operation documented
 below.
 
-## Installer and scripts
+## Installer payload and operator scripts
 
-The complete installer includes lifecycle scripts under `client\` and
-`docs\deployment\`. It includes the Markdown manuals but omits the
-repository-only `docs\assets\` screenshots and partner logos. Standalone EXEs
-do not register services and are not a supported installation source.
+The unified installer ships only the role binaries (`nstu-service` and
+`nstu-agent` for the client; `nstu-server` for the server), their MinGW
+runtimes, the standalone diagnostics helper, and the exam runtime assets
+(`exam/web`, `exam/schema`, `exam/examples`). It does **not** package any
+PowerShell scripts, documentation, or the repository-only `docs\assets\`
+images. Standalone EXEs do not register services and are not a supported
+installation source.
 
-Both roles are checked before installation to prevent conflicts. The client
-helper configures the service, data root, recovery policy, and protected ACLs.
-The server helper validates the role and protected data root.
+The operator helper scripts live in the repository's `packaging\` directory and
+are run from a source checkout of the matching release, not from the installed
+product. The client-role helper configures the service, data root, recovery
+policy, and protected ACLs. The server-role helper validates the role and
+protected data root.
 
-The deployment payload also includes `stage-exam-package.ps1`. Run it from an
-elevated PowerShell session on the client after copying the approved
-`.nstuexam` archive and release metadata. Supply both the archive SHA-256 and
-the unpacked content SHA-256; production packages must include the detached
-`manifest.p7s` publisher signature and its approved certificate thumbprint.
-Pass an explicit absolute `-PublishRoot` under the configured persistent client
-data root (the installer default is `%ProgramData%\NSTU\exams\packages`); the
-helper does not discover a root or download/copy an archive from the server.
+`packaging\stage-exam-package.ps1` stages an exam package on a client. Run it
+from an elevated PowerShell session in a source checkout after copying the
+approved `.nstuexam` archive and release metadata. Supply both the archive
+SHA-256 and the unpacked content SHA-256; production packages must include the
+detached `manifest.p7s` publisher signature and its approved certificate
+thumbprint. Pass an explicit absolute `-PublishRoot` under the configured
+persistent client data root (the default is `%ProgramData%\NSTU\exams\packages`);
+the helper does not discover a root or download/copy an archive from the server.
 `-RequireAuthenticode` is an optional additional policy gate for `.exe` and
 `.dll` files in a package; it is separate from the required detached manifest
 signature. Use the helper only for client staging, outside the server data
@@ -149,12 +194,44 @@ protection before staging removal.
 
 ## Enrollment
 
-After installing the server, create a one-time enrollment secret with
-`docs\deployment\new-enrollment-secret.ps1`. Provision each client with the
-packaged `client\nstu-provision.exe`. Provisioning writes the authenticated
-DPAPI-protected runtime configuration used by `nstu-service`; the address
-entered in the installer is retained for diagnostics only until this exchange
-succeeds.
+Clients enroll by on-screen pairing; no secret file is copied to a student
+machine. On the teacher machine, open the server's pairing window ("Add
+computers"). Each student machine's agent sweeps the LAN for a server whose
+pairing window is open, runs the mutually authenticated exchange itself, and
+shows a six-digit code on its own screen. The same code appears in the server's
+pending list; the operator approves the request only when the two match. That
+six-digit comparison is the trust root. On approval, the client derives its
+protocol key from the transcript (the key is never transmitted) and stores the
+DPAPI-protected runtime configuration `nstu-service` uses. The address entered
+in the installer is retained for diagnostics only until pairing succeeds.
+
+### Targeting a room by name
+
+On a shared VLAN where several servers answer, give each student machine the
+room it belongs to and it pairs without anyone reading a menu. The server
+operator sets an optional room label in the server UI; it is advertised on the
+pairing beacon and shown next to the pending request. On the client, the
+installer's optional **Room name** field (or `/ROOM=` in a silent install)
+writes `HKLM\Software\NSTU\PreferredRoom`, and the agent auto-selects the
+server advertising that exact room (trimmed, case-insensitive). With no room
+set, or when no single server carries it, the client falls back to today's
+behavior: pair silently when only one server answers, otherwise show the
+selection menu. The room name is only a routing hint — the six-digit approval
+still gates every pairing, so a wrong or missing room degrades to the menu or a
+paused sweep, never to a silent mis-pairing.
+
+### Manual enrollment fallback (advanced)
+
+The earlier file-copy enrollment path is deprecated and no longer shipped in the
+installer, but the tools remain in the repository for recovery when on-screen
+pairing is unavailable (for example, a machine with no interactive session).
+From a source checkout of the matching release, create a one-time bootstrap
+secret with `packaging\new-enrollment-secret.ps1`, then run
+`client\nstu-provision.exe <server-ip> <port> <32-hex-client-id> <key-id>
+<enrollment-secret-file>` on each machine. It performs the same authenticated
+exchange, derives the PSK without sending it, and writes the DPAPI-protected
+configuration. Distribute the bootstrap export out of band and delete every copy
+once enrollment is complete.
 
 ## Build
 

@@ -2,11 +2,15 @@ add_library(nstu_client_platform STATIC
     src/agent_protocol.cpp
     src/client_config.cpp
     src/client_control.cpp
+    src/client_freeze.cpp
+    src/client_pairing.cpp
+    src/client_uwf_request.cpp
     src/exam_bridge.cpp
     src/exam_host.cpp
     src/exam_profile.cpp
     src/named_pipe.cpp
     src/session.cpp
+    src/service_install.cpp
 )
 target_include_directories(nstu_client_platform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(nstu_client_platform PUBLIC cxx_std_20)
@@ -58,7 +62,8 @@ else()
 endif()
 
 add_executable(nstu-service service/main.cpp)
-target_link_libraries(nstu-service PRIVATE nstu_client_platform)
+target_link_libraries(nstu-service PRIVATE
+    nstu_client_platform nstu_setup_diagnostics nstu_uwf)
 nstu_enable_warnings(nstu-service)
 
 add_executable(nstu-provision tools/provision.cpp)

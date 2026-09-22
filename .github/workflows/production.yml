@@ -112,7 +112,7 @@ jobs:
           if ($installers.Count -ne 1) { throw 'Expected one unified installer.' }
           $requiredBinaries = @(
             'nstu-server.exe', 'nstu-service.exe', 'nstu-agent.exe',
-            'nstu-provision.exe', 'nstu-diagnostics.exe')
+            'nstu-diagnostics.exe')
           $artifacts = @($installers)
           foreach ($name in $requiredBinaries) {
             $binaryMatches = @(Get-ChildItem build -Recurse -Filter $name -File |

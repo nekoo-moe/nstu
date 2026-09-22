@@ -24,6 +24,20 @@ nstu_enable_warnings(nstu_protocol_headers_tests)
 nstu_enable_test_assertions(nstu_protocol_headers_tests)
 add_test(NAME nstu.protocol_headers COMMAND nstu_protocol_headers_tests)
 
+# Fleet reboot-to-restore wire formats.  Pure codecs, so they are tested on
+# every platform rather than behind the Windows-only guard below.
+add_executable(nstu_uwf_fleet_codec_tests uwf_fleet_codec_tests.cpp)
+target_link_libraries(nstu_uwf_fleet_codec_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_uwf_fleet_codec_tests)
+nstu_enable_test_assertions(nstu_uwf_fleet_codec_tests)
+add_test(NAME nstu.uwf_fleet_codec COMMAND nstu_uwf_fleet_codec_tests)
+
+add_executable(nstu_audit_tests audit_tests.cpp)
+target_link_libraries(nstu_audit_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_audit_tests)
+nstu_enable_test_assertions(nstu_audit_tests)
+add_test(NAME nstu.audit COMMAND nstu_audit_tests)
+
 add_executable(nstu_exam_sync_tests exam_sync_tests.cpp)
 target_link_libraries(nstu_exam_sync_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_exam_sync_tests)
@@ -97,6 +111,18 @@ nstu_enable_test_assertions(nstu_control_channel_tests)
 add_test(NAME nstu.control_channel COMMAND nstu_control_channel_tests)
 
 if(WIN32)
+    add_executable(nstu_discovery_tests discovery_tests.cpp)
+    target_link_libraries(nstu_discovery_tests PRIVATE nstu_common)
+    nstu_enable_warnings(nstu_discovery_tests)
+    nstu_enable_test_assertions(nstu_discovery_tests)
+    add_test(NAME nstu.discovery COMMAND nstu_discovery_tests)
+
+    add_executable(nstu_pairing_tests pairing_tests.cpp)
+    target_link_libraries(nstu_pairing_tests PRIVATE nstu_common)
+    nstu_enable_warnings(nstu_pairing_tests)
+    nstu_enable_test_assertions(nstu_pairing_tests)
+    add_test(NAME nstu.pairing COMMAND nstu_pairing_tests)
+
     add_executable(nstu_screen_snapshot_tests screen_snapshot_tests.cpp)
     target_link_libraries(nstu_screen_snapshot_tests PRIVATE nstu_common)
     nstu_enable_warnings(nstu_screen_snapshot_tests)
@@ -109,6 +135,12 @@ if(WIN32)
         nstu_enable_warnings(nstu_diagnostics_tests)
         nstu_enable_test_assertions(nstu_diagnostics_tests)
         add_test(NAME nstu.diagnostics COMMAND nstu_diagnostics_tests)
+
+        add_executable(nstu_uwf_tests uwf_tests.cpp)
+        target_link_libraries(nstu_uwf_tests PRIVATE nstu_setup_diagnostics)
+        nstu_enable_warnings(nstu_uwf_tests)
+        nstu_enable_test_assertions(nstu_uwf_tests)
+        add_test(NAME nstu.uwf COMMAND nstu_uwf_tests)
 
         add_executable(nstu_diagnostics_startup_tests diagnostics_startup_tests.cpp)
         target_link_libraries(nstu_diagnostics_startup_tests PRIVATE nstu_setup_diagnostics)
@@ -154,6 +186,15 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_enrollment_transport_tests)
     add_test(NAME nstu.enrollment_transport
         COMMAND nstu_enrollment_transport_tests)
+
+    add_executable(nstu_pairing_transport_tests
+        pairing_transport_tests.cpp)
+    target_link_libraries(nstu_pairing_transport_tests PRIVATE
+        nstu_server_state)
+    nstu_enable_warnings(nstu_pairing_transport_tests)
+    nstu_enable_test_assertions(nstu_pairing_transport_tests)
+    add_test(NAME nstu.pairing_transport
+        COMMAND nstu_pairing_transport_tests)
 endif()
 
 if(TARGET nstu_client_platform)
@@ -171,11 +212,25 @@ if(TARGET nstu_client_platform)
     nstu_enable_test_assertions(nstu_exam_host_protocol_tests)
     add_test(NAME nstu.exam_host_protocol COMMAND nstu_exam_host_protocol_tests)
 
+    add_executable(nstu_client_freeze_tests client_freeze_tests.cpp)
+    target_link_libraries(nstu_client_freeze_tests PRIVATE nstu_client_platform)
+    nstu_enable_warnings(nstu_client_freeze_tests)
+    nstu_enable_test_assertions(nstu_client_freeze_tests)
+    add_test(NAME nstu.client_freeze COMMAND nstu_client_freeze_tests)
+
     add_executable(nstu_client_ipc_tests client_ipc_tests.cpp)
     target_link_libraries(nstu_client_ipc_tests PRIVATE nstu_client_platform)
     nstu_enable_warnings(nstu_client_ipc_tests)
     nstu_enable_test_assertions(nstu_client_ipc_tests)
     add_test(NAME nstu.client_ipc COMMAND nstu_client_ipc_tests)
+
+    # The persisted-config codec lives in nstu_client_platform; DPAPI comes in
+    # transitively via nstu_common, so this test needs no server state.
+    add_executable(nstu_client_config_tests client_config_tests.cpp)
+    target_link_libraries(nstu_client_config_tests PRIVATE nstu_client_platform)
+    nstu_enable_warnings(nstu_client_config_tests)
+    nstu_enable_test_assertions(nstu_client_config_tests)
+    add_test(NAME nstu.client_config COMMAND nstu_client_config_tests)
 
     if(TARGET nstu_server_state)
         add_executable(nstu_client_control_tests client_control_tests.cpp)
@@ -184,6 +239,13 @@ if(TARGET nstu_client_platform)
         nstu_enable_warnings(nstu_client_control_tests)
         nstu_enable_test_assertions(nstu_client_control_tests)
         add_test(NAME nstu.client_control COMMAND nstu_client_control_tests)
+
+        add_executable(nstu_client_pairing_tests client_pairing_tests.cpp)
+        target_link_libraries(nstu_client_pairing_tests PRIVATE
+            nstu_client_platform nstu_server_state)
+        nstu_enable_warnings(nstu_client_pairing_tests)
+        nstu_enable_test_assertions(nstu_client_pairing_tests)
+        add_test(NAME nstu.client_pairing COMMAND nstu_client_pairing_tests)
     endif()
 endif()
 

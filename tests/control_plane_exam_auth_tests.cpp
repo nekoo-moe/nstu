@@ -159,6 +159,19 @@ int main() {
     assert(registry_snapshot.size() == 1);
     const auto registry_id = registry_snapshot.front().id;
 
+    // The exam gate is server-side and fails closed. Prove current-session UWF
+    // protection before any start_exam can succeed.
+    nstu::control::UwfFleetStatusReport uwf_verified;
+    uwf_verified.phase = nstu::control::UwfFleetPhase::verified_protected;
+    uwf_verified.probe.probe_succeeded = true;
+    uwf_verified.probe.filter_current_enabled = true;
+    uwf_verified.probe.system_volume_current_protected = true;
+    for (std::size_t index = 0; index < uwf_verified.boot_id.size(); ++index) {
+        uwf_verified.boot_id[index] = static_cast<std::byte>(0xb0 + index);
+    }
+    uwf_verified.detail = "UWF protects this session";
+    assert(registry.set_uwf_fleet_status(registry_id, uwf_verified));
+
     const auto start = make_start(id);
     assert(control_plane.start_exam(registry_id, start, &error));
     const auto start_command = channel->receive(&error);

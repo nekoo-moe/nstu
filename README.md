@@ -17,6 +17,8 @@
 [![Last commit](https://img.shields.io/github/last-commit/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/commits)
 [![Issues](https://img.shields.io/github/issues/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/issues)
 
+> **AI-assisted development:** NSTU is developed with AI assistance; all changes remain human-reviewed and auditable in public source history.
+
 NSTU is a free and open-source classroom and computer-lab management project
 for Windows. It is designed around a centralized teacher server, lightweight
 student clients, authenticated control commands, chat, low-bandwidth client
@@ -331,10 +333,8 @@ evaluated for cooperation. Additional test results are still being collected.
 
 <table>
   <tr>
-    <td align="center" valign="top" width="180">
-      <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Vung Tau Junior High School logo" width="112"><br>
-      <sub><b>Vung Tau Junior High School</b><br>Testing completed; teacher-conducted and permitted</sub>
-    </td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Le Quy Don High School for the Gifted logo" width="112"><br><sub><b>Le Quy Don High School for the Gifted</b><br>Cooperation confirmed</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="VNU-HCM High School for the Gifted logo" width="112"><br><sub><b>VNU-HCM High School for the Gifted (PTNK)</b><br>Cooperation confirmed</sub></td>
   </tr>
 </table>
 
@@ -342,11 +342,7 @@ evaluated for cooperation. Additional test results are still being collected.
 
 <table>
   <tr>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Vo Truong Toan Junior High School logo" width="112"><br><sub><b>Vo Truong Toan Junior High School</b><br>Cooperation agreed; testing pending</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Dinh Tien Hoang High School logo" width="112"><br><sub><b>Dinh Tien Hoang High School</b><br>Cooperation agreed; testing pending</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Le Quy Don High School for the Gifted logo" width="112"><br><sub><b>Le Quy Don High School for the Gifted</b><br>Cooperation agreed; testing pending</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="VNU-HCM High School for the Gifted logo" width="112"><br><sub><b>VNU-HCM High School for the Gifted (PTNK)</b><br>Cooperation agreed; testing pending</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ben-cat-high-school.png" alt="Ben Cat High School logo" width="112"><br><sub><b>Ben Cat High School</b><br>Under review; partnership not confirmed</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Dinh Tien Hoang High School logo" width="112"><br><sub><b>Dinh Tien Hoang High School</b><br>Cooperation status awaiting verification</sub></td>
   </tr>
 </table>
 
@@ -374,22 +370,34 @@ Before a production deployment:
 
 1. Put the server and clients on the same trusted VLAN or subnet for the first
    rollout.
-2. Use a managed switch or router where practical. IGMP snooping and one IGMP
+2. Reserve a stable server address outside the DHCP pool where possible. Keep
+   the router/gateway at `.1` and use a separate address such as `.10` for the
+   teacher server.
+3. Use a managed switch or router where practical. IGMP snooping and one IGMP
    querier are required only for a future continuous H.264/multicast trial;
    the supported snapshot path uses ordinary authenticated TCP connections.
-3. Do not expose NSTU control or video traffic directly to the internet.
-4. Prefer wired Ethernet. If Wi-Fi is used for testing, disable access-point
+4. Do not expose NSTU control or video traffic directly to the internet.
+5. Prefer wired Ethernet. If Wi-Fi is used for testing, disable access-point
    client isolation and confirm the switch/AP can sustain the expected TCP
    snapshot traffic.
-5. For snapshot-only deployment, an ordinary switch is sufficient if it meets
+6. For snapshot-only deployment, an ordinary switch is sufficient if it meets
    the measured client count and uplink capacity. Do not enable multicast just
    to make discovery work. If the optional H.264 trial is enabled later,
    validate IGMP snooping, querier, flooding, and unicast fallback separately.
-6. Keep Windows Firewall enabled. TCP `47001` is the required authenticated
-   control and snapshot port. UDP `47000` is reserved for the optional future
+7. Keep Windows Firewall enabled. TCP `47001` is the required authenticated
+   control and snapshot port, and UDP `47001` handles authenticated same-VLAN
+   server address recovery. UDP `47000` is reserved for the optional future
    continuous-video transport and should remain closed unless that feature is
    explicitly enabled. Limit rules to the classroom VLAN and required
    executable; do not create broad internet-facing rules.
+
+After enrollment, a client treats the stored server IPv4 address as a cache. If
+that endpoint fails, it broadcasts a PSK-authenticated discovery request on the
+same VLAN, performs the normal mutual TCP handshake with the candidate, and
+stores the new address only after authentication succeeds. A server MAC address
+may be used by the router for DHCP reservation, but NSTU never treats an IP or
+MAC address as proof of server identity. Broadcast recovery does not cross a
+router, so separate VLANs still require stable addressing or managed routing.
 
 Cross-VLAN multicast is outside the supported snapshot deployment. If a future
 continuous-video trial needs it, configure multicast routing intentionally and
@@ -411,17 +419,19 @@ Get-FileHash .\nstu-*-setup.exe -Algorithm SHA256
 1. Download `nstu-<version>-setup.exe` from the latest pre-release.
 2. Run the unified installer, select **Install for Server**, and accept the
    Windows elevation prompt if requested.
-3. Start:
+3. To use the server immediately without signing out, launch it once:
 
    ```powershell
    & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
    ```
 
-The server executable is not registered as a Windows service and does not
-launch automatically by default; technicians start it manually or create an
-organization-managed shortcut/task for the teacher workstation. The same
-installer's diagnostics helper can be run later to repeat hardware and network
-checks while the machine is thawed.
+The installer registers `NSTU Server` as a machine startup application. It
+launches `nstu-server.exe` automatically in the interactive teacher session
+whenever a user signs in to Windows; it intentionally remains a desktop app,
+not a Session 0 Windows service. Minimizing or closing the window keeps it in
+the notification area. Choosing **Exit** stops it until it is launched manually
+or the next sign-in. The same installer's diagnostics helper can be run later
+to repeat hardware and network checks while the machine is thawed.
 
 To remove the server, use Windows **Installed apps** or the server uninstaller.
 The first invocation stages removal and requires a restart; it does not remove
@@ -513,100 +523,113 @@ for the following boot. Direct manual service removal is not supported.
 
 ## Connecting a computer room
 
-The current enrollment flow is command-line based and must be performed while
-the machines are thawed, from an elevated PowerShell prompt. Run the same
-unified installer on each machine, choosing Server on the teacher machine and
-Client on each student machine. Put them on the same trusted VLAN and allow TCP
-port `47001` between clients and the server.
+Run the same unified installer on each machine, choosing Server on the teacher
+machine and Client on each student machine. Put them on the same trusted VLAN
+and allow TCP and UDP traffic on port `47001` between clients and the server.
+Enrollment itself is done on screen: no secret file is copied to a student
+machine, and no per-client command is run.
 
-The commands below use scripts shipped by the installer. A complete installer
-places them under `C:\Program Files\NSTU\docs\deployment`; a standalone
-`nstu-server.exe` or `nstu-client.exe` download does not contain PowerShell
-scripts. If only standalone binaries were downloaded, obtain the unified
-installer or a source checkout before continuing. From a source checkout, the
-equivalent files are under `packaging\`.
-
-For a source checkout, replace `$deployment` in the example with the checkout's
-packaging directory, for example:
-
-```powershell
-$deployment = Join-Path (Get-Location) "packaging"
-& (Join-Path $deployment "configure-data-root.ps1") -DataRoot "D:\NSTUData"
-& (Join-Path $deployment "new-enrollment-secret.ps1") `
-  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
-```
+The server still needs its protected data root, which the operator helper
+scripts in the repository's `packaging\` directory create. The unified installer
+ships only the role binaries, their runtimes, the diagnostics helper, and the
+exam runtime assets; it does not install PowerShell scripts or documentation.
+Run these helpers from a source checkout of the matching release and set
+`$deployment` to the checkout's `packaging` directory.
 
 ### 1. Prepare the server
 
-Run these commands on the teacher machine as Administrator. The first command
-creates the protected data root; the second installs the server's encrypted
-enrollment secret and exports a one-time secret for client provisioning:
+Run this on the teacher machine as Administrator to create the protected data
+root, then start `nstu-server.exe`:
 
 ```powershell
-$deployment = Join-Path $env:ProgramFiles "NSTU\docs\deployment"
+$deployment = Join-Path (Get-Location) "packaging"
 if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
-  throw "NSTU deployment scripts are missing; reinstall NSTU and select the Server role."
+  throw "Run this from a source checkout: the packaging helpers are not part of the installed product."
 }
-New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
 & (Join-Path $deployment "configure-data-root.ps1") `
   -DataRoot "$env:ProgramData\NSTU"
-& (Join-Path $deployment "new-enrollment-secret.ps1") `
-  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
 ```
 
-Restart `nstu-server.exe` so it loads the protected enrollment secret. Keep the
-exported file in a protected removable/thawed location until all clients have
-been provisioned. `new-enrollment-secret.ps1` is server-only; it is not needed
-on student machines.
+No enrollment secret is created for the on-screen pairing flow — the server mints
+and stores each client's key itself when the operator approves the request.
 
-### 2. Provision each client
+### 2. Enroll each client by pairing
 
-On each student machine, while the server is running, use a unique 128-bit
-identity and key ID. `nstu-provision.exe` is installed when the Client role is
-selected:
+On the server, open the pairing window ("Add computers"). Each student machine's
+agent sweeps the LAN for a server whose pairing window is open, runs the mutually
+authenticated exchange itself, and shows a six-digit code on its own screen. The
+same code appears in the server's pending list; the operator approves a request
+only when the two codes match. **That six-digit comparison is the trust root** —
+nothing is copied between machines to establish it.
 
-```powershell
-$clientId = [guid]::NewGuid().ToString("N")
-& "$env:ProgramFiles\NSTU\client\nstu-provision.exe" `
-  192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
-```
-
-The tool authenticates the enrollment transcript, derives the installed PSK
-without sending it, and stores the client configuration with machine-scope
-DPAPI. After the command succeeds, restart the client service or Windows. Once
-all clients are enrolled, delete every copy of the one-time export. A trusted
-client follows this path:
+On approval, the client derives its protocol key from the transcript (the key is
+never transmitted), stores the machine-scope DPAPI configuration `nstu-service`
+uses, and connects. A trusted client follows this path:
 
 ```text
 Install client
-  -> provision a unique client identity and protected enrollment credential
+  -> agent sweeps the LAN and shows a six-digit code
+  -> operator approves the matching code on the server (the trust root)
+  -> server mints the client key; client stores a protected configuration
   -> authenticate to the server over TCP
-  -> register the device and receive room policy
-  -> receive an authenticated snapshot schedule and room policy
+  -> register the device and receive an authenticated snapshot schedule and room policy
   -> capture bounded JPEG snapshots over the authenticated TCP connection
 ```
+
+On a shared VLAN where several servers answer, label each server with a room name
+in the server UI and give each student machine its room via the installer's
+optional **Room name** field or `/ROOM=` in a silent install (it writes
+`HKLM\Software\NSTU\PreferredRoom`). The agent then auto-selects the server
+advertising that room, falling back to the selection menu — or to silent pairing
+when only one server answers — if no room is set or no single server carries it.
+The room name is only a routing hint; the six-digit approval still gates every
+pairing, so a wrong or missing room degrades to the menu, never to a silent
+mis-pairing.
 
 The optional continuous H.264 path is not part of this enrollment flow. It may
 later add authenticated group membership and multicast/unicast transport after
 the dedicated switch, decoder, and loss-recovery validation gates pass.
 
 Connection preambles only reject obviously invalid peers quickly. Device
-identity is accepted only after the cryptographic handshake succeeds. The
-installer is the supported distribution for these scripts; copying only an EXE
-is insufficient for enrollment setup.
+identity is accepted only after the cryptographic handshake succeeds.
+
+### Manual enrollment fallback (advanced)
+
+The earlier file-copy enrollment path is deprecated and no longer shipped in the
+installer, but the tools remain in the repository for recovery when on-screen
+pairing is unavailable (for example, a machine with no interactive session). From
+a source checkout, export a one-time bootstrap secret on the server, then run the
+provisioning tool on each machine with a unique 128-bit identity and key ID:
+
+```powershell
+$deployment = Join-Path (Get-Location) "packaging"
+New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
+& (Join-Path $deployment "new-enrollment-secret.ps1") `
+  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
+# Restart nstu-server.exe so it loads the protected enrollment secret, then on
+# each client (nstu-provision.exe is not installed; build it or copy it from a
+# source checkout):
+$clientId = [guid]::NewGuid().ToString("N")
+& ".\nstu-provision.exe" 192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+The tool authenticates the enrollment transcript, derives the installed PSK
+without sending it, and stores the same machine-scope DPAPI configuration. Keep
+the export in a protected removable/thawed location and delete every copy once
+enrollment is complete. `new-enrollment-secret.ps1` is server-only; it is not
+needed on student machines.
 
 ### Staging an exam package
 
 Exam archives are staged on the client only by the administrator-owned helper
-shipped under
-`C:\Program Files\NSTU\docs\deployment\stage-exam-package.ps1`. The
+`stage-exam-package.ps1`, run from a source checkout's `packaging\` directory. The
 server remains the persistent owner of the original package and answer journal.
 The helper requires both the release archive SHA-256 and the unpacked content
 SHA-256, rejects unsafe ZIP entries and zip bombs, and publishes a
 content-addressed directory below the persistent client data root:
 
 ~~~powershell
-$stager = "$env:ProgramFiles\NSTU\docs\deployment\stage-exam-package.ps1"
+$stager = Join-Path (Get-Location) "packaging\stage-exam-package.ps1"
 & $stager -ArchivePath "D:\SecureTransfer\exam.nstuexam" -PublishRoot "$env:ProgramData\NSTU\exams\packages" -ExpectedArchiveSha256 "<archive-sha256>" -ExpectedContentSha256 "<content-sha256>" -TrustedPublisherThumbprint "<publisher-thumbprint>"
 ~~~
 
@@ -629,7 +652,7 @@ answer outbox is only a retry buffer; the server journal is authoritative.
 - Configure that location before enrollment, for example:
 
   ```powershell
-  & "$env:ProgramFiles\NSTU\docs\deployment\configure-data-root.ps1" `
+  & (Join-Path (Get-Location) "packaging\configure-data-root.ps1") `
     -DataRoot "D:\NSTUData"
   ```
 - Never store PSKs, certificates, dumps, screen captures, or runtime secrets in
@@ -680,6 +703,7 @@ remain compatible with permissive licensing; GPL dependencies are not accepted.
 
 - **Lê Anh Tuấn (`ssdarealest`)**: Responsible for project management, legal support, conceptualization, progress management, and project development.
 - **Bùi Hồ Hải Đăng (`yanji`)**: Contributor of ideas, participant in building NSTU, provider of testing equipment, and quality assurance reviewer for the final output.
+- **Nguyễn Thị Hồng Quyên**: Informatics teacher at Le Quy Don High School for the Gifted, Ho Chi Minh City.
 
 ## License
 
