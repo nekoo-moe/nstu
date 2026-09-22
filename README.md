@@ -529,15 +529,12 @@ unified installer on each machine, choosing Server on the teacher machine and
 Client on each student machine. Put them on the same trusted VLAN and allow TCP
 and UDP traffic on port `47001` between clients and the server.
 
-The commands below use scripts shipped by the installer. A complete installer
-places them under `C:\Program Files\NSTU\docs\deployment`; a standalone
-`nstu-server.exe` or `nstu-client.exe` download does not contain PowerShell
-scripts. If only standalone binaries were downloaded, obtain the unified
-installer or a source checkout before continuing. From a source checkout, the
-equivalent files are under `packaging\`.
-
-For a source checkout, replace `$deployment` in the example with the checkout's
-packaging directory, for example:
+The server-side setup commands below use the operator helper scripts kept in the
+repository's `packaging\` directory. The unified installer ships only the role
+binaries, their runtimes, the diagnostics helper, and the exam runtime assets;
+it does not install PowerShell scripts or documentation. Run these helpers from a
+source checkout of the matching release and set `$deployment` to the checkout's
+`packaging` directory, for example:
 
 ```powershell
 $deployment = Join-Path (Get-Location) "packaging"
@@ -553,9 +550,9 @@ creates the protected data root; the second installs the server's encrypted
 enrollment secret and exports a one-time secret for client provisioning:
 
 ```powershell
-$deployment = Join-Path $env:ProgramFiles "NSTU\docs\deployment"
+$deployment = Join-Path (Get-Location) "packaging"
 if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
-  throw "NSTU deployment scripts are missing; reinstall NSTU and select the Server role."
+  throw "Run this from a source checkout: the packaging helpers are not part of the installed product."
 }
 New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
 & (Join-Path $deployment "configure-data-root.ps1") `
@@ -601,22 +598,22 @@ later add authenticated group membership and multicast/unicast transport after
 the dedicated switch, decoder, and loss-recovery validation gates pass.
 
 Connection preambles only reject obviously invalid peers quickly. Device
-identity is accepted only after the cryptographic handshake succeeds. The
-installer is the supported distribution for these scripts; copying only an EXE
-is insufficient for enrollment setup.
+identity is accepted only after the cryptographic handshake succeeds. Client
+enrollment on an installed machine uses the shipped `nstu-provision.exe`; the
+server-side one-time setup helpers run from a source checkout's `packaging\`
+directory and are not part of the installed product.
 
 ### Staging an exam package
 
 Exam archives are staged on the client only by the administrator-owned helper
-shipped under
-`C:\Program Files\NSTU\docs\deployment\stage-exam-package.ps1`. The
+`stage-exam-package.ps1`, run from a source checkout's `packaging\` directory. The
 server remains the persistent owner of the original package and answer journal.
 The helper requires both the release archive SHA-256 and the unpacked content
 SHA-256, rejects unsafe ZIP entries and zip bombs, and publishes a
 content-addressed directory below the persistent client data root:
 
 ~~~powershell
-$stager = "$env:ProgramFiles\NSTU\docs\deployment\stage-exam-package.ps1"
+$stager = Join-Path (Get-Location) "packaging\stage-exam-package.ps1"
 & $stager -ArchivePath "D:\SecureTransfer\exam.nstuexam" -PublishRoot "$env:ProgramData\NSTU\exams\packages" -ExpectedArchiveSha256 "<archive-sha256>" -ExpectedContentSha256 "<content-sha256>" -TrustedPublisherThumbprint "<publisher-thumbprint>"
 ~~~
 
@@ -639,7 +636,7 @@ answer outbox is only a retry buffer; the server journal is authoritative.
 - Configure that location before enrollment, for example:
 
   ```powershell
-  & "$env:ProgramFiles\NSTU\docs\deployment\configure-data-root.ps1" `
+  & (Join-Path (Get-Location) "packaging\configure-data-root.ps1") `
     -DataRoot "D:\NSTUData"
   ```
 - Never store PSKs, certificates, dumps, screen captures, or runtime secrets in

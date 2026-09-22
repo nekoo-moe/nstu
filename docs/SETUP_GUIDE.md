@@ -146,25 +146,30 @@ The diagnostics helper does not enroll a client or derive a protocol key from an
 IP address. Enrollment remains the authenticated one-time operation documented
 below.
 
-## Installer and scripts
+## Installer payload and operator scripts
 
-The complete installer includes lifecycle scripts under `client\` and
-`docs\deployment\`. It includes the Markdown manuals but omits the
-repository-only `docs\assets\` screenshots and partner logos. Standalone EXEs
-do not register services and are not a supported installation source.
+The unified installer ships only the role binaries (`nstu-service`, `nstu-agent`,
+`nstu-provision` for the client; `nstu-server` for the server), their MinGW
+runtimes, the standalone diagnostics helper, and the exam runtime assets
+(`exam/web`, `exam/schema`, `exam/examples`). It does **not** package any
+PowerShell scripts, documentation, or the repository-only `docs\assets\`
+images. Standalone EXEs do not register services and are not a supported
+installation source.
 
-Both roles are checked before installation to prevent conflicts. The client
-helper configures the service, data root, recovery policy, and protected ACLs.
-The server helper validates the role and protected data root.
+The operator helper scripts live in the repository's `packaging\` directory and
+are run from a source checkout of the matching release, not from the installed
+product. The client-role helper configures the service, data root, recovery
+policy, and protected ACLs. The server-role helper validates the role and
+protected data root.
 
-The deployment payload also includes `stage-exam-package.ps1`. Run it from an
-elevated PowerShell session on the client after copying the approved
-`.nstuexam` archive and release metadata. Supply both the archive SHA-256 and
-the unpacked content SHA-256; production packages must include the detached
-`manifest.p7s` publisher signature and its approved certificate thumbprint.
-Pass an explicit absolute `-PublishRoot` under the configured persistent client
-data root (the installer default is `%ProgramData%\NSTU\exams\packages`); the
-helper does not discover a root or download/copy an archive from the server.
+`packaging\stage-exam-package.ps1` stages an exam package on a client. Run it
+from an elevated PowerShell session in a source checkout after copying the
+approved `.nstuexam` archive and release metadata. Supply both the archive
+SHA-256 and the unpacked content SHA-256; production packages must include the
+detached `manifest.p7s` publisher signature and its approved certificate
+thumbprint. Pass an explicit absolute `-PublishRoot` under the configured
+persistent client data root (the default is `%ProgramData%\NSTU\exams\packages`);
+the helper does not discover a root or download/copy an archive from the server.
 `-RequireAuthenticode` is an optional additional policy gate for `.exe` and
 `.dll` files in a package; it is separate from the required detached manifest
 signature. Use the helper only for client staging, outside the server data
@@ -189,12 +194,12 @@ protection before staging removal.
 
 ## Enrollment
 
-After installing the server, create a one-time enrollment secret with
-`docs\deployment\new-enrollment-secret.ps1`. Provision each client with the
-packaged `client\nstu-provision.exe`. Provisioning writes the authenticated
-DPAPI-protected runtime configuration used by `nstu-service`; the address
-entered in the installer is retained for diagnostics only until this exchange
-succeeds.
+After installing the server, create a one-time enrollment secret by running
+`packaging\new-enrollment-secret.ps1` from a source checkout. Provision each
+client with the installed `client\nstu-provision.exe`. Provisioning writes the
+authenticated DPAPI-protected runtime configuration used by `nstu-service`; the
+address entered in the installer is retained for diagnostics only until this
+exchange succeeds.
 
 ## Build
 

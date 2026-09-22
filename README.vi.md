@@ -515,14 +515,11 @@ nhất trên mỗi máy, chọn Server cho máy giáo viên và Client cho từn
 sinh. Đặt các máy trong cùng VLAN tin cậy và cho phép TCP port `47001` giữa
 client với server, đồng thời cho phép UDP `47001` để tìm lại endpoint.
 
-Các lệnh dưới đây dùng script được đóng gói cùng installer. Installer đầy đủ
-đặt script tại `C:\Program Files\NSTU\docs\deployment`; file tải riêng
-`nstu-server.exe` hoặc `nstu-client.exe` không chứa PowerShell script. Nếu chỉ
-có binary riêng, hãy tải installer hợp nhất hoặc checkout source đúng phiên bản
-trước khi tiếp tục. Trong source checkout, các file tương ứng
-nằm trong thư mục `packaging\`.
-
-Nếu dùng source checkout, thay `$deployment` trong ví dụ bằng thư mục
+Các lệnh chuẩn bị server dưới đây dùng helper script của người vận hành nằm
+trong thư mục `packaging\` của repository. Installer hợp nhất chỉ đóng gói
+binary theo vai trò, runtime đi kèm, helper diagnostics và tài nguyên runtime
+bài thi; nó không cài PowerShell script hay tài liệu. Hãy chạy các helper này từ
+source checkout đúng phiên bản release và đặt `$deployment` là thư mục
 `packaging` của checkout, ví dụ:
 
 ```powershell
@@ -539,9 +536,9 @@ data root được bảo vệ; lệnh thứ hai cài enrollment secret đã mã 
 và xuất secret dùng một lần để provision client:
 
 ```powershell
-$deployment = Join-Path $env:ProgramFiles "NSTU\docs\deployment"
+$deployment = Join-Path (Get-Location) "packaging"
 if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
-  throw "Thiếu script triển khai NSTU; hãy cài lại NSTU và chọn vai trò Server."
+  throw "Hãy chạy từ source checkout: helper trong packaging không nằm trong sản phẩm đã cài."
 }
 New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
 & (Join-Path $deployment "configure-data-root.ps1") `
@@ -585,22 +582,22 @@ này có thể bổ sung group membership và multicast/unicast đã xác thực
 khi vượt qua các gate kiểm tra switch, decoder và loss-recovery riêng.
 
 Connection preamble chỉ giúp loại nhanh peer sai rõ ràng. Danh tính máy chỉ
-được chấp nhận sau khi cryptographic handshake thành công. Installer là cách
-phân phối được hỗ trợ cho các script này; chỉ chép riêng file EXE là không đủ
-để thiết lập enrollment.
+được chấp nhận sau khi cryptographic handshake thành công. Enrollment client
+trên máy đã cài dùng `nstu-provision.exe` được đóng gói sẵn; các helper thiết
+lập một lần phía server chạy từ thư mục `packaging\` của source checkout và
+không nằm trong sản phẩm đã cài.
 
 ### Staging package bài thi
 
 Archive bài thi chỉ được staging trên client bằng helper do administrator quản
-lý, được đóng gói tại
-`C:\Program Files\NSTU\docs\deployment\stage-exam-package.ps1`. Server
-vẫn giữ package gốc và answer journal trên storage bền vững. Helper bắt buộc có
-cả archive SHA-256 và unpacked content SHA-256, từ chối ZIP không an toàn và
-zip bomb, rồi publish vào thư mục content-addressed bên dưới data root bền
-vững của client:
+lý `stage-exam-package.ps1`, chạy từ thư mục `packaging\` của source checkout.
+Server vẫn giữ package gốc và answer journal trên storage bền vững. Helper bắt
+buộc có cả archive SHA-256 và unpacked content SHA-256, từ chối ZIP không an
+toàn và zip bomb, rồi publish vào thư mục content-addressed bên dưới data root
+bền vững của client:
 
 ~~~powershell
-$stager = "$env:ProgramFiles\NSTU\docs\deployment\stage-exam-package.ps1"
+$stager = Join-Path (Get-Location) "packaging\stage-exam-package.ps1"
 & $stager -ArchivePath "D:\SecureTransfer\exam.nstuexam" -PublishRoot "$env:ProgramData\NSTU\exams\packages" -ExpectedArchiveSha256 "<archive-sha256>" -ExpectedContentSha256 "<content-sha256>" -TrustedPublisherThumbprint "<publisher-thumbprint>"
 ~~~
 
@@ -621,8 +618,8 @@ thức.
 - Cài binary vào vị trí Windows được bảo vệ thông thường.
 - Dành riêng một thawed location có ACL chặt cho identity đã enroll, key material
   được bảo vệ, cấu hình, audit log và update state.
-- Cấu hình vị trí đó trước enrollment bằng `configure-data-root.ps1 -DataRoot
-  "D:\NSTUData"`.
+- Cấu hình vị trí đó trước enrollment bằng helper trong `packaging\`, ví dụ
+  `packaging\configure-data-root.ps1 -DataRoot "D:\NSTUData"`.
 - Tuyệt đối không đưa PSK, certificate, dump, screen capture hay runtime secret
   vào repository.
 - Không đóng băng image production trước khi đã kiểm thử persistence của

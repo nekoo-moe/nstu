@@ -136,24 +136,28 @@ input phải chạy trong interactive user session.
 Diagnostics không enrollment và không tạo key chỉ từ IP. Enrollment authenticated
 một lần vẫn thực hiện theo phần dưới.
 
-## Script và installer
+## Payload installer và script vận hành
 
-Gói đầy đủ chứa lifecycle script trong `client\` và `docs\deployment\`, cùng
-các tài liệu Markdown nhưng không đóng gói ảnh chỉ dùng cho repository trong
-`docs\assets\` như screenshot và logo đối tác. Standalone EXE không đăng ký
-service và không phải nguồn cài đặt được hỗ trợ.
-Hai vai trò đều được kiểm tra trước khi cài để tránh xung đột.
-Helper client cấu hình service, data root, recovery policy và ACL bảo vệ.
-Helper server kiểm tra role và data root được bảo vệ.
+Installer hợp nhất chỉ đóng gói binary theo vai trò (`nstu-service`,
+`nstu-agent`, `nstu-provision` cho client; `nstu-server` cho server), runtime
+MinGW đi kèm, helper diagnostics độc lập và tài nguyên runtime bài thi
+(`exam/web`, `exam/schema`, `exam/examples`). Nó **không** đóng gói PowerShell
+script, tài liệu hay ảnh chỉ dùng cho repository trong `docs\assets\`. Standalone
+EXE không đăng ký service và không phải nguồn cài đặt được hỗ trợ.
 
-Payload deployment cũng có `stage-exam-package.ps1`. Chạy script từ
-PowerShell elevated trên client sau khi chép archive `.nstuexam` và metadata
-release đã được phê duyệt. Phải cung cấp cả archive SHA-256 và unpacked content
-SHA-256; package production phải có detached publisher signature
-`manifest.p7s` cùng thumbprint certificate được phê duyệt. Truyền `-PublishRoot`
-là đường dẫn tuyệt đối bên dưới data root bền vững đã cấu hình cho client
-(mặc định khi cài là `%ProgramData%\NSTU\exams\packages`); helper không tự dò
-root hoặc tải/copy archive từ server. `-RequireAuthenticode` là policy bổ sung
+Các helper script vận hành nằm trong thư mục `packaging\` của repository và được
+chạy từ source checkout đúng phiên bản release, không phải từ sản phẩm đã cài.
+Helper vai trò client cấu hình service, data root, recovery policy và ACL bảo
+vệ. Helper vai trò server kiểm tra role và data root được bảo vệ.
+
+`packaging\stage-exam-package.ps1` staging package bài thi trên client. Chạy
+script từ PowerShell elevated trong source checkout sau khi chép archive
+`.nstuexam` và metadata release đã được phê duyệt. Phải cung cấp cả archive
+SHA-256 và unpacked content SHA-256; package production phải có detached
+publisher signature `manifest.p7s` cùng thumbprint certificate được phê duyệt.
+Truyền `-PublishRoot` là đường dẫn tuyệt đối bên dưới data root bền vững đã cấu
+hình cho client (mặc định là `%ProgramData%\NSTU\exams\packages`); helper không
+tự dò root hoặc tải/copy archive từ server. `-RequireAuthenticode` là policy bổ sung
 tùy chọn cho các file `.exe` và `.dll` trong package, tách biệt với detached
 manifest signature bắt buộc. Chỉ dùng helper để staging trên client, không dùng
 server data root. Helper không bật UWF hoặc thay đổi Deep Freeze. Package phải
@@ -175,11 +179,11 @@ khi stage gỡ.
 
 ## Enrollment
 
-Sau khi cài server, tạo secret một lần bằng
-`docs\deployment\new-enrollment-secret.ps1`, sau đó provision từng client bằng
-`client\nstu-provision.exe`. Provisioning ghi cấu hình runtime được DPAPI bảo vệ
-mà `nstu-service` sử dụng; IP nhập trong installer chỉ phục vụ diagnostics cho
-đến khi trao đổi có xác thực này thành công.
+Sau khi cài server, tạo secret một lần bằng cách chạy
+`packaging\new-enrollment-secret.ps1` từ source checkout, sau đó provision từng
+client bằng `client\nstu-provision.exe` đã cài. Provisioning ghi cấu hình runtime
+được DPAPI bảo vệ mà `nstu-service` sử dụng; IP nhập trong installer chỉ phục vụ
+diagnostics cho đến khi trao đổi có xác thực này thành công.
 
 ## Build
 
