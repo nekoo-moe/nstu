@@ -175,7 +175,13 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         endif()
     endif()
     if(TARGET nstu-service)
-        install(TARGETS nstu-service nstu-agent nstu-provision
+        # nstu-provision (the legacy file-copy enrollment tool) is intentionally
+        # NOT staged into the shipped client payload. UI-driven pairing by room
+        # name has replaced hand-copied enrollment secrets, so the tool is
+        # deprecated. The target stays buildable in the repo
+        # (client/CMakeLists.txt) as a manual fallback for advanced operators;
+        # it is simply no longer installed into the client component.
+        install(TARGETS nstu-service nstu-agent
             RUNTIME DESTINATION client
             COMPONENT client)
         # The client-side exam host loads these files from the installed
@@ -246,7 +252,7 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
     if(NSTU_MAKENSIS_EXECUTABLE)
         set(nstu_unified_dependencies)
         foreach(nstu_target IN ITEMS nstu-server nstu-service nstu-agent
-                nstu-provision nstu-diagnostics)
+                nstu-diagnostics)
             if(TARGET ${nstu_target})
                 if(TARGET nstu-sign-${nstu_target})
                     list(APPEND nstu_unified_dependencies

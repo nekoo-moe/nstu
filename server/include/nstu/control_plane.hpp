@@ -27,6 +27,12 @@ struct ServerControlPlaneConfig {
     std::vector<std::byte> keyring_entropy;
     std::vector<std::byte> enrollment_secret;
     std::size_t maximum_clients = 512;
+    // Operator-facing room label advertised on the pairing beacon so a client
+    // on a shared VLAN can target the right classroom by name. A display hint,
+    // never a credential: an empty value falls back to the computer name at the
+    // call site. Sanitized to the discovery name bound before it reaches the
+    // wire.
+    std::string server_name;
 };
 
 // One client waiting for the teacher to approve it. The six-digit code is the
@@ -111,8 +117,16 @@ public:
     // that lets an unenrolled machine find this server is off until the window
     // is opened, and a pending request only becomes a key when approve is
     // called with the code matching the client screen.
+    // When server_name is empty, the beacon advertises the configured room
+    // name (see set_server_name / server_name), and only when that is also
+    // empty does the caller's own fallback (the computer name) apply.
     void set_pairing_window(bool open, std::string_view server_name = {});
     [[nodiscard]] bool pairing_window_open() const noexcept;
+    // The persisted, operator-editable room label. Empty means "not set";
+    // callers fall back to the computer name. The setter sanitizes to the
+    // discovery name bound and takes effect on the next beacon.
+    [[nodiscard]] std::string server_name() const;
+    void set_server_name(std::string_view name);
     [[nodiscard]] std::vector<PendingPairing> pending_pairings() const;
     [[nodiscard]] bool approve_pairing(std::uint64_t pairing_id,
                                        std::string* error = nullptr);

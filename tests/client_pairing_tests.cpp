@@ -66,9 +66,58 @@ std::vector<nstu::server::PendingPairing> wait_for_pending(
     return server.pending_pairings();
 }
 
+// The room preference is a routing hint applied before any key exists, so its
+// matching is pure and worth pinning without a live sweep: trimmed,
+// case-insensitive, empty means "no preference", and anything ambiguous refuses
+// to guess. discovery::PairingCandidate::server_name carries the room the
+// beacon advertised.
+void test_room_candidate_selection() {
+    using nstu::client::RoomSelection;
+    using nstu::client::select_preferred_room_candidate;
+    const std::array<nstu::discovery::PairingCandidate, 2> rooms{{
+        {.address = "127.0.0.1", .port = 1, .server_name = "Room A"},
+        {.address = "127.0.0.1", .port = 2, .server_name = "Room B"},
+    }};
+
+    // Case-insensitive: the wanted room need not match the advertised casing.
+    const auto lower = select_preferred_room_candidate(rooms, "room a");
+    assert(lower.kind == RoomSelection::matched);
+    assert(lower.index == 0);
+
+    // Surrounding whitespace on the preference is trimmed before comparison.
+    const auto padded = select_preferred_room_candidate(rooms, "  Room B  ");
+    assert(padded.kind == RoomSelection::matched);
+    assert(padded.index == 1);
+
+    // A room no server advertises is not a match, so the caller keeps sweeping
+    // rather than pairing to the wrong machine.
+    assert(select_preferred_room_candidate(rooms, "Room C").kind ==
+           RoomSelection::unmatched);
+
+    // No preference (empty or whitespace only) falls back to today's
+    // sole-candidate/menu flow.
+    assert(select_preferred_room_candidate(rooms, "").kind ==
+           RoomSelection::no_preference);
+    assert(select_preferred_room_candidate(rooms, "    ").kind ==
+           RoomSelection::no_preference);
+
+    // Two servers advertising the same room is ambiguous; refuse to guess so
+    // the operator is never silently paired to an arbitrary one.
+    const std::array<nstu::discovery::PairingCandidate, 2> duplicates{{
+        {.address = "127.0.0.1", .port = 1, .server_name = "Room A"},
+        {.address = "127.0.0.1", .port = 2, .server_name = "room a"},
+    }};
+    assert(select_preferred_room_candidate(duplicates, "Room A").kind ==
+           RoomSelection::unmatched);
+}
+
 } // namespace
 
 int main() {
+    // Pure, network-free check first: the room filter that runs before any
+    // pairing decides which candidate to try.
+    test_room_candidate_selection();
+
     nstu::net::WinsockRuntime winsock;
     assert(winsock.ready());
 

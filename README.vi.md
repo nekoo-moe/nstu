@@ -509,83 +509,100 @@ Gỡ service thủ công không phải quy trình được hỗ trợ.
 
 ## Kết nối một phòng máy
 
-Quy trình enrollment hiện dùng command line và phải thực hiện khi máy đang
-thawed, trong PowerShell chạy bằng quyền Administrator. Chạy cùng installer hợp
-nhất trên mỗi máy, chọn Server cho máy giáo viên và Client cho từng máy học
-sinh. Đặt các máy trong cùng VLAN tin cậy và cho phép TCP port `47001` giữa
-client với server, đồng thời cho phép UDP `47001` để tìm lại endpoint.
+Chạy cùng installer hợp nhất trên mỗi máy, chọn Server cho máy giáo viên và
+Client cho từng máy học sinh. Đặt các máy trong cùng VLAN tin cậy và cho phép
+TCP port `47001` giữa client với server, đồng thời cho phép UDP `47001` để tìm
+lại endpoint. Bản thân việc enroll diễn ra trên màn hình: không chép file secret
+nào lên máy học sinh, và không chạy lệnh nào cho từng client.
 
-Các lệnh chuẩn bị server dưới đây dùng helper script của người vận hành nằm
-trong thư mục `packaging\` của repository. Installer hợp nhất chỉ đóng gói
-binary theo vai trò, runtime đi kèm, helper diagnostics và tài nguyên runtime
+Server vẫn cần data root được bảo vệ, do các helper script của người vận hành
+nằm trong thư mục `packaging\` của repository tạo ra. Installer hợp nhất chỉ đóng
+gói binary theo vai trò, runtime đi kèm, helper diagnostics và tài nguyên runtime
 bài thi; nó không cài PowerShell script hay tài liệu. Hãy chạy các helper này từ
 source checkout đúng phiên bản release và đặt `$deployment` là thư mục
-`packaging` của checkout, ví dụ:
-
-```powershell
-$deployment = Join-Path (Get-Location) "packaging"
-& (Join-Path $deployment "configure-data-root.ps1") -DataRoot "D:\NSTUData"
-& (Join-Path $deployment "new-enrollment-secret.ps1") `
-  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
-```
+`packaging` của checkout.
 
 ### 1. Chuẩn bị server
 
-Chạy các lệnh sau trên máy giáo viên bằng quyền Administrator. Lệnh đầu tạo
-data root được bảo vệ; lệnh thứ hai cài enrollment secret đã mã hóa cho server
-và xuất secret dùng một lần để provision client:
+Chạy lệnh sau trên máy giáo viên bằng quyền Administrator để tạo data root được
+bảo vệ, rồi khởi động `nstu-server.exe`:
 
 ```powershell
 $deployment = Join-Path (Get-Location) "packaging"
 if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
   throw "Hãy chạy từ source checkout: helper trong packaging không nằm trong sản phẩm đã cài."
 }
-New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
 & (Join-Path $deployment "configure-data-root.ps1") `
   -DataRoot "$env:ProgramData\NSTU"
-& (Join-Path $deployment "new-enrollment-secret.ps1") `
-  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
 ```
 
-Restart `nstu-server.exe` để nạp enrollment secret đã bảo vệ. Giữ file export
-trong vị trí removable/thawed được bảo vệ cho đến khi provision xong toàn bộ
-client. `new-enrollment-secret.ps1` chỉ chạy trên server, không cần chạy trên
-máy học sinh.
+Luồng pairing trên màn hình không tạo enrollment secret nào — server tự mint và
+lưu key của từng client khi người vận hành duyệt yêu cầu.
 
-### 2. Provision từng client
+### 2. Enroll từng client bằng pairing
 
-Trên từng máy học sinh, khi server đang chạy, dùng identity 128-bit và key ID
-riêng. `nstu-provision.exe` được cài khi chọn vai trò Client:
+Trên server, mở cửa sổ pairing ("Thêm máy"). Agent trên mỗi máy học sinh quét
+LAN tìm server đang mở cửa sổ pairing, tự chạy trao đổi có xác thực hai chiều, và
+hiển thị mã sáu chữ số ngay trên màn hình máy đó. Cùng mã đó xuất hiện trong danh
+sách chờ của server; người vận hành chỉ duyệt yêu cầu khi hai mã trùng nhau.
+**Phép so sánh sáu chữ số đó là gốc tin cậy** — không có gì được chép giữa các
+máy để thiết lập nó.
 
-```powershell
-$clientId = [guid]::NewGuid().ToString("N")
-& "$env:ProgramFiles\NSTU\client\nstu-provision.exe" `
-  192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
-```
-
-Tool xác thực enrollment transcript, derive PSK mà không truyền PSK trên mạng,
-và lưu cấu hình client bằng machine-scope DPAPI. Sau khi lệnh thành công, restart
-client service hoặc Windows. Khi đã enroll toàn bộ client, xóa mọi bản copy của
-file export dùng một lần. Quy trình client tin cậy:
+Khi được duyệt, client dẫn xuất protocol key từ transcript (key không bao giờ
+được truyền đi), lưu cấu hình DPAPI phạm vi machine mà `nstu-service` dùng, rồi
+kết nối. Quy trình client tin cậy:
 
 ```text
 Cài client
-  -> cấp danh tính riêng và enrollment credential được bảo vệ
+  -> agent quét LAN và hiển thị mã sáu chữ số
+  -> người vận hành duyệt mã trùng khớp trên server (gốc tin cậy)
+  -> server mint key cho client; client lưu cấu hình được bảo vệ
   -> xác thực với server qua TCP
-  -> đăng ký thiết bị và nhận room policy
-  -> nhận snapshot schedule và room policy đã được xác thực
+  -> đăng ký thiết bị và nhận snapshot schedule cùng room policy đã xác thực
   -> chụp JPEG có giới hạn qua kết nối TCP đã xác thực
 ```
+
+Trên VLAN dùng chung nơi nhiều server cùng trả lời, gán nhãn phòng cho mỗi server
+trong giao diện server và gán cho mỗi máy học sinh phòng của nó qua trường
+**Room name** tùy chọn của installer hoặc `/ROOM=` khi cài im lặng (ghi
+`HKLM\Software\NSTU\PreferredRoom`). Agent khi đó tự chọn server quảng bá đúng
+phòng, quay về menu chọn — hoặc pair im lặng khi chỉ một server trả lời — nếu
+không đặt phòng hoặc không có server đơn lẻ nào mang phòng đó. Tên phòng chỉ là
+gợi ý định tuyến; phép duyệt sáu chữ số vẫn kiểm soát mọi lần pairing, nên phòng
+sai hoặc thiếu chỉ hạ xuống menu, không bao giờ dẫn tới pairing nhầm âm thầm.
 
 Đường continuous H.264 tùy chọn chưa nằm trong quy trình enrollment này. Sau
 này có thể bổ sung group membership và multicast/unicast đã xác thực, chỉ sau
 khi vượt qua các gate kiểm tra switch, decoder và loss-recovery riêng.
 
 Connection preamble chỉ giúp loại nhanh peer sai rõ ràng. Danh tính máy chỉ
-được chấp nhận sau khi cryptographic handshake thành công. Enrollment client
-trên máy đã cài dùng `nstu-provision.exe` được đóng gói sẵn; các helper thiết
-lập một lần phía server chạy từ thư mục `packaging\` của source checkout và
-không nằm trong sản phẩm đã cài.
+được chấp nhận sau khi cryptographic handshake thành công.
+
+### Enrollment thủ công dự phòng (nâng cao)
+
+Đường enroll bằng chép file trước đây đã bị deprecate và không còn được đóng gói
+trong installer, nhưng các tool vẫn ở trong repository để phục hồi khi pairing
+trên màn hình không khả dụng (ví dụ máy không có phiên tương tác). Từ một source
+checkout, xuất secret bootstrap một lần trên server, rồi chạy tool provision trên
+từng máy với identity 128-bit và key ID riêng:
+
+```powershell
+$deployment = Join-Path (Get-Location) "packaging"
+New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
+& (Join-Path $deployment "new-enrollment-secret.ps1") `
+  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
+# Restart nstu-server.exe để nạp enrollment secret đã bảo vệ, rồi trên từng
+# client (nstu-provision.exe không được cài; hãy build hoặc chép từ source
+# checkout):
+$clientId = [guid]::NewGuid().ToString("N")
+& ".\nstu-provision.exe" 192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+Tool xác thực enrollment transcript, derive PSK mà không truyền PSK trên mạng,
+và lưu cùng cấu hình DPAPI phạm vi machine đó. Giữ file export trong vị trí
+removable/thawed được bảo vệ và xóa mọi bản copy khi enroll xong.
+`new-enrollment-secret.ps1` chỉ chạy trên server, không cần chạy trên máy học
+sinh.
 
 ### Staging package bài thi
 

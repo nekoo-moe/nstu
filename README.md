@@ -523,85 +523,101 @@ for the following boot. Direct manual service removal is not supported.
 
 ## Connecting a computer room
 
-The current enrollment flow is command-line based and must be performed while
-the machines are thawed, from an elevated PowerShell prompt. Run the same
-unified installer on each machine, choosing Server on the teacher machine and
-Client on each student machine. Put them on the same trusted VLAN and allow TCP
-and UDP traffic on port `47001` between clients and the server.
+Run the same unified installer on each machine, choosing Server on the teacher
+machine and Client on each student machine. Put them on the same trusted VLAN
+and allow TCP and UDP traffic on port `47001` between clients and the server.
+Enrollment itself is done on screen: no secret file is copied to a student
+machine, and no per-client command is run.
 
-The server-side setup commands below use the operator helper scripts kept in the
-repository's `packaging\` directory. The unified installer ships only the role
-binaries, their runtimes, the diagnostics helper, and the exam runtime assets;
-it does not install PowerShell scripts or documentation. Run these helpers from a
-source checkout of the matching release and set `$deployment` to the checkout's
-`packaging` directory, for example:
-
-```powershell
-$deployment = Join-Path (Get-Location) "packaging"
-& (Join-Path $deployment "configure-data-root.ps1") -DataRoot "D:\NSTUData"
-& (Join-Path $deployment "new-enrollment-secret.ps1") `
-  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
-```
+The server still needs its protected data root, which the operator helper
+scripts in the repository's `packaging\` directory create. The unified installer
+ships only the role binaries, their runtimes, the diagnostics helper, and the
+exam runtime assets; it does not install PowerShell scripts or documentation.
+Run these helpers from a source checkout of the matching release and set
+`$deployment` to the checkout's `packaging` directory.
 
 ### 1. Prepare the server
 
-Run these commands on the teacher machine as Administrator. The first command
-creates the protected data root; the second installs the server's encrypted
-enrollment secret and exports a one-time secret for client provisioning:
+Run this on the teacher machine as Administrator to create the protected data
+root, then start `nstu-server.exe`:
 
 ```powershell
 $deployment = Join-Path (Get-Location) "packaging"
 if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
   throw "Run this from a source checkout: the packaging helpers are not part of the installed product."
 }
-New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
 & (Join-Path $deployment "configure-data-root.ps1") `
   -DataRoot "$env:ProgramData\NSTU"
-& (Join-Path $deployment "new-enrollment-secret.ps1") `
-  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
 ```
 
-Restart `nstu-server.exe` so it loads the protected enrollment secret. Keep the
-exported file in a protected removable/thawed location until all clients have
-been provisioned. `new-enrollment-secret.ps1` is server-only; it is not needed
-on student machines.
+No enrollment secret is created for the on-screen pairing flow — the server mints
+and stores each client's key itself when the operator approves the request.
 
-### 2. Provision each client
+### 2. Enroll each client by pairing
 
-On each student machine, while the server is running, use a unique 128-bit
-identity and key ID. `nstu-provision.exe` is installed when the Client role is
-selected:
+On the server, open the pairing window ("Add computers"). Each student machine's
+agent sweeps the LAN for a server whose pairing window is open, runs the mutually
+authenticated exchange itself, and shows a six-digit code on its own screen. The
+same code appears in the server's pending list; the operator approves a request
+only when the two codes match. **That six-digit comparison is the trust root** —
+nothing is copied between machines to establish it.
 
-```powershell
-$clientId = [guid]::NewGuid().ToString("N")
-& "$env:ProgramFiles\NSTU\client\nstu-provision.exe" `
-  192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
-```
-
-The tool authenticates the enrollment transcript, derives the installed PSK
-without sending it, and stores the client configuration with machine-scope
-DPAPI. After the command succeeds, restart the client service or Windows. Once
-all clients are enrolled, delete every copy of the one-time export. A trusted
-client follows this path:
+On approval, the client derives its protocol key from the transcript (the key is
+never transmitted), stores the machine-scope DPAPI configuration `nstu-service`
+uses, and connects. A trusted client follows this path:
 
 ```text
 Install client
-  -> provision a unique client identity and protected enrollment credential
+  -> agent sweeps the LAN and shows a six-digit code
+  -> operator approves the matching code on the server (the trust root)
+  -> server mints the client key; client stores a protected configuration
   -> authenticate to the server over TCP
-  -> register the device and receive room policy
-  -> receive an authenticated snapshot schedule and room policy
+  -> register the device and receive an authenticated snapshot schedule and room policy
   -> capture bounded JPEG snapshots over the authenticated TCP connection
 ```
+
+On a shared VLAN where several servers answer, label each server with a room name
+in the server UI and give each student machine its room via the installer's
+optional **Room name** field or `/ROOM=` in a silent install (it writes
+`HKLM\Software\NSTU\PreferredRoom`). The agent then auto-selects the server
+advertising that room, falling back to the selection menu — or to silent pairing
+when only one server answers — if no room is set or no single server carries it.
+The room name is only a routing hint; the six-digit approval still gates every
+pairing, so a wrong or missing room degrades to the menu, never to a silent
+mis-pairing.
 
 The optional continuous H.264 path is not part of this enrollment flow. It may
 later add authenticated group membership and multicast/unicast transport after
 the dedicated switch, decoder, and loss-recovery validation gates pass.
 
 Connection preambles only reject obviously invalid peers quickly. Device
-identity is accepted only after the cryptographic handshake succeeds. Client
-enrollment on an installed machine uses the shipped `nstu-provision.exe`; the
-server-side one-time setup helpers run from a source checkout's `packaging\`
-directory and are not part of the installed product.
+identity is accepted only after the cryptographic handshake succeeds.
+
+### Manual enrollment fallback (advanced)
+
+The earlier file-copy enrollment path is deprecated and no longer shipped in the
+installer, but the tools remain in the repository for recovery when on-screen
+pairing is unavailable (for example, a machine with no interactive session). From
+a source checkout, export a one-time bootstrap secret on the server, then run the
+provisioning tool on each machine with a unique 128-bit identity and key ID:
+
+```powershell
+$deployment = Join-Path (Get-Location) "packaging"
+New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
+& (Join-Path $deployment "new-enrollment-secret.ps1") `
+  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
+# Restart nstu-server.exe so it loads the protected enrollment secret, then on
+# each client (nstu-provision.exe is not installed; build it or copy it from a
+# source checkout):
+$clientId = [guid]::NewGuid().ToString("N")
+& ".\nstu-provision.exe" 192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+The tool authenticates the enrollment transcript, derives the installed PSK
+without sending it, and stores the same machine-scope DPAPI configuration. Keep
+the export in a protected removable/thawed location and delete every copy once
+enrollment is complete. `new-enrollment-secret.ps1` is server-only; it is not
+needed on student machines.
 
 ### Staging an exam package
 

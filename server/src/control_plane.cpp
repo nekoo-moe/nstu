@@ -290,6 +290,10 @@ public:
             config_ = {};
             return false;
         }
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            server_name_ = discovery::sanitize_server_name(config_.server_name);
+        }
         return true;
     }
 
@@ -300,6 +304,7 @@ public:
             std::scoped_lock lock(pairing_mutex_);
             pending_pairings_.clear();
             pairing_window_open_ = false;
+            server_name_.clear();
         }
         {
             std::scoped_lock lock(states_mutex_);
@@ -590,7 +595,16 @@ public:
     }
 
     void set_pairing_window(bool open, std::string_view server_name) {
-        discovery_responder_.set_pairing_beacon(open, server_name);
+        std::string effective_name;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            // The configured room name always wins. The caller-supplied name
+            // (the computer name, passed by the server app) is only a fallback
+            // for when no room name has been configured.
+            effective_name = server_name_.empty() ? std::string(server_name)
+                                                   : server_name_;
+        }
+        discovery_responder_.set_pairing_beacon(open, effective_name);
         std::vector<AbandonedPairing> abandoned;
         {
             std::scoped_lock pairing_lock(pairing_mutex_);
@@ -617,6 +631,26 @@ public:
     bool pairing_window_open() const noexcept {
         std::scoped_lock pairing_lock(pairing_mutex_);
         return pairing_window_open_;
+    }
+
+    std::string server_name() const {
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        return server_name_;
+    }
+
+    void set_server_name(std::string_view name) {
+        const auto sanitized = discovery::sanitize_server_name(name);
+        bool window_open = false;
+        {
+            std::scoped_lock pairing_lock(pairing_mutex_);
+            server_name_ = sanitized;
+            window_open = pairing_window_open_;
+        }
+        // If the operator renames the room while the window is open, re-arm the
+        // beacon so the new label is advertised without reopening it.
+        if (window_open) {
+            discovery_responder_.set_pairing_beacon(true, sanitized);
+        }
     }
 
     std::vector<PendingPairing> pending_pairings() const {
@@ -1622,6 +1656,10 @@ public:
     mutable std::mutex pairing_mutex_;
     std::unordered_map<std::uint64_t, PendingPairingRecord> pending_pairings_;
     bool pairing_window_open_ = false;
+    // Operator-facing room label advertised on the pairing beacon. Guarded by
+    // pairing_mutex_ alongside the window flag. A display hint, never a
+    // credential: sanitized to the discovery name bound, empty means "not set".
+    std::string server_name_;
     std::uint64_t next_pairing_id_ = 1;
     mutable std::mutex states_mutex_;
     mutable std::mutex exam_contexts_mutex_;
@@ -1657,6 +1695,14 @@ void ServerControlPlane::set_pairing_window(bool open,
 
 bool ServerControlPlane::pairing_window_open() const noexcept {
     return impl_->pairing_window_open();
+}
+
+std::string ServerControlPlane::server_name() const {
+    return impl_->server_name();
+}
+
+void ServerControlPlane::set_server_name(std::string_view name) {
+    impl_->set_server_name(name);
 }
 
 std::vector<PendingPairing> ServerControlPlane::pending_pairings() const {

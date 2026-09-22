@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstring>
 #include <deque>
 #include <optional>
@@ -37,6 +38,55 @@ std::string narrow_ascii(std::wstring_view wide) {
         }
     }
     return text;
+}
+
+// UTF-8 conversion for a registry REG_SZ value. Unlike narrow_ascii this keeps
+// non-ASCII code points as their multi-byte UTF-8 form, so a room label typed
+// with diacritics reduces to the same bytes the server produced from its own
+// UTF-8 name before either side is sanitised.
+std::string wide_to_utf8(std::wstring_view wide) {
+    if (wide.empty()) {
+        return {};
+    }
+    const int needed =
+        WideCharToMultiByte(CP_UTF8, 0, wide.data(),
+                            static_cast<int>(wide.size()), nullptr, 0, nullptr,
+                            nullptr);
+    if (needed <= 0) {
+        return {};
+    }
+    std::string utf8(static_cast<std::size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(),
+                        static_cast<int>(wide.size()), utf8.data(), needed,
+                        nullptr, nullptr);
+    return utf8;
+}
+
+// Trims leading and trailing ASCII whitespace, returning a view into the input.
+std::string_view trim_ascii(std::string_view text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+// ASCII case-insensitive equality. A room label is matched, not authenticated,
+// so a byte-wise fold is the right tool; both sides are already reduced to
+// printable ASCII by sanitize_server_name before this runs.
+bool equals_ignoring_case(std::string_view left, std::string_view right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        const auto lhs = static_cast<unsigned char>(left[index]);
+        const auto rhs = static_cast<unsigned char>(right[index]);
+        if (std::tolower(lhs) != std::tolower(rhs)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::optional<std::wstring> read_machine_string(const wchar_t* subkey,
@@ -437,6 +487,47 @@ PairingAttemptResult pair_with_server(
     }
     set_error(error, "pairing was cancelled");
     return result;
+}
+
+RoomSelectionResult select_preferred_room_candidate(
+    std::span<const discovery::PairingCandidate> candidates,
+    std::string_view preferred_room) {
+    // Normalise the wanted label exactly as the beacon normalises the name it
+    // advertises, then trim. If nothing is left there is no preference, and the
+    // caller keeps today's sole-candidate/menu behaviour.
+    const std::string normalized =
+        discovery::sanitize_server_name(preferred_room);
+    const std::string_view wanted = trim_ascii(normalized);
+    if (wanted.empty()) {
+        return {RoomSelection::no_preference, 0};
+    }
+    RoomSelectionResult result{RoomSelection::unmatched, 0};
+    bool found = false;
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        // Candidate names arrive already sanitised on the wire, so only the
+        // trim is needed before the case-insensitive compare.
+        if (!equals_ignoring_case(trim_ascii(candidates[index].server_name),
+                                  wanted)) {
+            continue;
+        }
+        if (found) {
+            // A second server claims the same room. The SAS is per-server, so
+            // guessing between them would just waste an operator's approval;
+            // refuse and let the caller fall back to the menu.
+            return {RoomSelection::unmatched, 0};
+        }
+        found = true;
+        result = {RoomSelection::matched, index};
+    }
+    return result;
+}
+
+std::string read_preferred_room_seed() {
+    if (const auto seed =
+            read_machine_string(L"Software\\NSTU", L"PreferredRoom")) {
+        return wide_to_utf8(*seed);
+    }
+    return {};
 }
 
 } // namespace nstu::client

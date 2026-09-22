@@ -58,6 +58,14 @@ jobs:
           if ($null -ne $ps1) {
             throw "Installer must not package PowerShell scripts: $($ps1.FullName -join ', ')"
           }
+          # nstu-provision (the legacy file-copy enrollment tool) is deprecated:
+          # UI-driven pairing by room name replaces hand-copied enrollment
+          # secrets. The target stays buildable in the repo as a manual fallback
+          # but must never ship in the installer payload.
+          $provision = Get-ChildItem -Path $stage -Recurse -Filter nstu-provision.exe -File -ErrorAction SilentlyContinue
+          if ($null -ne $provision) {
+            throw "Installer must not package the deprecated nstu-provision.exe: $($provision.FullName -join ', ')"
+          }
           # Role binaries and the exam runtime web assets must be present.
           foreach ($required in @(
               'client\nstu-service.exe',

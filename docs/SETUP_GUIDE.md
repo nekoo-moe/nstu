@@ -57,7 +57,7 @@ pool. A practical layout keeps the router/gateway at `.1` and reserves an
 address such as `.10` for NSTU; do not assign the server the gateway address.
 This remains the simplest and most diagnosable production configuration.
 
-After authenticated provisioning, `nstu-service` treats the stored server IP
+After a client is enrolled, `nstu-service` treats the stored server IP
 as a cache. If TCP connection or mutual authentication fails, the client sends
 an HMAC-authenticated UDP discovery request on the configured control port,
 verifies the response with its enrollment PSK, completes the normal mutual TCP
@@ -148,8 +148,8 @@ below.
 
 ## Installer payload and operator scripts
 
-The unified installer ships only the role binaries (`nstu-service`, `nstu-agent`,
-`nstu-provision` for the client; `nstu-server` for the server), their MinGW
+The unified installer ships only the role binaries (`nstu-service` and
+`nstu-agent` for the client; `nstu-server` for the server), their MinGW
 runtimes, the standalone diagnostics helper, and the exam runtime assets
 (`exam/web`, `exam/schema`, `exam/examples`). It does **not** package any
 PowerShell scripts, documentation, or the repository-only `docs\assets\`
@@ -194,12 +194,44 @@ protection before staging removal.
 
 ## Enrollment
 
-After installing the server, create a one-time enrollment secret by running
-`packaging\new-enrollment-secret.ps1` from a source checkout. Provision each
-client with the installed `client\nstu-provision.exe`. Provisioning writes the
-authenticated DPAPI-protected runtime configuration used by `nstu-service`; the
-address entered in the installer is retained for diagnostics only until this
-exchange succeeds.
+Clients enroll by on-screen pairing; no secret file is copied to a student
+machine. On the teacher machine, open the server's pairing window ("Add
+computers"). Each student machine's agent sweeps the LAN for a server whose
+pairing window is open, runs the mutually authenticated exchange itself, and
+shows a six-digit code on its own screen. The same code appears in the server's
+pending list; the operator approves the request only when the two match. That
+six-digit comparison is the trust root. On approval, the client derives its
+protocol key from the transcript (the key is never transmitted) and stores the
+DPAPI-protected runtime configuration `nstu-service` uses. The address entered
+in the installer is retained for diagnostics only until pairing succeeds.
+
+### Targeting a room by name
+
+On a shared VLAN where several servers answer, give each student machine the
+room it belongs to and it pairs without anyone reading a menu. The server
+operator sets an optional room label in the server UI; it is advertised on the
+pairing beacon and shown next to the pending request. On the client, the
+installer's optional **Room name** field (or `/ROOM=` in a silent install)
+writes `HKLM\Software\NSTU\PreferredRoom`, and the agent auto-selects the
+server advertising that exact room (trimmed, case-insensitive). With no room
+set, or when no single server carries it, the client falls back to today's
+behavior: pair silently when only one server answers, otherwise show the
+selection menu. The room name is only a routing hint — the six-digit approval
+still gates every pairing, so a wrong or missing room degrades to the menu or a
+paused sweep, never to a silent mis-pairing.
+
+### Manual enrollment fallback (advanced)
+
+The earlier file-copy enrollment path is deprecated and no longer shipped in the
+installer, but the tools remain in the repository for recovery when on-screen
+pairing is unavailable (for example, a machine with no interactive session).
+From a source checkout of the matching release, create a one-time bootstrap
+secret with `packaging\new-enrollment-secret.ps1`, then run
+`client\nstu-provision.exe <server-ip> <port> <32-hex-client-id> <key-id>
+<enrollment-secret-file>` on each machine. It performs the same authenticated
+exchange, derives the PSK without sending it, and writes the DPAPI-protected
+configuration. Distribute the bootstrap export out of band and delete every copy
+once enrollment is complete.
 
 ## Build
 

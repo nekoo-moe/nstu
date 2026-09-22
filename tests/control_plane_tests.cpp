@@ -301,6 +301,53 @@ int main() {
                snapshot[0].status == nstu::server::ClientStatus::offline;
     }));
     control_plane.stop();
+
+    // Server-name plumbing (the room label carried on the pairing beacon). It
+    // is a display/routing hint, so it is sanitized to the discovery name bound
+    // but never trimmed, and it clears when the plane stops. No sockets are
+    // exercised here: server_name() reflects exactly what start() and
+    // set_server_name() stored.
+    {
+        nstu::server::ClientRegistry naming_registry;
+        nstu::security::KeyStore naming_key_store;
+        nstu::server::ServerControlPlane naming_plane(naming_registry,
+                                                      naming_key_store);
+        nstu::server::ServerControlPlaneConfig naming_config;
+        naming_config.port = 0;
+        // A control character in the configured name is replaced; printable
+        // ASCII, interior spaces included, is preserved.
+        naming_config.server_name = "Lab 7\tRoom";
+        assert(naming_plane.start(std::move(naming_config), &error));
+        assert(naming_plane.server_name() == "Lab 7?Room");
+
+        // set_server_name re-sanitizes but does not trim: surrounding spaces
+        // are kept, because a room label is not a credential to normalize.
+        naming_plane.set_server_name("  Room 12  ");
+        assert(naming_plane.server_name() == "  Room 12  ");
+
+        // Over-long names are clamped to the discovery name bound (64 bytes).
+        naming_plane.set_server_name(std::string(200, 'R'));
+        assert(naming_plane.server_name().size() == 64);
+
+        // Stopping clears the advertised name so a restart re-derives it.
+        naming_plane.stop();
+        assert(naming_plane.server_name().empty());
+    }
+
+    // An empty configured name leaves server_name() empty; the beacon then
+    // falls back to the computer name at the call site.
+    {
+        nstu::server::ClientRegistry unnamed_registry;
+        nstu::security::KeyStore unnamed_key_store;
+        nstu::server::ServerControlPlane unnamed_plane(unnamed_registry,
+                                                       unnamed_key_store);
+        nstu::server::ServerControlPlaneConfig unnamed_config;
+        unnamed_config.port = 0;
+        assert(unnamed_plane.start(std::move(unnamed_config), &error));
+        assert(unnamed_plane.server_name().empty());
+        unnamed_plane.stop();
+    }
+
     nstu::security::secure_zero(key);
     return 0;
 }

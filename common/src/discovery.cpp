@@ -216,21 +216,6 @@ std::uint64_t unix_seconds_now() noexcept {
                                           .count());
 }
 
-std::string sanitize_server_name(std::string_view name) {
-    std::string sanitized;
-    sanitized.reserve(std::min(name.size(), kMaximumServerNameBytes));
-    for (const char character : name) {
-        if (sanitized.size() == kMaximumServerNameBytes) {
-            break;
-        }
-        const auto code = static_cast<unsigned char>(character);
-        sanitized.push_back(code >= 0x20u && code < 0x7fu
-                                ? character
-                                : '?');
-    }
-    return sanitized;
-}
-
 std::vector<std::byte> pairing_digest_message(std::string_view domain,
                                               PairingPacketKind kind,
                                               const PairingBeacon& fields) {
@@ -577,6 +562,21 @@ std::optional<std::string> address_text(const sockaddr_in& address) {
 #endif
 
 } // namespace
+
+std::string sanitize_server_name(std::string_view name) {
+    std::string sanitized;
+    sanitized.reserve(std::min(name.size(), kMaximumServerNameBytes));
+    for (const char character : name) {
+        if (sanitized.size() == kMaximumServerNameBytes) {
+            break;
+        }
+        const auto code = static_cast<unsigned char>(character);
+        sanitized.push_back(code >= 0x20u && code < 0x7fu
+                                ? character
+                                : '?');
+    }
+    return sanitized;
+}
 
 std::optional<DiscoveryRequest> create_request(
     const security::ClientId& client_id, std::uint32_t key_id,

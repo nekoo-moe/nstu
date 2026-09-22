@@ -55,7 +55,7 @@ sơ đồ dễ quản trị là giữ router/gateway ở `.1` và dành địa c
 NSTU Server; không gán địa chỉ gateway cho server. Đây vẫn là cấu hình production
 đơn giản và dễ chẩn đoán nhất.
 
-Sau khi provision có xác thực, `nstu-service` chỉ xem IP server đã lưu là cache.
+Sau khi một client được enroll, `nstu-service` chỉ xem IP server đã lưu là cache.
 Nếu kết nối TCP hoặc mutual authentication thất bại, client gửi UDP discovery
 được xác thực bằng HMAC trên chính control port, kiểm tra response bằng PSK đã
 enroll, hoàn tất mutual TCP handshake rồi mới lưu IPv4 mới bằng DPAPI phạm vi
@@ -138,8 +138,8 @@ một lần vẫn thực hiện theo phần dưới.
 
 ## Payload installer và script vận hành
 
-Installer hợp nhất chỉ đóng gói binary theo vai trò (`nstu-service`,
-`nstu-agent`, `nstu-provision` cho client; `nstu-server` cho server), runtime
+Installer hợp nhất chỉ đóng gói binary theo vai trò (`nstu-service` và
+`nstu-agent` cho client; `nstu-server` cho server), runtime
 MinGW đi kèm, helper diagnostics độc lập và tài nguyên runtime bài thi
 (`exam/web`, `exam/schema`, `exam/examples`). Nó **không** đóng gói PowerShell
 script, tài liệu hay ảnh chỉ dùng cho repository trong `docs\assets\`. Standalone
@@ -179,11 +179,42 @@ khi stage gỡ.
 
 ## Enrollment
 
-Sau khi cài server, tạo secret một lần bằng cách chạy
-`packaging\new-enrollment-secret.ps1` từ source checkout, sau đó provision từng
-client bằng `client\nstu-provision.exe` đã cài. Provisioning ghi cấu hình runtime
-được DPAPI bảo vệ mà `nstu-service` sử dụng; IP nhập trong installer chỉ phục vụ
-diagnostics cho đến khi trao đổi có xác thực này thành công.
+Client enroll bằng pairing trên màn hình; không chép file secret nào lên máy học
+sinh. Trên máy giáo viên, mở cửa sổ pairing của server ("Thêm máy"). Agent trên
+mỗi máy học sinh quét LAN tìm server đang mở cửa sổ pairing, tự chạy trao đổi có
+xác thực hai chiều, và hiển thị mã sáu chữ số ngay trên màn hình máy đó. Cùng mã
+đó xuất hiện trong danh sách chờ của server; người vận hành chỉ duyệt yêu cầu khi
+hai mã trùng nhau. Phép so sánh sáu chữ số đó là gốc tin cậy. Khi được duyệt,
+client dẫn xuất protocol key từ transcript (key không bao giờ được truyền đi) và
+lưu cấu hình runtime được DPAPI bảo vệ mà `nstu-service` sử dụng. IP nhập trong
+installer chỉ phục vụ diagnostics cho đến khi pairing thành công.
+
+### Nhắm phòng theo tên
+
+Trên VLAN dùng chung nơi nhiều server cùng trả lời, gán cho mỗi máy học sinh
+phòng mà nó thuộc về và máy sẽ pair mà không ai phải đọc menu. Người vận hành
+đặt nhãn phòng tùy chọn trong giao diện server; nhãn được quảng bá trên pairing
+beacon và hiển thị cạnh yêu cầu chờ. Trên client, trường **Room name** tùy chọn
+của installer (hoặc `/ROOM=` khi cài im lặng) ghi
+`HKLM\Software\NSTU\PreferredRoom`, và agent tự chọn server quảng bá đúng phòng
+đó (đã trim, không phân biệt hoa thường). Khi không đặt phòng, hoặc khi không có
+server đơn lẻ nào mang phòng đó, client quay về hành vi hiện tại: pair im lặng
+khi chỉ một server trả lời, ngược lại hiển thị menu chọn. Tên phòng chỉ là gợi ý
+định tuyến — phép duyệt sáu chữ số vẫn kiểm soát mọi lần pairing, nên phòng sai
+hoặc thiếu chỉ hạ xuống menu hoặc một lượt quét tạm dừng, không bao giờ dẫn tới
+pairing nhầm âm thầm.
+
+### Enrollment thủ công dự phòng (nâng cao)
+
+Đường enroll bằng chép file trước đây đã bị deprecate và không còn được đóng gói
+trong installer, nhưng các tool vẫn ở trong repository để phục hồi khi pairing
+trên màn hình không khả dụng (ví dụ máy không có phiên tương tác). Từ một source
+checkout đúng phiên bản release, tạo secret bootstrap một lần bằng
+`packaging\new-enrollment-secret.ps1`, rồi chạy `client\nstu-provision.exe
+<server-ip> <port> <32-hex-client-id> <key-id> <enrollment-secret-file>` trên
+từng máy. Nó thực hiện cùng trao đổi có xác thực, dẫn xuất PSK mà không gửi đi,
+và ghi cấu hình được DPAPI bảo vệ. Phân phối file bootstrap ngoài băng và xóa mọi
+bản sao sau khi enroll xong.
 
 ## Build
 

@@ -1617,35 +1617,56 @@ bool attempt_pairing(const std::stop_token& stop_token,
     if (candidates.empty() || stop_token.stop_requested()) {
         return false;
     }
-    if (candidates.size() > nstu::client::kMaximumPairingChoices) {
-        candidates.resize(nstu::client::kMaximumPairingChoices);
-    }
-    // One server on the LAN is the ordinary classroom, and asking a
-    // student to pick the only name on a list teaches them nothing. The
-    // approval on the far side is what makes this safe to skip, not the
-    // menu.
+    // A room preference from the installer routes this machine straight to its
+    // own classroom's server when that server is answering, so a labelled fleet
+    // pairs with no menu at all. It is only a hint: the operator's six-digit
+    // approval still gates the pairing, so a wrong or absent room degrades to
+    // the menu or a paused sweep, never to a silent mis-pairing. Matching runs
+    // against the full sweep result, before the menu clamp below, so a server
+    // beyond the menu bound can still be found by name.
+    const std::string preferred_room = nstu::client::read_preferred_room_seed();
+    const auto room_selection = nstu::client::select_preferred_room_candidate(
+        candidates, preferred_room);
     std::size_t chosen = 0;
-    if (candidates.size() > 1) {
-        std::vector<nstu::client::AgentPairingChoice> choices;
-        choices.reserve(candidates.size());
-        for (const auto& candidate : candidates) {
-            choices.push_back({candidate.server_name, candidate.address,
-                               candidate.port});
+    if (room_selection.kind == nstu::client::RoomSelection::matched) {
+        chosen = room_selection.index;
+    } else if (room_selection.kind ==
+               nstu::client::RoomSelection::unmatched) {
+        // A room was asked for but no single server here carries it. Rather
+        // than pair to the wrong classroom, wait for the next sweep by which
+        // time the right server may have come up.
+        return false;
+    } else {
+        // No preference configured: today's behaviour. Clamp to the menu bound,
+        // then let a student skip the menu only when there is one server. One
+        // server on the LAN is the ordinary classroom, and asking a student to
+        // pick the only name on a list teaches them nothing; the approval on
+        // the far side is what makes this safe to skip, not the menu.
+        if (candidates.size() > nstu::client::kMaximumPairingChoices) {
+            candidates.resize(nstu::client::kMaximumPairingChoices);
         }
-        auto payload =
-            nstu::client::encode_agent_pairing_choices(choices);
-        if (payload.empty()) {
-            return false;
+        if (candidates.size() > 1) {
+            std::vector<nstu::client::AgentPairingChoice> choices;
+            choices.reserve(candidates.size());
+            for (const auto& candidate : candidates) {
+                choices.push_back({candidate.server_name, candidate.address,
+                                   candidate.port});
+            }
+            auto payload =
+                nstu::client::encode_agent_pairing_choices(choices);
+            if (payload.empty()) {
+                return false;
+            }
+            open_pairing_menu(candidates.size());
+            queue_agent_message(
+                {nstu::client::AgentMessageType::pairing_choices,
+                 std::move(payload)});
+            const auto selection = await_pairing_selection(stop_token);
+            if (!selection) {
+                return false;
+            }
+            chosen = *selection;
         }
-        open_pairing_menu(candidates.size());
-        queue_agent_message(
-            {nstu::client::AgentMessageType::pairing_choices,
-             std::move(payload)});
-        const auto selection = await_pairing_selection(stop_token);
-        if (!selection) {
-            return false;
-        }
-        chosen = *selection;
     }
 
     std::string identity_error;
@@ -1673,6 +1694,11 @@ bool attempt_pairing(const std::stop_token& stop_token,
         queue_pairing_status(result.outcome, error);
         return false;
     }
+    // Carry the room this machine was told to prefer into its identity so a
+    // later re-pair (after a reset) keeps routing to the same classroom without
+    // needing the installer's registry seed a second time. Empty when no
+    // preference was set, which is the common case.
+    result.config.preferred_room = preferred_room;
     std::string save_error;
     const bool saved = nstu::client::save_client_runtime_config(
         result.config, path.wstring(), entropy, &save_error);

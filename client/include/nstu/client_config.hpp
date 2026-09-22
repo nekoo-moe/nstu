@@ -19,6 +19,12 @@ struct ClientRuntimeConfig {
     security::ClientId client_id{};
     std::uint32_t key_id = 0;
     std::vector<std::byte> pre_shared_key;
+    // Optional classroom label this machine prefers when several servers answer
+    // the pre-enrollment sweep on a shared VLAN. A routing hint, never a
+    // credential: the six-digit SAS still gates every pairing. Empty means "no
+    // preference" (today's sole-candidate/menu behavior). Seeded from the
+    // installer's registry value on first pair, then carried in this blob.
+    std::string preferred_room;
 };
 
 [[nodiscard]] bool save_client_runtime_config(

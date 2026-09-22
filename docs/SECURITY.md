@@ -78,14 +78,27 @@ copies. `save_keyring` and `load_keyring` serialize active entries and revoked-I
 tombstones into a versioned binary format protected with machine-scope DPAPI,
 restrictive ACLs, flush, and atomic replacement.
 
-Initial enrollment uses a one-time 256-bit bootstrap secret. The client sends a
-fresh nonce, timestamp, identity, requested key ID, and HMAC. Both peers derive
-the installed PSK from the bootstrap secret and transcript, so the PSK itself is
-not transmitted. The server applies clock and replay checks before enrollment,
-persists the keyring before acknowledging, and rolls back the in-memory change
-if persistence fails. `nstu-provision.exe` stores the resulting client runtime
-configuration under machine-scope DPAPI. The bootstrap export must be distributed
-out of band and deleted after enrollment.
+Initial enrollment is normally done by on-screen pairing, which needs no
+pre-shared bootstrap secret. The unenrolled client runs the mutually
+authenticated exchange itself and displays a six-digit short authentication
+string; the server operator approves the request only when the code shown on the
+client matches the one in the server's pending list. That out-of-band six-digit
+comparison is the trust root — a channel an attacker cannot forge without being
+physically present at both screens. On approval the server mints a fresh key,
+derives the installed PSK from the transcript (the PSK is never transmitted),
+applies clock and replay checks, persists the keyring before acknowledging, and
+rolls back the in-memory change if persistence fails. An optional operator-set
+room name is carried on the pairing beacon purely as a routing hint so a client
+targets the right classroom; it is never a credential and never weakens the SAS
+check.
+
+A deprecated manual fallback remains for machines that cannot pair on screen. It
+uses a one-time 256-bit bootstrap secret: the client sends a fresh nonce,
+timestamp, identity, requested key ID, and HMAC, and both peers derive the
+installed PSK from the bootstrap secret and transcript. The provisioning tool
+stores the resulting client runtime configuration under machine-scope DPAPI. The
+bootstrap export must be distributed out of band and deleted after enrollment.
+This path is no longer shipped in the installer.
 
 ## Authenticated LAN endpoint discovery
 

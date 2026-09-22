@@ -224,6 +224,14 @@ if(TARGET nstu_client_platform)
     nstu_enable_test_assertions(nstu_client_ipc_tests)
     add_test(NAME nstu.client_ipc COMMAND nstu_client_ipc_tests)
 
+    # The persisted-config codec lives in nstu_client_platform; DPAPI comes in
+    # transitively via nstu_common, so this test needs no server state.
+    add_executable(nstu_client_config_tests client_config_tests.cpp)
+    target_link_libraries(nstu_client_config_tests PRIVATE nstu_client_platform)
+    nstu_enable_warnings(nstu_client_config_tests)
+    nstu_enable_test_assertions(nstu_client_config_tests)
+    add_test(NAME nstu.client_config COMMAND nstu_client_config_tests)
+
     if(TARGET nstu_server_state)
         add_executable(nstu_client_control_tests client_control_tests.cpp)
         target_link_libraries(nstu_client_control_tests PRIVATE

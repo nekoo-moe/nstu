@@ -94,6 +94,14 @@ inline constexpr std::size_t kMaximumServerNameBytes = 64;
 inline constexpr std::size_t kPairingProbeBytes = 80;
 inline constexpr std::size_t kMaximumDiscoveryDatagramBytes = 256;
 
+// Clamps a proposed display/room name to the bound the pairing beacon enforces:
+// at most kMaximumServerNameBytes, printable ASCII only (control and non-ASCII
+// bytes become '?'). The beacon sanitizes names with this, and the
+// operator-facing room-name setter reuses it so a persisted name can never
+// exceed or corrupt what the beacon will carry. Purely a display hint, never a
+// credential.
+[[nodiscard]] std::string sanitize_server_name(std::string_view name);
+
 // A machine that has never paired holds no key, so there is nothing for it to
 // authenticate with and nothing for it to check the reply against. This sweep
 // therefore produces candidates only - the name and port are hints for the
