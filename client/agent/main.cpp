@@ -742,9 +742,12 @@ void pipe_control_loop(HWND overlay) {
                            nstu::client::AgentMessageType::chat) {
                     const auto chat = utf8_to_wide(message->payload);
                     if (!chat.empty()) {
+                        // Label the sender so the student can tell teacher
+                        // messages apart from their own "You:" lines.
+                        const std::wstring labeled = L"Teacher: " + chat;
                         SendMessageW(overlay, kAgentCommandMessage,
                                      static_cast<WPARAM>(message->type),
-                                     reinterpret_cast<LPARAM>(chat.c_str()));
+                                     reinterpret_cast<LPARAM>(labeled.c_str()));
                     }
                 } else if (message->type ==
                            nstu::client::AgentMessageType::remote_start) {
@@ -952,6 +955,23 @@ void submit_chat_message() {
                    static_cast<int>(std::size(message_text)));
     if (message_text[0] == L'\0') {
         return;
+    }
+    // Relay the raw line to the teacher through the service. Discovery/UI runs
+    // on this thread; the pipe thread drains the bounded service queue, so this
+    // never blocks on the socket.
+    const int utf8_length = WideCharToMultiByte(CP_UTF8, 0, message_text, -1,
+                                                nullptr, 0, nullptr, nullptr);
+    if (utf8_length > 1) {
+        std::string utf8(static_cast<std::size_t>(utf8_length - 1), '\0');
+        if (WideCharToMultiByte(CP_UTF8, 0, message_text, -1, utf8.data(),
+                                utf8_length, nullptr, nullptr) > 0) {
+            std::vector<std::byte> payload(
+                reinterpret_cast<const std::byte*>(utf8.data()),
+                reinterpret_cast<const std::byte*>(utf8.data()) + utf8.size());
+            queue_service_message(
+                {nstu::client::AgentMessageType::chat_submit,
+                 std::move(payload)});
+        }
     }
     wchar_t line[540]{};
     swprintf_s(line, L"You: %s", message_text);

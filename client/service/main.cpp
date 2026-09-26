@@ -818,6 +818,16 @@ void agent_pipe_loop() {
                             nstu::protocol::CommandType::exam_state_request,
                             std::move(message->payload));
                     }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::chat_submit) {
+                    // Relay the student's chat line to the teacher. The server
+                    // validates and stores it; bound the size here to match.
+                    if (!message->payload.empty() &&
+                        message->payload.size() <= 4096) {
+                        queue_outbound_message(
+                            nstu::protocol::CommandType::client_chat,
+                            std::move(message->payload));
+                    }
                 }
             }
             Sleep(25);

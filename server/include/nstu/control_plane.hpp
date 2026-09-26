@@ -53,6 +53,14 @@ struct PairingDiscoveryStats {
     std::uint64_t beacons_sent = 0;
 };
 
+// One line of the per-client chat transcript kept for the teacher UI. A
+// display convenience only - never exam or answer content, which lives in the
+// server-owned journal and audit sink.
+struct ChatMessage {
+    bool from_teacher = false;
+    std::string text;
+};
+
 class ServerControlPlane {
 public:
     ServerControlPlane(ClientRegistry& registry,
@@ -99,6 +107,10 @@ public:
     [[nodiscard]] bool send_chat(std::uint64_t client_id,
                                  std::string_view utf8_message,
                                  std::string* error = nullptr);
+    // Per-client chat transcript for the teacher UI, oldest first. Includes
+    // both teacher-sent lines and messages received from the client.
+    [[nodiscard]] std::vector<ChatMessage> chat_history(
+        std::uint64_t client_id) const;
     [[nodiscard]] bool start_remote_control(std::uint64_t client_id,
                                             std::string* error = nullptr);
     [[nodiscard]] bool send_remote_input(

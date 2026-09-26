@@ -93,6 +93,10 @@ enum class CommandType : std::uint16_t {
     // sanitized, sequence-acknowledged, and rate limited on the server.
     audit_upload = 49,
     audit_ack = 50,
+    // Client-to-server chat. The teacher's chat panel keeps a per-client
+    // transcript; the client submits its own lines over the authenticated
+    // control channel (the reverse direction reuses `chat`).
+    client_chat = 51,
 };
 
 enum class ConnectionRole : std::uint8_t {

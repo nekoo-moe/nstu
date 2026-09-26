@@ -2037,8 +2037,26 @@ void draw_selected_client(
 
     if (ImGui::BeginChild("chat-panel", {0, 112.0f}, true)) {
         ImGui::TextUnformatted(tr(state, "Chat", "Trò chuyện"));
-        ImGui::TextDisabled("%s", tr(state, "No messages in this session.",
-                                      "Chưa có tin nhắn trong phiên này."));
+        const auto chat_log = control_plane.chat_history(selected_client->id);
+        if (ImGui::BeginChild("chat-log", {0, 52.0f}, true)) {
+            if (chat_log.empty()) {
+                ImGui::TextDisabled(
+                    "%s", tr(state, "No messages in this session.",
+                             "Chưa có tin nhắn trong phiên này."));
+            } else {
+                for (const auto& entry : chat_log) {
+                    const char* who =
+                        entry.from_teacher
+                            ? tr(state, "Teacher", "Giáo viên")
+                            : selected_client->hostname.c_str();
+                    ImGui::TextWrapped("%s: %s", who, entry.text.c_str());
+                }
+                if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) {
+                    ImGui::SetScrollHereY(1.0f);
+                }
+            }
+        }
+        ImGui::EndChild();
         ImGui::SetNextItemWidth(-78.0f);
         const bool submit = ImGui::InputText(
             "##chat-input", state.chat_input.data(), state.chat_input.size(),
