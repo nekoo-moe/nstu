@@ -742,9 +742,12 @@ void pipe_control_loop(HWND overlay) {
                            nstu::client::AgentMessageType::chat) {
                     const auto chat = utf8_to_wide(message->payload);
                     if (!chat.empty()) {
+                        // Label the sender so the student can tell teacher
+                        // messages apart from their own "You:" lines.
+                        const std::wstring labeled = L"Teacher: " + chat;
                         SendMessageW(overlay, kAgentCommandMessage,
                                      static_cast<WPARAM>(message->type),
-                                     reinterpret_cast<LPARAM>(chat.c_str()));
+                                     reinterpret_cast<LPARAM>(labeled.c_str()));
                     }
                 } else if (message->type ==
                            nstu::client::AgentMessageType::remote_start) {
@@ -800,6 +803,51 @@ void pipe_control_loop(HWND overlay) {
                     }
                     PostMessageW(g_annotation_window,
                                  kAnnotationUpdatedMessage, 0, 0);
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::overlay_erase) {
+                    const auto path = nstu::control::decode_overlay_stroke(
+                        message->payload);
+                    if (path) {
+                        bool changed = false;
+                        {
+                            std::scoped_lock lock(g_annotation_mutex);
+                            // Strokes and the erase path share the 0..65535
+                            // normalized space. Remove any stroke with an
+                            // endpoint inside the erase brush around either end
+                            // of this path segment; freehand strokes are short,
+                            // so endpoint proximity tracks the cursor well.
+                            const double radius =
+                                std::max(1200.0,
+                                         static_cast<double>(path->thickness) *
+                                             400.0);
+                            const double r2 = radius * radius;
+                            const auto near_end = [&](std::uint16_t sx,
+                                                      std::uint16_t sy) {
+                                const double d0x =
+                                    static_cast<double>(sx) - path->x0;
+                                const double d0y =
+                                    static_cast<double>(sy) - path->y0;
+                                const double d1x =
+                                    static_cast<double>(sx) - path->x1;
+                                const double d1y =
+                                    static_cast<double>(sy) - path->y1;
+                                return (d0x * d0x + d0y * d0y) <= r2 ||
+                                       (d1x * d1x + d1y * d1y) <= r2;
+                            };
+                            const auto before = g_annotation_strokes.size();
+                            std::erase_if(
+                                g_annotation_strokes,
+                                [&](const nstu::control::OverlayStroke& s) {
+                                    return near_end(s.x0, s.y0) ||
+                                           near_end(s.x1, s.y1);
+                                });
+                            changed = g_annotation_strokes.size() != before;
+                        }
+                        if (changed) {
+                            PostMessageW(g_annotation_window,
+                                         kAnnotationUpdatedMessage, 0, 0);
+                        }
+                    }
                 } else if (message->type ==
                            nstu::client::AgentMessageType::host_snapshot) {
                     const auto frame = nstu::control::decode_snapshot_frame(
@@ -952,6 +1000,23 @@ void submit_chat_message() {
                    static_cast<int>(std::size(message_text)));
     if (message_text[0] == L'\0') {
         return;
+    }
+    // Relay the raw line to the teacher through the service. Discovery/UI runs
+    // on this thread; the pipe thread drains the bounded service queue, so this
+    // never blocks on the socket.
+    const int utf8_length = WideCharToMultiByte(CP_UTF8, 0, message_text, -1,
+                                                nullptr, 0, nullptr, nullptr);
+    if (utf8_length > 1) {
+        std::string utf8(static_cast<std::size_t>(utf8_length - 1), '\0');
+        if (WideCharToMultiByte(CP_UTF8, 0, message_text, -1, utf8.data(),
+                                utf8_length, nullptr, nullptr) > 0) {
+            std::vector<std::byte> payload(
+                reinterpret_cast<const std::byte*>(utf8.data()),
+                reinterpret_cast<const std::byte*>(utf8.data()) + utf8.size());
+            queue_service_message(
+                {nstu::client::AgentMessageType::chat_submit,
+                 std::move(payload)});
+        }
     }
     wchar_t line[540]{};
     swprintf_s(line, L"You: %s", message_text);

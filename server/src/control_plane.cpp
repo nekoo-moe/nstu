@@ -633,6 +633,14 @@ public:
         return pairing_window_open_;
     }
 
+    PairingDiscoveryStats pairing_discovery_stats() const noexcept {
+        return {
+            .beacon_enabled = discovery_responder_.pairing_beacon_enabled(),
+            .probes_received = discovery_responder_.pairing_probes_received(),
+            .beacons_sent = discovery_responder_.pairing_beacons_sent(),
+        };
+    }
+
     std::string server_name() const {
         std::scoped_lock pairing_lock(pairing_mutex_);
         return server_name_;
@@ -1523,6 +1531,17 @@ private:
             }
             return true;
         }
+        if (command->envelope.type == protocol::CommandType::client_chat) {
+            // Lenient by design: ignore an empty or oversized line rather than
+            // dropping the connection. Chat is not security-critical.
+            if (!command->payload.empty() && command->payload.size() <= 4096) {
+                record_chat(state.registry_id.load(), false,
+                            std::string(reinterpret_cast<const char*>(
+                                            command->payload.data()),
+                                        command->payload.size()));
+            }
+            return true;
+        }
         return true;
     }
 
@@ -1661,6 +1680,30 @@ public:
     // credential: sanitized to the discovery name bound, empty means "not set".
     std::string server_name_;
     std::uint64_t next_pairing_id_ = 1;
+    // Per-client chat transcript for the teacher UI. A display convenience,
+    // bounded so a long lesson cannot grow it without limit. Never holds exam
+    // or answer content, which stay in the journal and audit sink.
+    mutable std::mutex chat_mutex_;
+    std::unordered_map<std::uint64_t, std::vector<ChatMessage>> chat_history_;
+    void record_chat(std::uint64_t id, bool from_teacher, std::string text) {
+        if (text.empty()) {
+            return;
+        }
+        std::scoped_lock lock(chat_mutex_);
+        auto& log = chat_history_[id];
+        log.push_back(ChatMessage{from_teacher, std::move(text)});
+        constexpr std::size_t kMaxChatEntries = 200;
+        if (log.size() > kMaxChatEntries) {
+            log.erase(log.begin(),
+                      log.begin() + (log.size() - kMaxChatEntries));
+        }
+    }
+    std::vector<ChatMessage> chat_snapshot(std::uint64_t id) const {
+        std::scoped_lock lock(chat_mutex_);
+        const auto it = chat_history_.find(id);
+        return it == chat_history_.end() ? std::vector<ChatMessage>{}
+                                         : it->second;
+    }
     mutable std::mutex states_mutex_;
     mutable std::mutex exam_contexts_mutex_;
     std::unordered_map<net::ConnectionId,
@@ -1695,6 +1738,11 @@ void ServerControlPlane::set_pairing_window(bool open,
 
 bool ServerControlPlane::pairing_window_open() const noexcept {
     return impl_->pairing_window_open();
+}
+
+PairingDiscoveryStats
+ServerControlPlane::pairing_discovery_stats() const noexcept {
+    return impl_->pairing_discovery_stats();
 }
 
 std::string ServerControlPlane::server_name() const {
@@ -1805,6 +1853,18 @@ bool ServerControlPlane::send_overlay_stroke(
                         payload, error);
 }
 
+bool ServerControlPlane::send_overlay_erase(
+    std::uint64_t client_id, const control::OverlayStroke& stroke,
+    std::string* error) {
+    const auto payload = control::encode_overlay_stroke(stroke);
+    if (payload.empty()) {
+        set_error(error, "invalid overlay erase path");
+        return false;
+    }
+    return send_command(client_id, protocol::CommandType::overlay_erase,
+                        payload, error);
+}
+
 bool ServerControlPlane::clear_overlay(std::uint64_t client_id,
                                        std::string* error) {
     return send_command(client_id, protocol::CommandType::overlay_clear, {},
@@ -1843,7 +1903,17 @@ bool ServerControlPlane::send_chat(std::uint64_t client_id,
     const auto payload = std::span<const std::byte>(
         reinterpret_cast<const std::byte*>(utf8_message.data()),
         utf8_message.size());
-    return send_command(client_id, protocol::CommandType::chat, payload, error);
+    if (!send_command(client_id, protocol::CommandType::chat, payload,
+                      error)) {
+        return false;
+    }
+    impl_->record_chat(client_id, true, std::string(utf8_message));
+    return true;
+}
+
+std::vector<ChatMessage> ServerControlPlane::chat_history(
+    std::uint64_t client_id) const {
+    return impl_->chat_snapshot(client_id);
 }
 
 bool ServerControlPlane::start_remote_control(std::uint64_t client_id,

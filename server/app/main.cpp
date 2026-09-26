@@ -403,6 +403,7 @@ enum class AnnotationTool : int {
     arrow,
     rectangle,
     ellipse,
+    eraser,
 };
 
 Language g_language = Language::english;
@@ -412,6 +413,11 @@ struct DashboardState {
     RoomFilter room_filter = RoomFilter::all;
     std::uint64_t selected_client_id = 0;
     int snapshot_interval_seconds = 7;
+    // When set, every online computer is snapshotted continuously without the
+    // operator clicking "Start snapshots" per machine; a periodic sweep re-arms
+    // any client that reconnects. Turn it off to manage snapshots per computer.
+    bool auto_monitor = true;
+    std::chrono::steady_clock::time_point next_auto_monitor_sweep{};
     Language language = Language::english;
     bool dark_mode = false;
     bool show_offline = true;
@@ -432,6 +438,7 @@ struct DashboardState {
     std::chrono::steady_clock::time_point next_host_snapshot{};
     std::string control_status;
     std::string pairing_status;
+    bool pairing_panel_open = false;
     std::string startup_error;
     std::string telemetry_report_preview;
     bool telemetry_report_requested = false;
@@ -750,11 +757,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             return 0;
         }
     }
-    if (message == WM_SYSCOMMAND &&
-        (wparam & 0xfff0u) == SC_MINIMIZE) {
-        ShowWindow(window, SW_HIDE);
-        return 0;
-    }
+    // Minimize behaves like a normal window and goes to the taskbar; only
+    // closing hides NSTU to the system tray. Operators expect a plain minimize
+    // here, so SC_MINIMIZE falls through to DefWindowProc's standard handling.
     if (message == WM_CLOSE) {
         ShowWindow(window, SW_HIDE);
         return 0;
@@ -1518,11 +1523,27 @@ void draw_selected_client(
             "Chặn dừng dịch vụ và gỡ cài đặt cho đến khi tắt tại đây hoặc bởi quản trị viên cục bộ."));
     }
     ImGui::SameLine();
+    // Requirement check before activation: if the client has already reported
+    // that its Windows edition/feature set cannot support reboot-to-restore,
+    // do not let the operator arm it - the attempt would only fail on the box.
+    const bool uwf_unsupported =
+        selected_client->uwf.reported &&
+        selected_client->uwf.phase == nstu::control::UwfFleetPhase::unsupported;
+    ImGui::BeginDisabled(uwf_unsupported);
     if (ImGui::Button(tr(state, "Enable reboot-to-restore",
                          "Bật khôi phục sau reboot"))) {
         state.uwf_confirmation_client_id = selected_client->id;
         state.uwf_confirmation_open = true;
         ImGui::OpenPopup("uwf-confirmation");
+    }
+    ImGui::EndDisabled();
+    if (uwf_unsupported &&
+        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tr(state,
+            "This computer does not meet reboot-to-restore requirements "
+            "(unsupported Windows edition or missing Unified Write Filter).",
+            "Máy này không đáp ứng yêu cầu khôi phục sau reboot (phiên bản "
+            "Windows không hỗ trợ hoặc thiếu Unified Write Filter)."));
     }
     if (selected_client->uwf.reported ||
         selected_client->uwf.phase !=
@@ -1705,6 +1726,24 @@ void draw_selected_client(
             (void)control_plane.send_overlay_stroke(
                 selected_client->id, stroke, &ignored_error);
         };
+        const auto send_erase = [&](ImVec2 start, ImVec2 end) {
+            const ImVec2 first = normalized(clamp_to_surface(start));
+            const ImVec2 last = normalized(clamp_to_surface(end));
+            const nstu::control::OverlayStroke path{
+                .x0 = static_cast<std::uint16_t>(first.x),
+                .y0 = static_cast<std::uint16_t>(first.y),
+                .x1 = static_cast<std::uint16_t>(last.x),
+                .y1 = static_cast<std::uint16_t>(last.y),
+                .thickness = static_cast<std::uint16_t>(
+                    state.annotation_thickness),
+                // Colour is ignored for erase; a non-zero alpha only satisfies
+                // the shared stroke codec.
+                .rgba = 0xffffffffu,
+            };
+            std::string ignored_error;
+            (void)control_plane.send_overlay_erase(
+                selected_client->id, path, &ignored_error);
+        };
         const auto send_shape = [&](ImVec2 start, ImVec2 end) {
             const float left = std::min(start.x, end.x);
             const float right = std::max(start.x, end.x);
@@ -1759,6 +1798,7 @@ void draw_selected_client(
                 break;
             }
             case AnnotationTool::pen:
+            case AnnotationTool::eraser:
                 break;
             }
         };
@@ -1766,20 +1806,29 @@ void draw_selected_client(
             state.annotation_dragging = true;
             state.previous_annotation_point = mouse;
         }
+        const bool freehand = state.annotation_tool == AnnotationTool::pen ||
+                              state.annotation_tool == AnnotationTool::eraser;
         if (state.annotation_dragging &&
-            ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
-            state.annotation_tool == AnnotationTool::pen && inside) {
+            ImGui::IsMouseDown(ImGuiMouseButton_Left) && freehand && inside) {
             const float delta_x = mouse.x - state.previous_annotation_point.x;
             const float delta_y = mouse.y - state.previous_annotation_point.y;
             if (delta_x * delta_x + delta_y * delta_y >= 9.0f) {
-                send_segment(state.previous_annotation_point, mouse);
+                if (state.annotation_tool == AnnotationTool::eraser) {
+                    send_erase(state.previous_annotation_point, mouse);
+                } else {
+                    send_segment(state.previous_annotation_point, mouse);
+                }
                 state.previous_annotation_point = mouse;
             }
         }
         if (state.annotation_dragging &&
             ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
             const ImVec2 end = inside ? mouse : state.previous_annotation_point;
-            if (state.annotation_tool != AnnotationTool::pen) {
+            if (state.annotation_tool == AnnotationTool::eraser) {
+                if (inside) {
+                    send_erase(state.previous_annotation_point, end);
+                }
+            } else if (state.annotation_tool != AnnotationTool::pen) {
                 send_shape(state.previous_annotation_point, end);
             } else if (inside) {
                 send_segment(state.previous_annotation_point, end);
@@ -1804,6 +1853,7 @@ void draw_selected_client(
     ImGui::PushStyleColor(
         ImGuiCol_Text, g_dark_mode ? ImVec4{0.10f, 0.10f, 0.09f, 1.0f}
                                    : ImVec4{1.0f, 1.0f, 1.0f, 1.0f});
+    ImGui::BeginDisabled(state.auto_monitor);
     if (ImGui::Button(selected_client->snapshotting
                           ? tr(state, "Stop snapshots", "Dừng chụp")
                           : tr(state, "Start snapshots", "Bắt đầu chụp"))) {
@@ -1824,6 +1874,15 @@ void draw_selected_client(
                                      error);
         }
         ImGui::OpenPopup("control-status");
+    }
+    ImGui::EndDisabled();
+    if (state.auto_monitor &&
+        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tr(state,
+            "Automatic monitoring is on. Turn it off in Settings to control "
+            "snapshots per computer.",
+            "Đang bật theo dõi tự động. Tắt trong Cài đặt để điều khiển "
+            "snapshot theo từng máy."));
     }
     ImGui::PopStyleColor(4);
     ImGui::SameLine();
@@ -1960,15 +2019,15 @@ void draw_selected_client(
         ImGui::SameLine();
         const char* tool_items =
             state.language == Language::vietnamese
-                ? "Bút\0Thước\0Mũi tên\0Hình chữ nhật\0Elip\0"
-                : "Pen\0Ruler\0Arrow\0Rectangle\0Ellipse\0";
+                ? "Bút\0Thước\0Mũi tên\0Hình chữ nhật\0Elip\0Tẩy\0"
+                : "Pen\0Ruler\0Arrow\0Rectangle\0Ellipse\0Eraser\0";
         int tool_index = static_cast<int>(state.annotation_tool);
         ImGui::SetNextItemWidth(150.0f);
         if (ImGui::Combo(tr(state, "Tool", "Công cụ"), &tool_index,
                          tool_items)) {
             state.annotation_tool = static_cast<AnnotationTool>(
                 std::clamp(tool_index, 0,
-                           static_cast<int>(AnnotationTool::ellipse)));
+                           static_cast<int>(AnnotationTool::eraser)));
             state.annotation_dragging = false;
         }
         ImGui::SameLine();
@@ -2023,8 +2082,26 @@ void draw_selected_client(
 
     if (ImGui::BeginChild("chat-panel", {0, 112.0f}, true)) {
         ImGui::TextUnformatted(tr(state, "Chat", "Trò chuyện"));
-        ImGui::TextDisabled("%s", tr(state, "No messages in this session.",
-                                      "Chưa có tin nhắn trong phiên này."));
+        const auto chat_log = control_plane.chat_history(selected_client->id);
+        if (ImGui::BeginChild("chat-log", {0, 52.0f}, true)) {
+            if (chat_log.empty()) {
+                ImGui::TextDisabled(
+                    "%s", tr(state, "No messages in this session.",
+                             "Chưa có tin nhắn trong phiên này."));
+            } else {
+                for (const auto& entry : chat_log) {
+                    const char* who =
+                        entry.from_teacher
+                            ? tr(state, "Teacher", "Giáo viên")
+                            : selected_client->hostname.c_str();
+                    ImGui::TextWrapped("%s: %s", who, entry.text.c_str());
+                }
+                if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) {
+                    ImGui::SetScrollHereY(1.0f);
+                }
+            }
+        }
+        ImGui::EndChild();
         ImGui::SetNextItemWidth(-78.0f);
         const bool submit = ImGui::InputText(
             "##chat-input", state.chat_input.data(), state.chat_input.size(),
@@ -2117,6 +2194,13 @@ void draw_preferences(DashboardState& state) {
     ImGui::TextWrapped("%s", tr(state,
         "Snapshot commands use this interval for room monitoring and teacher broadcast.",
         "Chu kỳ này được dùng cho snapshot phòng máy và phát màn hình giáo viên."));
+    ImGui::Checkbox(
+        tr(state, "Monitor every computer automatically",
+           "Tự động theo dõi mọi máy"),
+        &state.auto_monitor);
+    ImGui::TextWrapped("%s", tr(state,
+        "When on, every online computer streams snapshots continuously; turn it off to start and stop snapshots per computer.",
+        "Khi bật, mọi máy trực tuyến sẽ gửi snapshot liên tục; tắt để bật/tắt snapshot theo từng máy."));
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::TextDisabled("%s", tr(state, "Optional diagnostics",
@@ -2181,41 +2265,6 @@ void draw_preferences(DashboardState& state) {
         }
     }
     ImGui::EndPopup();
-}
-
-void set_room_snapshots(
-    const std::vector<nstu::server::ClientRecord>& clients,
-    DashboardState& state, nstu::server::ServerControlPlane& control_plane,
-    bool enabled) {
-    std::size_t sent = 0;
-    std::string last_error;
-    for (const auto& client : clients) {
-        if (client.status == nstu::server::ClientStatus::offline) {
-            continue;
-        }
-        std::string error;
-        if (control_plane.set_snapshots(
-                client.id, enabled,
-                static_cast<std::uint16_t>(state.snapshot_interval_seconds),
-                &error)) {
-            ++sent;
-        } else {
-            last_error = std::move(error);
-        }
-    }
-    if (sent == 0 && !last_error.empty()) {
-        record_operation_failure("Snapshots", "Room command failed",
-                                 last_error);
-    }
-    state.control_status = sent == 0
-        ? (last_error.empty()
-               ? tr(state, "No online clients are available.",
-                    "Không có máy trực tuyến để điều khiển.")
-               : std::move(last_error))
-        : (enabled ? tr(state, "Room snapshots started.",
-                        "Đã bắt đầu chụp toàn phòng.")
-                   : tr(state, "Room snapshots stopped.",
-                        "Đã dừng chụp toàn phòng."));
 }
 
 void set_room_lock(const std::vector<nstu::server::ClientRecord>& clients,
@@ -2583,9 +2632,20 @@ void draw_pairing_popup(DashboardState& state,
                         nstu::server::ServerControlPlane& control_plane) {
     constexpr float button_width = 140.0f;
     ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - 242.0f);
-    if (ImGui::Button(tr(state, "Add computers", "Thêm máy"),
-                      {button_width, 28.0f})) {
-        state.pairing_status.clear();
+    bool focus_panel = false;
+    if (ImGui::Button(
+            tr(state,
+               state.pairing_panel_open ? "Pairing active" : "Add computers",
+               state.pairing_panel_open ? "Đang ghép nối" : "Thêm máy"),
+            {button_width, 28.0f})) {
+        if (!state.pairing_panel_open) {
+            state.pairing_status.clear();
+            state.pairing_panel_open = true;
+        }
+        focus_panel = true;
+    }
+
+    if (state.pairing_panel_open && !control_plane.pairing_window_open()) {
         // Seed the editable field from the live room label so it shows what the
         // beacon is currently advertising (empty means "using the computer
         // name"). The configured name already wins inside set_pairing_window,
@@ -2595,28 +2655,57 @@ void draw_pairing_popup(DashboardState& state,
                       state.room_name_input.size(), "%s",
                       current_room.c_str());
         control_plane.set_pairing_window(true, local_server_name());
-        ImGui::OpenPopup("pairing-popup");
     }
-    bool staying_open = true;
-    if (ImGui::BeginPopupModal(
-            tr(state, "Add computers###pairing-popup",
-               "Thêm máy###pairing-popup"),
-            &staying_open, ImGuiWindowFlags_AlwaysAutoResize)) {
-        draw_room_name_field(state, control_plane);
-        ImGui::Separator();
-        draw_pairing_requests(state, control_plane);
-        ImGui::Separator();
-        if (ImGui::Button(tr(state, "Done", "Xong"), {110.0f, 30.0f})) {
-            staying_open = false;
-            ImGui::CloseCurrentPopup();
+
+    if (state.pairing_panel_open) {
+        ImGui::SetNextWindowSize({720.0f, 0.0f}, ImGuiCond_FirstUseEver);
+        if (focus_panel) {
+            ImGui::SetNextWindowFocus();
         }
-        ImGui::EndPopup();
+        if (ImGui::Begin(
+                tr(state, "Add computers###pairing-window",
+                   "Thêm máy###pairing-window"),
+                &state.pairing_panel_open,
+                ImGuiWindowFlags_AlwaysAutoResize)) {
+            const auto discovery = control_plane.pairing_discovery_stats();
+            ImGui::TextColored(
+                discovery.beacon_enabled
+                    ? (g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
+                                       : ImVec4{0.10f, 0.55f, 0.24f, 1.0f})
+                    : (g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
+                                       : ImVec4{0.63f, 0.36f, 0.02f, 1.0f}),
+                "%s", tr(state,
+                           discovery.beacon_enabled
+                               ? "Discovery active - listening for new computers"
+                               : "Discovery inactive - set a room name",
+                           discovery.beacon_enabled
+                               ? "Đang tìm kiếm - chờ máy mới"
+                               : "Chưa tìm kiếm - hãy đặt tên phòng"));
+            ImGui::TextDisabled(
+                "%s: %llu    %s: %llu",
+                tr(state, "Probes received", "Tín hiệu đã nhận"),
+                static_cast<unsigned long long>(discovery.probes_received),
+                tr(state, "Replies sent", "Phản hồi đã gửi"),
+                static_cast<unsigned long long>(discovery.beacons_sent));
+            ImGui::TextDisabled("%s", tr(
+                state,
+                "Clients broadcast about every 10 seconds. Keep this window open.",
+                "Máy khách phát tín hiệu khoảng mỗi 10 giây. Hãy giữ cửa sổ này mở."));
+            draw_room_name_field(state, control_plane);
+            ImGui::Separator();
+            draw_pairing_requests(state, control_plane);
+            ImGui::Separator();
+            if (ImGui::Button(tr(state, "Done", "Xong"),
+                              {110.0f, 30.0f})) {
+                state.pairing_panel_open = false;
+            }
+        }
+        ImGui::End();
     }
-    // The beacon must not outlive the dialog. Leaving this screen is how the
-    // operator says they have stopped watching for new machines, so anything
-    // still waiting on an answer is turned away rather than carried over.
-    if (!staying_open || (!ImGui::IsPopupOpen("pairing-popup") &&
-                          control_plane.pairing_window_open())) {
+
+    // The beacon must not outlive the visible panel. Closing it explicitly
+    // stops discovery and refuses unanswered requests.
+    if (!state.pairing_panel_open && control_plane.pairing_window_open()) {
         control_plane.set_pairing_window(false);
     }
 }
@@ -2689,21 +2778,11 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
         return;
     }
     const bool has_clients = !clients.empty();
-    constexpr float student_width = 256.0f;
+    constexpr float student_width = 140.0f;
     if (ImGui::BeginChild("student-commands", {student_width, 74.0f}, false,
                           ImGuiWindowFlags_NoScrollbar)) {
-        if (draw_icon_button("start-room", tr(state, "Start", "Chụp"),
-                             IconKind::camera, {58.0f, 54.0f}, false,
-                             has_clients)) {
-            set_room_snapshots(clients, state, control_plane, true);
-        }
-        ImGui::SameLine();
-        if (draw_icon_button("stop-room", tr(state, "Stop", "Dừng"),
-                             IconKind::stop, {58.0f, 54.0f}, false,
-                             has_clients)) {
-            set_room_snapshots(clients, state, control_plane, false);
-        }
-        ImGui::SameLine();
+        // Snapshots run automatically for the class view (auto_monitor), so the
+        // manual Start/Stop capture buttons no longer live on the ribbon.
         if (draw_icon_button("lock-room", tr(state, "Lock", "Khóa"),
                              IconKind::lock, {58.0f, 54.0f}, false,
                              has_clients)) {
@@ -2742,8 +2821,9 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
         if (draw_icon_button("draw-client", tr(state, "Draw", "Vẽ"),
                              IconKind::pen, {58.0f, 54.0f},
                              state.annotation_enabled,
-                             selected_client != nullptr)) {
-            state.view = DashboardView::selected_client;
+                             selected_client != nullptr &&
+                                 state.view ==
+                                     DashboardView::selected_client)) {
             state.annotation_enabled = !state.annotation_enabled;
             state.annotation_dragging = false;
         }
@@ -2873,11 +2953,6 @@ void draw_navigation_rail(
         state.view = DashboardView::selected_client;
     }
     ImGui::Separator();
-    if (draw_icon_button("nav-snapshot", tr(state, "Start snapshots", "Bắt đầu chụp"),
-                         IconKind::camera, {36.0f, 38.0f}, false,
-                         !clients.empty(), false)) {
-        set_room_snapshots(clients, state, control_plane, true);
-    }
     if (draw_icon_button("nav-lock", tr(state, "Lock room", "Khóa phòng"),
                          IconKind::lock, {36.0f, 38.0f}, false,
                          !clients.empty(), false)) {
@@ -3003,6 +3078,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     } else if (arguments.find(L"--language=en") != std::wstring_view::npos) {
         dashboard.language = Language::english;
     }
+    dashboard.pairing_panel_open =
+        arguments.find(L"--pairing") != std::wstring_view::npos;
     dashboard.dark_mode =
         arguments.find(L"--dark") != std::wstring_view::npos;
     g_language = dashboard.language;
@@ -3088,12 +3165,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         // than sitting in the list until the window is closed.
         control_plane.expire_pending_pairings();
         const auto now = std::chrono::steady_clock::now();
+        // Continuous monitoring: keep every online computer snapshotting without
+        // the operator clicking "Start snapshots" per machine. The sweep is
+        // throttled to at most once every 2 s, so a client that has not yet
+        // acknowledged is re-armed and a reconnecting client is picked up
+        // automatically. Turning off auto_monitor restores per-computer control.
+        if (dashboard.auto_monitor &&
+            now >= dashboard.next_auto_monitor_sweep) {
+            for (const auto& monitored : clients) {
+                if (monitored.status == nstu::server::ClientStatus::online &&
+                    !monitored.snapshotting) {
+                    std::string monitor_error;
+                    (void)control_plane.set_snapshots(
+                        monitored.id, true,
+                        static_cast<std::uint16_t>(
+                            dashboard.snapshot_interval_seconds),
+                        &monitor_error);
+                }
+            }
+            dashboard.next_auto_monitor_sweep = now + std::chrono::seconds(2);
+        }
         if (dashboard.broadcast_enabled &&
             now >= dashboard.next_host_snapshot) {
             nstu::screen::JpegImage jpeg;
             std::string error;
             if (nstu::screen::capture_primary_screen_jpeg(
-                    jpeg, 480, 270, 52,
+                    jpeg, 1280, 720, 72,
                     nstu::control::kMaximumSnapshotJpegBytes, &error)) {
                 const auto captured_at = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(

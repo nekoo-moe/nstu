@@ -183,6 +183,13 @@ int main() {
            nstu::setup::ClientRuntimeState::interactive_session_unavailable);
     runtime.interactive_session = true;
     assert(nstu::setup::classify_client_runtime(runtime) ==
+           nstu::setup::ClientRuntimeState::interactive_user_unavailable);
+    runtime.interactive_user_known = true;
+    runtime.interactive_user_administrator = true;
+    assert(nstu::setup::classify_client_runtime(runtime) ==
+           nstu::setup::ClientRuntimeState::interactive_user_administrator);
+    runtime.interactive_user_administrator = false;
+    assert(nstu::setup::classify_client_runtime(runtime) ==
            nstu::setup::ClientRuntimeState::agent_not_running);
     runtime.agent_running_in_session = true;
     assert(nstu::setup::classify_client_runtime(runtime) ==

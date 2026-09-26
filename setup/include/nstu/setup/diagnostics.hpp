@@ -148,6 +148,8 @@ struct ClientRuntimeSnapshot {
     bool service_session_zero = false;
     bool agent_binary_present = false;
     bool interactive_session = false;
+    bool interactive_user_known = false;
+    bool interactive_user_administrator = false;
     bool agent_running_in_session = false;
 };
 
@@ -160,6 +162,8 @@ enum class ClientRuntimeState : std::uint8_t {
     service_wrong_session,
     agent_binary_missing,
     interactive_session_unavailable,
+    interactive_user_unavailable,
+    interactive_user_administrator,
     agent_not_running,
 };
 

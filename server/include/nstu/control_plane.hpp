@@ -47,6 +47,20 @@ struct PendingPairing {
     std::uint32_t seconds_remaining = 0;
 };
 
+struct PairingDiscoveryStats {
+    bool beacon_enabled = false;
+    std::uint64_t probes_received = 0;
+    std::uint64_t beacons_sent = 0;
+};
+
+// One line of the per-client chat transcript kept for the teacher UI. A
+// display convenience only - never exam or answer content, which lives in the
+// server-owned journal and audit sink.
+struct ChatMessage {
+    bool from_teacher = false;
+    std::string text;
+};
+
 class ServerControlPlane {
 public:
     ServerControlPlane(ClientRegistry& registry,
@@ -82,6 +96,11 @@ public:
     [[nodiscard]] bool send_overlay_stroke(
         std::uint64_t client_id, const control::OverlayStroke& stroke,
         std::string* error = nullptr);
+    // Erase annotation strokes near the given path on the client. The stroke's
+    // geometry defines the path; its colour is ignored.
+    [[nodiscard]] bool send_overlay_erase(
+        std::uint64_t client_id, const control::OverlayStroke& stroke,
+        std::string* error = nullptr);
     [[nodiscard]] bool clear_overlay(std::uint64_t client_id,
                                      std::string* error = nullptr);
     [[nodiscard]] bool broadcast_host_snapshot(
@@ -93,6 +112,10 @@ public:
     [[nodiscard]] bool send_chat(std::uint64_t client_id,
                                  std::string_view utf8_message,
                                  std::string* error = nullptr);
+    // Per-client chat transcript for the teacher UI, oldest first. Includes
+    // both teacher-sent lines and messages received from the client.
+    [[nodiscard]] std::vector<ChatMessage> chat_history(
+        std::uint64_t client_id) const;
     [[nodiscard]] bool start_remote_control(std::uint64_t client_id,
                                             std::string* error = nullptr);
     [[nodiscard]] bool send_remote_input(
@@ -122,6 +145,7 @@ public:
     // empty does the caller's own fallback (the computer name) apply.
     void set_pairing_window(bool open, std::string_view server_name = {});
     [[nodiscard]] bool pairing_window_open() const noexcept;
+    [[nodiscard]] PairingDiscoveryStats pairing_discovery_stats() const noexcept;
     // The persisted, operator-editable room label. Empty means "not set";
     // callers fall back to the computer name. The setter sanitizes to the
     // discovery name bound and takes effect on the next beacon.

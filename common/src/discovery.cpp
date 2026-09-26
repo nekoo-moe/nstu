@@ -1151,6 +1151,12 @@ public:
         std::scoped_lock lock(beacon_mutex_);
         return beacon_enabled_;
     }
+    [[nodiscard]] std::uint64_t pairing_probes_received() const noexcept {
+        return pairing_probes_received_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t pairing_beacons_sent() const noexcept {
+        return pairing_beacons_sent_.load(std::memory_order_relaxed);
+    }
 
 private:
 #if defined(_WIN32)
@@ -1165,6 +1171,7 @@ private:
             rate_limiter_.record_failure(source_text);
             return;
         }
+        pairing_probes_received_.fetch_add(1, std::memory_order_relaxed);
         const auto now = unix_seconds_now();
         if (!time_is_valid(probe->unix_time_seconds, now,
                            std::chrono::seconds(120))) {
@@ -1193,6 +1200,7 @@ private:
             static_cast<int>(wire.size()), 0,
             reinterpret_cast<const sockaddr*>(&source), source_bytes);
         if (sent == static_cast<int>(wire.size())) {
+            pairing_beacons_sent_.fetch_add(1, std::memory_order_relaxed);
             rate_limiter_.record_success(source_text);
         }
     }
@@ -1300,6 +1308,8 @@ private:
     std::jthread worker_;
     std::atomic_bool running_{false};
     std::atomic<std::uint16_t> local_port_{0};
+    std::atomic<std::uint64_t> pairing_probes_received_{0};
+    std::atomic<std::uint64_t> pairing_beacons_sent_{0};
     std::uint16_t control_port_ = 0;
 #if defined(_WIN32)
     SOCKET socket_ = INVALID_SOCKET;
@@ -1326,6 +1336,16 @@ void AuthenticatedDiscoveryResponder::set_pairing_beacon(
 
 bool AuthenticatedDiscoveryResponder::pairing_beacon_enabled() const noexcept {
     return impl_->pairing_beacon_enabled();
+}
+
+std::uint64_t
+AuthenticatedDiscoveryResponder::pairing_probes_received() const noexcept {
+    return impl_->pairing_probes_received();
+}
+
+std::uint64_t
+AuthenticatedDiscoveryResponder::pairing_beacons_sent() const noexcept {
+    return impl_->pairing_beacons_sent();
 }
 
 bool AuthenticatedDiscoveryResponder::running() const noexcept {

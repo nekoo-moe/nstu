@@ -1,6 +1,6 @@
 Unicode true
 RequestExecutionLevel admin
-Name "@NSTU_INSTALLER_DISPLAY_NAME@ (AI-assisted)"
+Name "@NSTU_INSTALLER_DISPLAY_NAME@"
 OutFile "@NSTU_UNIFIED_INSTALLER@"
 InstallDir "$PROGRAMFILES64\\NSTU"
 InstallDirRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NSTU" "InstallLocation"
@@ -24,6 +24,10 @@ Var PreflightReport
 Var RoomName
 Var RoomLabel
 Var RoomField
+Var IsUpdate
+Var DataRoot
+Var RoomSpecified
+Var UwfSpecified
 
 !define STAGE "@NSTU_UNIFIED_STAGE_DIR@"
 !define INTERNAL_TEST_BUILD @NSTU_INTERNAL_TEST_BUILD_VALUE@
@@ -41,7 +45,19 @@ Function .onInit
   StrCpy $Role "Client"
   StrCpy $EnableUwf "0"
   StrCpy $RoomName ""
+  StrCpy $IsUpdate "0"
+  StrCpy $RoomSpecified "0"
+  StrCpy $UwfSpecified "0"
   StrCpy $PreflightReport "$TEMP\\NSTU-installer-preflight.json"
+  ReadRegStr $0 HKLM "Software\\NSTU" "InstallRole"
+  StrCmp $0 "" nstu_init_fresh
+  StrCpy $IsUpdate "1"
+  ReadRegStr $RoomName HKLM "Software\\NSTU" "PreferredRoom"
+  ReadRegDWORD $EnableUwf HKLM "Software\\NSTU" "UwfConfigureRequested"
+  StrCmp $EnableUwf "1" 0 nstu_init_existing_uwf_done
+  StrCpy $EnableUwf ${BST_CHECKED}
+nstu_init_existing_uwf_done:
+nstu_init_fresh:
   ${GetParameters} $0
   ${GetOptions} $0 "/ROLE=" $1
   ${IfNot} ${Errors}
@@ -50,6 +66,14 @@ Function .onInit
   ${GetOptions} $0 "/ROOM=" $1
   ${IfNot} ${Errors}
     StrCpy $RoomName $1
+    StrCpy $RoomSpecified "1"
+  ${EndIf}
+  ${GetOptions} $0 "/UWF=" $1
+  ${IfNot} ${Errors}
+    StrCpy $UwfSpecified "1"
+    StrCmp $1 "1" 0 nstu_init_uwf_done
+    StrCpy $EnableUwf ${BST_CHECKED}
+nstu_init_uwf_done:
   ${EndIf}
 FunctionEnd
 
@@ -92,6 +116,9 @@ Function RolePageCreate
   Pop $RoomField
   ${NSD_CreateCheckbox} 0 150u 100% 18u "Enable reboot-to-restore (Education/Enterprise only)"
   Pop $UwfCheckbox
+  ${If} $EnableUwf == ${BST_CHECKED}
+    ${NSD_Check} $UwfCheckbox
+  ${EndIf}
   ${NSD_CreateLabel} 18u 170u 95% 34u "Requires passing readiness checks, persistent NSTU exclusions, and a recovery checkpoint you have verified. UWF is armed only after enrollment."
   Pop $UwfNotice
   ${NSD_CreateLabel} 0 208u 100% 34u "Client preflight checks this computer. A Windows restart activates the service; pairing then happens through the client and server interfaces."
@@ -123,7 +150,9 @@ Function RolePageLeave
   ${Else}
     StrCpy $Role "Client"
     ${NSD_GetText} $RoomField $RoomName
+    StrCpy $RoomSpecified "1"
     ${NSD_GetState} $UwfCheckbox $EnableUwf
+    StrCpy $UwfSpecified "1"
     ${If} $EnableUwf == ${BST_CHECKED}
       MessageBox MB_YESNO|MB_ICONEXCLAMATION "Confirm that you created or verified a recovery checkpoint. If readiness passes, this computer will show a 60-second countdown and restart automatically. Continue with reboot-to-restore enabled?" IDYES nstu_uwf_confirmed IDNO nstu_uwf_not_confirmed
 nstu_uwf_not_confirmed:
@@ -133,23 +162,90 @@ nstu_uwf_confirmed:
   ${EndIf}
 FunctionEnd
 
+Function ValidateDataRoot
+  ReadRegStr $DataRoot HKLM "Software\\NSTU" "DataRoot"
+  StrCmp $DataRoot "" 0 nstu_data_root_known
+  ReadEnvStr $DataRoot "ProgramData"
+  StrCpy $DataRoot "$DataRoot\\NSTU"
+nstu_data_root_known:
+  System::Call 'kernel32::GetFullPathNameW(w "$DataRoot", i ${NSIS_MAX_STRLEN}, w .r0, p 0) i .r2'
+  StrCmp $2 "0" nstu_data_root_invalid
+  System::Call 'kernel32::GetFullPathNameW(w "$INSTDIR", i ${NSIS_MAX_STRLEN}, w .r1, p 0) i .r2'
+  StrCmp $2 "0" nstu_data_root_invalid
+  StrCpy $DataRoot $0
+  StrLen $2 $1
+  StrCpy $3 $0 $2
+  System::Call 'kernel32::lstrcmpiW(w r3, w r1) i .r4'
+  StrCmp $4 "0" nstu_data_root_overlap
+  StrLen $2 $0
+  StrCpy $3 $1 $2
+  System::Call 'kernel32::lstrcmpiW(w r3, w r0) i .r4'
+  StrCmp $4 "0" nstu_data_root_overlap
+  Return
+nstu_data_root_invalid:
+  MessageBox MB_ICONSTOP|MB_OK "The configured NSTU DataRoot path is invalid. No files were changed."
+  Abort
+nstu_data_root_overlap:
+  MessageBox MB_ICONSTOP|MB_OK "NSTU DataRoot overlaps the program installation directory. Move DataRoot outside $INSTDIR before updating. No files were changed."
+  Abort
+FunctionEnd
+
 Section -Preflight
   ReadRegStr $0 HKLM "Software\\NSTU" "InstallRole"
-  StrCmp $0 "" nstu_role_registry_checked
-  StrCmp $0 $Role nstu_role_registry_checked
+  StrCmp $0 "" nstu_no_registered_role
+  StrCmp $0 $Role nstu_registered_role_matches
   MessageBox MB_ICONSTOP|MB_OK "A different NSTU role is already registered. Uninstall it and restart Windows before selecting this role."
   Abort
+nstu_registered_role_matches:
+  StrCpy $IsUpdate "1"
+  StrCmp $Role "Client" 0 nstu_registered_server_marker
+  IfFileExists "$INSTDIR\\client\\nstu-service.exe" nstu_role_registry_checked
+  Goto nstu_ambiguous_install
+nstu_registered_server_marker:
+  IfFileExists "$INSTDIR\\server\\nstu-server.exe" nstu_role_registry_checked
+  Goto nstu_ambiguous_install
+nstu_no_registered_role:
+  StrCpy $IsUpdate "0"
+  IfFileExists "$INSTDIR\\client\\nstu-service.exe" nstu_ambiguous_install
+  IfFileExists "$INSTDIR\\server\\nstu-server.exe" nstu_ambiguous_install
+  Goto nstu_role_registry_checked
+nstu_ambiguous_install:
+  MessageBox MB_ICONSTOP|MB_OK "NSTU registry and program files do not describe one complete installation. Repair or remove the old installation before retrying. No files were changed."
+  Abort
 nstu_role_registry_checked:
-  IfFileExists "$INSTDIR\\client\\nstu-service.exe" 0 nstu_no_client_marker
-  StrCmp $Role "Client" nstu_no_client_marker
-  MessageBox MB_ICONSTOP|MB_OK "An NSTU Client is already installed. Uninstall it and restart Windows before selecting Server."
+  ; A staged uninstall task runs as SYSTEM after restart and targets $INSTDIR\Uninstall.exe.
+  ; If left behind, it can execute a newly installed uninstaller and silently remove the fresh
+  ; installation. Updates must not race pending removal; fresh installs clear abandoned state.
+  nsExec::ExecToStack 'schtasks.exe /Query /TN "NSTU-FinalizeUninstall"'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" nstu_finalize_task_present nstu_finalize_task_checked
+nstu_finalize_task_present:
+  StrCmp $IsUpdate "1" nstu_pending_removal
+  nsExec::ExecToStack 'schtasks.exe /Delete /TN "NSTU-FinalizeUninstall" /F'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" 0 nstu_stale_removal_cleanup_failed
+nstu_finalize_task_checked:
+  StrCmp $IsUpdate "1" nstu_removal_state_checked
+  ReadEnvStr $0 "ProgramData"
+  Delete "$0\NSTU\uninstall-state.json"
+nstu_removal_state_checked:
+  IfFileExists "$INSTDIR\\.nstu-backup-client\\*.*" nstu_pending_backup
+  IfFileExists "$INSTDIR\\.nstu-backup-server\\*.*" nstu_pending_backup
+  IfFileExists "$INSTDIR\\.nstu-backup-diagnostics\\*.*" nstu_pending_backup
+  Call ValidateDataRoot
+  Goto nstu_preflight_payload
+nstu_pending_backup:
+  MessageBox MB_ICONSTOP|MB_OK "A previous NSTU update backup is still present. Restart Windows and repair that update before retrying. No files were changed."
   Abort
-nstu_no_client_marker:
-  IfFileExists "$INSTDIR\\server\\nstu-server.exe" 0 nstu_no_server_marker
-  StrCmp $Role "Server" nstu_no_server_marker
-  MessageBox MB_ICONSTOP|MB_OK "An NSTU Server is already installed. Uninstall it and restart Windows before selecting Client."
+nstu_pending_removal:
+  MessageBox MB_ICONSTOP|MB_OK "NSTU removal is pending after restart. Complete or cancel that removal before updating. No files were changed."
   Abort
-nstu_no_server_marker:
+nstu_stale_removal_cleanup_failed:
+  MessageBox MB_ICONSTOP|MB_OK "A stale NSTU removal task could not be cleared. Remove the NSTU-FinalizeUninstall scheduled task before reinstalling. No files were changed.$\r$\n$\r$\n$1"
+  Abort
+nstu_preflight_payload:
 
   SetOutPath "$PLUGINSDIR\\NSTU-Diagnostics"
   File "${STAGE}\\diagnostics\\nstu-diagnostics.exe"
@@ -178,67 +274,234 @@ nstu_preflight_server:
   Abort
 nstu_preflight_ok:
   Delete "$PreflightReport"
-  StrCmp $Role "Client" 0 nstu_preflight_done
-  IfFileExists "$INSTDIR\\client\\nstu-service.exe" 0 nstu_preflight_done
-  nsExec::ExecToStack '"$INSTDIR\\client\\nstu-service.exe" --uninstall'
-  Pop $0
-  Pop $1
-  StrCmp $0 "0" nstu_preflight_done
-  MessageBox MB_ICONSTOP|MB_OK "The existing client service could not be prepared for update.$\r$\n$\r$\n$1"
-  Abort
-nstu_preflight_done:
 SectionEnd
 
 Section -Server
   StrCmp $Role "Server" 0 nstu_server_done
-  SetOutPath "$INSTDIR\server"
+  RMDir /r "$INSTDIR\.nstu-stage-server"
+  RMDir /r "$INSTDIR\.nstu-stage-diagnostics"
+  SetOutPath "$INSTDIR\.nstu-stage-server"
   File /r "${STAGE}\server\*"
-  SetOutPath "$INSTDIR\diagnostics"
+  SetOutPath "$INSTDIR\.nstu-stage-diagnostics"
   File /r "${STAGE}\diagnostics\*"
+  IfFileExists "$INSTDIR\.nstu-stage-server\nstu-server.exe" 0 nstu_server_stage_failed
+  IfFileExists "$INSTDIR\.nstu-stage-diagnostics\nstu-diagnostics.exe" 0 nstu_server_stage_failed
+  ; Keep the process working directory outside both staging directories before promotion.
+  SetOutPath "$INSTDIR"
+  StrCmp $IsUpdate "1" 0 nstu_server_promote_fresh
+  ClearErrors
+  Rename "$INSTDIR\server" "$INSTDIR\.nstu-backup-server"
+  IfErrors nstu_server_running
+  ClearErrors
+  Rename "$INSTDIR\diagnostics" "$INSTDIR\.nstu-backup-diagnostics"
+  IfErrors nstu_server_restore_role
+  ClearErrors
+  Rename "$INSTDIR\.nstu-stage-server" "$INSTDIR\server"
+  IfErrors nstu_server_restore_both
+  ClearErrors
+  Rename "$INSTDIR\.nstu-stage-diagnostics" "$INSTDIR\diagnostics"
+  IfErrors nstu_server_restore_promoted
+  Goto nstu_server_commit
+nstu_server_promote_fresh:
+  ClearErrors
+  Rename "$INSTDIR\.nstu-stage-server" "$INSTDIR\server"
+  IfErrors nstu_server_stage_failed
+  ClearErrors
+  Rename "$INSTDIR\.nstu-stage-diagnostics" "$INSTDIR\diagnostics"
+  IfErrors nstu_server_fresh_restore
+  Goto nstu_server_commit
+nstu_server_commit:
   WriteRegStr HKLM "Software\NSTU" "InstallRole" "Server"
   WriteRegStr HKLM "Software\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "DisplayName" "NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@ (AI-assisted)"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "DisplayName" "NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Server" '"$INSTDIR\server\nstu-server.exe"'
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+  RMDir /r "$INSTDIR\.nstu-backup-server"
+  RMDir /r "$INSTDIR\.nstu-backup-diagnostics"
+  Goto nstu_server_done
+nstu_server_running:
+  MessageBox MB_ICONSTOP|MB_OK "Close NSTU Server, then retry the update. Existing files and configuration were not changed."
+  Goto nstu_server_abort
+nstu_server_restore_role:
+  Rename "$INSTDIR\.nstu-backup-server" "$INSTDIR\server"
+  Goto nstu_server_rollback_failed
+nstu_server_restore_both:
+  Rename "$INSTDIR\.nstu-backup-diagnostics" "$INSTDIR\diagnostics"
+  Rename "$INSTDIR\.nstu-backup-server" "$INSTDIR\server"
+  Goto nstu_server_rollback_failed
+nstu_server_restore_promoted:
+  Rename "$INSTDIR\server" "$INSTDIR\.nstu-stage-server"
+  Rename "$INSTDIR\.nstu-backup-diagnostics" "$INSTDIR\diagnostics"
+  Rename "$INSTDIR\.nstu-backup-server" "$INSTDIR\server"
+  Goto nstu_server_rollback_failed
+nstu_server_fresh_restore:
+  Rename "$INSTDIR\server" "$INSTDIR\.nstu-stage-server"
+nstu_server_stage_failed:
+  MessageBox MB_ICONSTOP|MB_OK "NSTU Server update payload is incomplete. Existing configuration was preserved."
+  Goto nstu_server_abort
+nstu_server_rollback_failed:
+  MessageBox MB_ICONSTOP|MB_OK "NSTU Server update failed and rollback was attempted. Restart Windows before retrying; keep any .nstu-backup directories for repair."
+nstu_server_abort:
+  RMDir /r "$INSTDIR\.nstu-stage-server"
+  RMDir /r "$INSTDIR\.nstu-stage-diagnostics"
+  Abort
 nstu_server_done:
 SectionEnd
 
 Section -Client
   StrCmp $Role "Client" 0 nstu_client_done
   ReadEnvStr $R0 "ProgramData"
-  SetOutPath "$INSTDIR\client"
+  RMDir /r "$INSTDIR\.nstu-stage-client"
+  RMDir /r "$INSTDIR\.nstu-stage-diagnostics"
+  SetOutPath "$INSTDIR\.nstu-stage-client"
   File /r "${STAGE}\client\*"
-  SetOutPath "$INSTDIR\diagnostics"
+  SetOutPath "$INSTDIR\.nstu-stage-diagnostics"
   File /r "${STAGE}\diagnostics\*"
+  IfFileExists "$INSTDIR\.nstu-stage-client\nstu-service.exe" 0 nstu_client_stage_failed
+  IfFileExists "$INSTDIR\.nstu-stage-client\nstu-agent.exe" 0 nstu_client_stage_failed
+  IfFileExists "$INSTDIR\.nstu-stage-diagnostics\nstu-diagnostics.exe" 0 nstu_client_stage_failed
+  ; Keep the process working directory outside both staging directories before promotion.
+  SetOutPath "$INSTDIR"
+  StrCmp $IsUpdate "1" 0 nstu_client_promote_fresh
+  nsExec::ExecToStack '"$INSTDIR\.nstu-stage-client\nstu-service.exe" --prepare-update'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" 0 nstu_client_prepare_failed
+  ClearErrors
+  Rename "$INSTDIR\client" "$INSTDIR\.nstu-backup-client"
+  IfErrors nstu_client_swap_failed
+  ClearErrors
+  Rename "$INSTDIR\diagnostics" "$INSTDIR\.nstu-backup-diagnostics"
+  IfErrors nstu_client_restore_role
+  ClearErrors
+  Rename "$INSTDIR\.nstu-stage-client" "$INSTDIR\client"
+  IfErrors nstu_client_restore_both
+  ClearErrors
+  Rename "$INSTDIR\.nstu-stage-diagnostics" "$INSTDIR\diagnostics"
+  IfErrors nstu_client_restore_promoted
+  Goto nstu_client_install_service
+nstu_client_promote_fresh:
+  ; RMDir on absent stale-stage paths can leave NSIS's global error flag set. Clear it before
+  ; each operation whose result is tested, or a successful Rename is mistaken for failure.
+  ClearErrors
+  Rename "$INSTDIR\.nstu-stage-client" "$INSTDIR\client"
+  IfErrors nstu_client_stage_failed
+  ClearErrors
+  Rename "$INSTDIR\.nstu-stage-diagnostics" "$INSTDIR\diagnostics"
+  IfErrors nstu_client_fresh_restore
+nstu_client_install_service:
+  nsExec::ExecToStack '"$INSTDIR\client\nstu-service.exe" --install'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" 0 nstu_client_setup_failed
   WriteRegStr HKLM "Software\NSTU" "InstallRole" "Client"
   WriteRegStr HKLM "Software\NSTU" "BuildChannel" "@NSTU_INSTALLER_CHANNEL@"
+  StrCmp $UwfSpecified "1" 0 nstu_client_keep_uwf
   ${If} $EnableUwf == ${BST_CHECKED}
     WriteRegDWORD HKLM "Software\NSTU" "UwfConfigureRequested" 1
   ${Else}
     WriteRegDWORD HKLM "Software\NSTU" "UwfConfigureRequested" 0
   ${EndIf}
+nstu_client_keep_uwf:
+  StrCmp $RoomSpecified "1" 0 nstu_client_keep_room
   ${If} $RoomName != ""
     WriteRegStr HKLM "Software\NSTU" "PreferredRoom" "$RoomName"
   ${Else}
     DeleteRegValue HKLM "Software\NSTU" "PreferredRoom"
   ${EndIf}
-  nsExec::ExecToStack '"$INSTDIR\client\nstu-service.exe" --install'
-  Pop $0
-  Pop $1
-  StrCmp $0 "0" 0 nstu_client_setup_failed
+nstu_client_keep_room:
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "DisplayName" "NSTU Client@NSTU_INSTALLER_ROLE_SUFFIX@ (AI-assisted)"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "DisplayName" "NSTU Client@NSTU_INSTALLER_ROLE_SUFFIX@"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Diagnostics" '"$INSTDIR\diagnostics\nstu-diagnostics.exe" --target=client --boot-check --auto-close --log="$R0\NSTU\boot-check.log"'
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+  RMDir /r "$INSTDIR\.nstu-backup-client"
+  RMDir /r "$INSTDIR\.nstu-backup-diagnostics"
   SetRebootFlag true
   Goto nstu_client_done
 nstu_client_setup_failed:
-  DeleteRegKey HKLM "Software\NSTU"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU"
+  StrCmp $IsUpdate "1" 0 nstu_client_fresh_setup_failed
+  RMDir /r "$INSTDIR\client"
+  IfFileExists "$INSTDIR\client\*.*" nstu_client_setup_rollback_failed
+  RMDir /r "$INSTDIR\diagnostics"
+  IfFileExists "$INSTDIR\diagnostics\*.*" nstu_client_setup_rollback_failed
+  ClearErrors
+  Rename "$INSTDIR\.nstu-backup-client" "$INSTDIR\client"
+  IfErrors nstu_client_setup_rollback_failed
+  ClearErrors
+  Rename "$INSTDIR\.nstu-backup-diagnostics" "$INSTDIR\diagnostics"
+  IfErrors nstu_client_setup_rollback_failed
+  nsExec::ExecToStack '"$INSTDIR\client\nstu-service.exe" --install'
+  Pop $2
+  Pop $3
+  StrCmp $2 "0" 0 nstu_client_setup_rollback_failed
+  MessageBox MB_ICONSTOP|MB_OK "Client service setup failed. The previous payload and service configuration were restored; registry and DataRoot were preserved.$\r$\n$\r$\n$1$\r$\n$\r$\nRestart Windows before retrying."
+  Abort
+nstu_client_setup_rollback_failed:
+  MessageBox MB_ICONSTOP|MB_OK "Client service setup failed and rollback could not be completed safely. Registry and DataRoot were preserved. Restart Windows and repair from the .nstu-backup directories before retrying.$\r$\n$\r$\n$1"
+  Abort
+nstu_client_fresh_setup_failed:
   RMDir /r "$INSTDIR\client"
   RMDir /r "$INSTDIR\diagnostics"
-  MessageBox MB_ICONSTOP|MB_OK "Client service setup failed.$\r$\n$\r$\n$1"
+  MessageBox MB_ICONSTOP|MB_OK "Client service setup failed. NSTU configuration and DataRoot were not deleted.$\r$\n$\r$\n$1"
+  Abort
+nstu_client_prepare_failed:
+  MessageBox MB_ICONSTOP|MB_OK "The existing client service could not be prepared for update. Program files and configuration were not changed.$\r$\n$\r$\n$1"
+  Goto nstu_client_abort
+nstu_client_swap_failed:
+  nsExec::ExecToStack '"$INSTDIR\client\nstu-service.exe" --install'
+  Pop $2
+  Pop $3
+  StrCmp $2 "0" 0 nstu_client_swap_repair_failed
+  MessageBox MB_ICONSTOP|MB_OK "Existing NSTU Client files are locked. Service configuration was restored; restart Windows and retry."
+  Goto nstu_client_abort
+nstu_client_swap_repair_failed:
+  MessageBox MB_ICONSTOP|MB_OK "Existing NSTU Client files are locked and service repair failed.$\r$\n$\r$\n$3$\r$\n$\r$\nRestart Windows before retrying."
+  Goto nstu_client_abort
+nstu_client_restore_role:
+  ClearErrors
+  Rename "$INSTDIR\.nstu-backup-client" "$INSTDIR\client"
+  IfErrors nstu_client_rollback_failed
+  Goto nstu_client_repair_old_service
+nstu_client_restore_both:
+  ClearErrors
+  Rename "$INSTDIR\.nstu-backup-diagnostics" "$INSTDIR\diagnostics"
+  IfErrors nstu_client_rollback_failed
+  ClearErrors
+  Rename "$INSTDIR\.nstu-backup-client" "$INSTDIR\client"
+  IfErrors nstu_client_rollback_failed
+  Goto nstu_client_repair_old_service
+nstu_client_restore_promoted:
+  ClearErrors
+  Rename "$INSTDIR\client" "$INSTDIR\.nstu-stage-client"
+  IfErrors nstu_client_rollback_failed
+  ClearErrors
+  Rename "$INSTDIR\.nstu-backup-diagnostics" "$INSTDIR\diagnostics"
+  IfErrors nstu_client_rollback_failed
+  ClearErrors
+  Rename "$INSTDIR\.nstu-backup-client" "$INSTDIR\client"
+  IfErrors nstu_client_rollback_failed
+nstu_client_repair_old_service:
+  nsExec::ExecToStack '"$INSTDIR\client\nstu-service.exe" --install'
+  Pop $2
+  Pop $3
+  StrCmp $2 "0" nstu_client_rollback_restored
+  MessageBox MB_ICONSTOP|MB_OK "The old NSTU payload was restored, but its service configuration could not be repaired.$\r$\n$\r$\n$3$\r$\n$\r$\nRestart Windows before retrying."
+  Goto nstu_client_abort
+nstu_client_rollback_restored:
+  MessageBox MB_ICONSTOP|MB_OK "The NSTU Client update failed. The previous payload and service configuration were restored; registry and DataRoot were preserved. Restart Windows before retrying."
+  Goto nstu_client_abort
+nstu_client_fresh_restore:
+  ClearErrors
+  Rename "$INSTDIR\client" "$INSTDIR\.nstu-stage-client"
+nstu_client_stage_failed:
+  MessageBox MB_ICONSTOP|MB_OK "NSTU Client update payload is incomplete. Existing configuration was preserved."
+  Goto nstu_client_abort
+nstu_client_rollback_failed:
+  MessageBox MB_ICONSTOP|MB_OK "NSTU Client update failed. Previous payload restoration was attempted; restart Windows before retrying. Keep any .nstu-backup directories for repair."
+nstu_client_abort:
+  RMDir /r "$INSTDIR\.nstu-stage-client"
+  RMDir /r "$INSTDIR\.nstu-stage-diagnostics"
   Abort
 nstu_client_done:
 SectionEnd
@@ -281,6 +544,13 @@ nstu_uninstall_client_processes:
   Goto nstu_uninstall_files
 nstu_uninstall_server:
 nstu_uninstall_files:
+  ; Cancel any staged-removal task before deleting this uninstaller. Otherwise a later fresh
+  ; install at the same path can be removed by the stale SYSTEM task after restart.
+  nsExec::ExecToStack 'schtasks.exe /Delete /TN "NSTU-FinalizeUninstall" /F'
+  Pop $0
+  Pop $1
+  ReadEnvStr $0 "ProgramData"
+  Delete "$0\NSTU\uninstall-state.json"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Diagnostics"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Server"
   DeleteRegKey HKLM "Software\NSTU"
