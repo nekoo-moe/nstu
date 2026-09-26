@@ -2267,41 +2267,6 @@ void draw_preferences(DashboardState& state) {
     ImGui::EndPopup();
 }
 
-void set_room_snapshots(
-    const std::vector<nstu::server::ClientRecord>& clients,
-    DashboardState& state, nstu::server::ServerControlPlane& control_plane,
-    bool enabled) {
-    std::size_t sent = 0;
-    std::string last_error;
-    for (const auto& client : clients) {
-        if (client.status == nstu::server::ClientStatus::offline) {
-            continue;
-        }
-        std::string error;
-        if (control_plane.set_snapshots(
-                client.id, enabled,
-                static_cast<std::uint16_t>(state.snapshot_interval_seconds),
-                &error)) {
-            ++sent;
-        } else {
-            last_error = std::move(error);
-        }
-    }
-    if (sent == 0 && !last_error.empty()) {
-        record_operation_failure("Snapshots", "Room command failed",
-                                 last_error);
-    }
-    state.control_status = sent == 0
-        ? (last_error.empty()
-               ? tr(state, "No online clients are available.",
-                    "Không có máy trực tuyến để điều khiển.")
-               : std::move(last_error))
-        : (enabled ? tr(state, "Room snapshots started.",
-                        "Đã bắt đầu chụp toàn phòng.")
-                   : tr(state, "Room snapshots stopped.",
-                        "Đã dừng chụp toàn phòng."));
-}
-
 void set_room_lock(const std::vector<nstu::server::ClientRecord>& clients,
                    DashboardState& state,
                    nstu::server::ServerControlPlane& control_plane,
@@ -2813,21 +2778,11 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
         return;
     }
     const bool has_clients = !clients.empty();
-    constexpr float student_width = 256.0f;
+    constexpr float student_width = 140.0f;
     if (ImGui::BeginChild("student-commands", {student_width, 74.0f}, false,
                           ImGuiWindowFlags_NoScrollbar)) {
-        if (draw_icon_button("start-room", tr(state, "Start", "Chụp"),
-                             IconKind::camera, {58.0f, 54.0f}, false,
-                             has_clients)) {
-            set_room_snapshots(clients, state, control_plane, true);
-        }
-        ImGui::SameLine();
-        if (draw_icon_button("stop-room", tr(state, "Stop", "Dừng"),
-                             IconKind::stop, {58.0f, 54.0f}, false,
-                             has_clients)) {
-            set_room_snapshots(clients, state, control_plane, false);
-        }
-        ImGui::SameLine();
+        // Snapshots run automatically for the class view (auto_monitor), so the
+        // manual Start/Stop capture buttons no longer live on the ribbon.
         if (draw_icon_button("lock-room", tr(state, "Lock", "Khóa"),
                              IconKind::lock, {58.0f, 54.0f}, false,
                              has_clients)) {
@@ -2866,8 +2821,9 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
         if (draw_icon_button("draw-client", tr(state, "Draw", "Vẽ"),
                              IconKind::pen, {58.0f, 54.0f},
                              state.annotation_enabled,
-                             selected_client != nullptr)) {
-            state.view = DashboardView::selected_client;
+                             selected_client != nullptr &&
+                                 state.view ==
+                                     DashboardView::selected_client)) {
             state.annotation_enabled = !state.annotation_enabled;
             state.annotation_dragging = false;
         }
@@ -2997,11 +2953,6 @@ void draw_navigation_rail(
         state.view = DashboardView::selected_client;
     }
     ImGui::Separator();
-    if (draw_icon_button("nav-snapshot", tr(state, "Start snapshots", "Bắt đầu chụp"),
-                         IconKind::camera, {36.0f, 38.0f}, false,
-                         !clients.empty(), false)) {
-        set_room_snapshots(clients, state, control_plane, true);
-    }
     if (draw_icon_button("nav-lock", tr(state, "Lock room", "Khóa phòng"),
                          IconKind::lock, {36.0f, 38.0f}, false,
                          !clients.empty(), false)) {
