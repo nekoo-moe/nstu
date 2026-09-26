@@ -1522,11 +1522,27 @@ void draw_selected_client(
             "Chặn dừng dịch vụ và gỡ cài đặt cho đến khi tắt tại đây hoặc bởi quản trị viên cục bộ."));
     }
     ImGui::SameLine();
+    // Requirement check before activation: if the client has already reported
+    // that its Windows edition/feature set cannot support reboot-to-restore,
+    // do not let the operator arm it - the attempt would only fail on the box.
+    const bool uwf_unsupported =
+        selected_client->uwf.reported &&
+        selected_client->uwf.phase == nstu::control::UwfFleetPhase::unsupported;
+    ImGui::BeginDisabled(uwf_unsupported);
     if (ImGui::Button(tr(state, "Enable reboot-to-restore",
                          "Bật khôi phục sau reboot"))) {
         state.uwf_confirmation_client_id = selected_client->id;
         state.uwf_confirmation_open = true;
         ImGui::OpenPopup("uwf-confirmation");
+    }
+    ImGui::EndDisabled();
+    if (uwf_unsupported &&
+        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tr(state,
+            "This computer does not meet reboot-to-restore requirements "
+            "(unsupported Windows edition or missing Unified Write Filter).",
+            "Máy này không đáp ứng yêu cầu khôi phục sau reboot (phiên bản "
+            "Windows không hỗ trợ hoặc thiếu Unified Write Filter)."));
     }
     if (selected_client->uwf.reported ||
         selected_client->uwf.phase !=
