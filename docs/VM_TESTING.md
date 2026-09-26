@@ -99,9 +99,13 @@ Run the following sequence and retain the transcript/screenshots:
 1. Install while the guest is Thawed or does not yet contain Deep Freeze.
 2. Confirm that the installer requests restart and that the service is not
    started inside the installer transaction.
-3. Restart and confirm automatic `LocalSystem` service startup plus agent launch
-   in the standard user's session.
-4. Exercise Task Manager `End task` against the agent and verify recovery.
+3. Restart. Confirm Windows shows its normal sign-in screen; manually select the
+   existing standard classroom account. Confirm automatic `LocalSystem` service
+   startup plus agent launch in that user's session. NSTU, UWF, and Managed mode
+   must not create/select an account, store a password, or configure autologon.
+4. Sign in once with the administrator and confirm boot diagnostics reject that
+   session for classroom operation. Sign out and return to the standard account.
+5. Exercise Task Manager `End task` against the agent and verify recovery.
 5. Confirm that the standard user cannot stop/delete the service or modify the
    installed binaries and protected data root.
 6. Hold an installed package file open, run the elevated uninstaller, and

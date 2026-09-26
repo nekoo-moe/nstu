@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -126,6 +127,37 @@ constexpr auto kPairingSweepInterval = std::chrono::seconds(10);
 // Long enough for somebody to read a short list and point at a name.
 constexpr auto kPairingSelectionTimeout = std::chrono::seconds(120);
 constexpr auto kPairingSelectionSlice = std::chrono::milliseconds(200);
+
+void pairing_debug(std::string_view message) noexcept {
+    try {
+        SYSTEMTIME time{};
+        GetLocalTime(&time);
+        char stamp[32]{};
+        std::snprintf(stamp, sizeof(stamp),
+                      "%04u-%02u-%02u %02u:%02u:%02u",
+                      time.wYear, time.wMonth, time.wDay,
+                      time.wHour, time.wMinute, time.wSecond);
+        const auto root = nstu::deployment::data_root(nullptr);
+        // Opt-in only: the file log is written when an administrator drops a
+        // `pairing-debug.enable` marker in the data root, so a production
+        // client never accumulates a debug log on its own. OutputDebugString
+        // is always emitted (free unless a debugger is attached).
+        std::error_code marker_ec;
+        if (!root.empty() &&
+            std::filesystem::exists(root / L"pairing-debug.enable",
+                                    marker_ec)) {
+            std::ofstream log(root / L"pairing-debug.log",
+                              std::ios::binary | std::ios::app);
+            if (log) {
+                log << stamp << " [NSTU][cli] " << message << '\n';
+            }
+        }
+        OutputDebugStringA(
+            (std::string("[NSTU][cli] ") + std::string(message) + "\n")
+                .c_str());
+    } catch (...) {
+    }
+}
 
 void report_status(DWORD state, DWORD error = NO_ERROR);
 void refresh_running_status();
@@ -1613,7 +1645,18 @@ bool attempt_pairing(const std::stop_token& stop_token,
         return false;
     }
     g_next_pairing_sweep = now + kPairingSweepInterval;
-    auto candidates = nstu::discovery::discover_pairing_candidates();
+    pairing_debug("sweep: broadcasting NSTP probes");
+    std::string discovery_error;
+    auto candidates = nstu::discovery::discover_pairing_candidates(
+        {}, &discovery_error);
+    pairing_debug(candidates.empty()
+        ? "sweep: 0 candidates; " +
+              (discovery_error.empty() ? std::string("no detail")
+                                       : discovery_error)
+        : "sweep: discovered " + std::to_string(candidates.size()) +
+              " candidate(s), first=" + candidates.front().address + ":" +
+              std::to_string(candidates.front().port) + " name=" +
+              candidates.front().server_name);
     if (candidates.empty() || stop_token.stop_requested()) {
         return false;
     }
@@ -1676,6 +1719,9 @@ bool attempt_pairing(const std::stop_token& stop_token,
                              identity_error);
         return false;
     }
+    pairing_debug("pair: connecting to " + candidates[chosen].address + ":" +
+                  std::to_string(candidates[chosen].port) + " name=" +
+                  candidates[chosen].server_name);
     std::string error;
     auto result = nstu::client::pair_with_server(
         candidates[chosen], uuid, nstu::client::machine_hostname(),
@@ -1690,10 +1736,13 @@ bool attempt_pairing(const std::stop_token& stop_token,
         },
         stop_token, {}, &error);
     if (result.outcome != nstu::client::PairingOutcome::enrolled) {
+        pairing_debug("pair: failed; " +
+                      (error.empty() ? std::string("no detail") : error));
         nstu::client::clear_client_runtime_config(result.config);
         queue_pairing_status(result.outcome, error);
         return false;
     }
+    pairing_debug("pair: approved by server; saving client identity");
     // Carry the room this machine was told to prefer into its identity so a
     // later re-pair (after a reset) keeps routing to the same classroom without
     // needing the installer's registry seed a second time. Empty when no
@@ -2095,6 +2144,9 @@ int main(int argc, char** argv) {
                 nstu::deployment::ensure_data_root(root, &error) &&
                 nstu::client::install_service(&error);
             success = "nstu-service: service registered; restart Windows to activate\n";
+        } else if (argument == "--prepare-update") {
+            succeeded = nstu::client::prepare_service_update(&error);
+            success = "nstu-service: service stopped for update\n";
         } else if (argument == "--uninstall") {
             succeeded = nstu::client::uninstall_service(&error);
             success = "nstu-service: service registration removed\n";
@@ -2103,7 +2155,7 @@ int main(int argc, char** argv) {
             success = "nstu-service: managed mode cleared on this computer\n";
         } else {
             std::fputs(
-                "usage: nstu-service [--install|--uninstall|--thaw-local]\n",
+                "usage: nstu-service [--install|--prepare-update|--uninstall|--thaw-local]\n",
                 stderr);
             return 2;
         }

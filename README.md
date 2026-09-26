@@ -491,10 +491,12 @@ Vietnamese and dark mode can also be selected at startup:
    automatic startup, and configures
    service recovery. It deliberately does not start the service inside the
    installer session.
-3. Restart Windows when setup requests it. On the next boot the service starts
-   automatically and launches one `nstu-agent.exe` instance in the active user
-   session on logon or unlock.
-4. After restart, an administrator can verify the service with:
+3. Restart Windows when setup requests it. Windows stops at its normal sign-in
+   screen; manually select the existing standard classroom account. NSTU, UWF,
+   and Managed mode do not create accounts, select an account, store its
+   password, or configure automatic sign-in. After sign-in the service launches
+   one `nstu-agent.exe` instance in that active user session.
+4. An administrator can later verify the service with:
 
    ```powershell
    Get-Service nstu-service

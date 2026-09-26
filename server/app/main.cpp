@@ -412,6 +412,11 @@ struct DashboardState {
     RoomFilter room_filter = RoomFilter::all;
     std::uint64_t selected_client_id = 0;
     int snapshot_interval_seconds = 7;
+    // When set, every online computer is snapshotted continuously without the
+    // operator clicking "Start snapshots" per machine; a periodic sweep re-arms
+    // any client that reconnects. Turn it off to manage snapshots per computer.
+    bool auto_monitor = true;
+    std::chrono::steady_clock::time_point next_auto_monitor_sweep{};
     Language language = Language::english;
     bool dark_mode = false;
     bool show_offline = true;
@@ -432,6 +437,7 @@ struct DashboardState {
     std::chrono::steady_clock::time_point next_host_snapshot{};
     std::string control_status;
     std::string pairing_status;
+    bool pairing_panel_open = false;
     std::string startup_error;
     std::string telemetry_report_preview;
     bool telemetry_report_requested = false;
@@ -750,11 +756,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             return 0;
         }
     }
-    if (message == WM_SYSCOMMAND &&
-        (wparam & 0xfff0u) == SC_MINIMIZE) {
-        ShowWindow(window, SW_HIDE);
-        return 0;
-    }
+    // Minimize behaves like a normal window and goes to the taskbar; only
+    // closing hides NSTU to the system tray. Operators expect a plain minimize
+    // here, so SC_MINIMIZE falls through to DefWindowProc's standard handling.
     if (message == WM_CLOSE) {
         ShowWindow(window, SW_HIDE);
         return 0;
@@ -1804,6 +1808,7 @@ void draw_selected_client(
     ImGui::PushStyleColor(
         ImGuiCol_Text, g_dark_mode ? ImVec4{0.10f, 0.10f, 0.09f, 1.0f}
                                    : ImVec4{1.0f, 1.0f, 1.0f, 1.0f});
+    ImGui::BeginDisabled(state.auto_monitor);
     if (ImGui::Button(selected_client->snapshotting
                           ? tr(state, "Stop snapshots", "Dừng chụp")
                           : tr(state, "Start snapshots", "Bắt đầu chụp"))) {
@@ -1824,6 +1829,15 @@ void draw_selected_client(
                                      error);
         }
         ImGui::OpenPopup("control-status");
+    }
+    ImGui::EndDisabled();
+    if (state.auto_monitor &&
+        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tr(state,
+            "Automatic monitoring is on. Turn it off in Settings to control "
+            "snapshots per computer.",
+            "Đang bật theo dõi tự động. Tắt trong Cài đặt để điều khiển "
+            "snapshot theo từng máy."));
     }
     ImGui::PopStyleColor(4);
     ImGui::SameLine();
@@ -2117,6 +2131,13 @@ void draw_preferences(DashboardState& state) {
     ImGui::TextWrapped("%s", tr(state,
         "Snapshot commands use this interval for room monitoring and teacher broadcast.",
         "Chu kỳ này được dùng cho snapshot phòng máy và phát màn hình giáo viên."));
+    ImGui::Checkbox(
+        tr(state, "Monitor every computer automatically",
+           "Tự động theo dõi mọi máy"),
+        &state.auto_monitor);
+    ImGui::TextWrapped("%s", tr(state,
+        "When on, every online computer streams snapshots continuously; turn it off to start and stop snapshots per computer.",
+        "Khi bật, mọi máy trực tuyến sẽ gửi snapshot liên tục; tắt để bật/tắt snapshot theo từng máy."));
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::TextDisabled("%s", tr(state, "Optional diagnostics",
@@ -2583,9 +2604,20 @@ void draw_pairing_popup(DashboardState& state,
                         nstu::server::ServerControlPlane& control_plane) {
     constexpr float button_width = 140.0f;
     ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - 242.0f);
-    if (ImGui::Button(tr(state, "Add computers", "Thêm máy"),
-                      {button_width, 28.0f})) {
-        state.pairing_status.clear();
+    bool focus_panel = false;
+    if (ImGui::Button(
+            tr(state,
+               state.pairing_panel_open ? "Pairing active" : "Add computers",
+               state.pairing_panel_open ? "Đang ghép nối" : "Thêm máy"),
+            {button_width, 28.0f})) {
+        if (!state.pairing_panel_open) {
+            state.pairing_status.clear();
+            state.pairing_panel_open = true;
+        }
+        focus_panel = true;
+    }
+
+    if (state.pairing_panel_open && !control_plane.pairing_window_open()) {
         // Seed the editable field from the live room label so it shows what the
         // beacon is currently advertising (empty means "using the computer
         // name"). The configured name already wins inside set_pairing_window,
@@ -2595,28 +2627,57 @@ void draw_pairing_popup(DashboardState& state,
                       state.room_name_input.size(), "%s",
                       current_room.c_str());
         control_plane.set_pairing_window(true, local_server_name());
-        ImGui::OpenPopup("pairing-popup");
     }
-    bool staying_open = true;
-    if (ImGui::BeginPopupModal(
-            tr(state, "Add computers###pairing-popup",
-               "Thêm máy###pairing-popup"),
-            &staying_open, ImGuiWindowFlags_AlwaysAutoResize)) {
-        draw_room_name_field(state, control_plane);
-        ImGui::Separator();
-        draw_pairing_requests(state, control_plane);
-        ImGui::Separator();
-        if (ImGui::Button(tr(state, "Done", "Xong"), {110.0f, 30.0f})) {
-            staying_open = false;
-            ImGui::CloseCurrentPopup();
+
+    if (state.pairing_panel_open) {
+        ImGui::SetNextWindowSize({720.0f, 0.0f}, ImGuiCond_FirstUseEver);
+        if (focus_panel) {
+            ImGui::SetNextWindowFocus();
         }
-        ImGui::EndPopup();
+        if (ImGui::Begin(
+                tr(state, "Add computers###pairing-window",
+                   "Thêm máy###pairing-window"),
+                &state.pairing_panel_open,
+                ImGuiWindowFlags_AlwaysAutoResize)) {
+            const auto discovery = control_plane.pairing_discovery_stats();
+            ImGui::TextColored(
+                discovery.beacon_enabled
+                    ? (g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
+                                       : ImVec4{0.10f, 0.55f, 0.24f, 1.0f})
+                    : (g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
+                                       : ImVec4{0.63f, 0.36f, 0.02f, 1.0f}),
+                "%s", tr(state,
+                           discovery.beacon_enabled
+                               ? "Discovery active - listening for new computers"
+                               : "Discovery inactive - set a room name",
+                           discovery.beacon_enabled
+                               ? "Đang tìm kiếm - chờ máy mới"
+                               : "Chưa tìm kiếm - hãy đặt tên phòng"));
+            ImGui::TextDisabled(
+                "%s: %llu    %s: %llu",
+                tr(state, "Probes received", "Tín hiệu đã nhận"),
+                static_cast<unsigned long long>(discovery.probes_received),
+                tr(state, "Replies sent", "Phản hồi đã gửi"),
+                static_cast<unsigned long long>(discovery.beacons_sent));
+            ImGui::TextDisabled("%s", tr(
+                state,
+                "Clients broadcast about every 10 seconds. Keep this window open.",
+                "Máy khách phát tín hiệu khoảng mỗi 10 giây. Hãy giữ cửa sổ này mở."));
+            draw_room_name_field(state, control_plane);
+            ImGui::Separator();
+            draw_pairing_requests(state, control_plane);
+            ImGui::Separator();
+            if (ImGui::Button(tr(state, "Done", "Xong"),
+                              {110.0f, 30.0f})) {
+                state.pairing_panel_open = false;
+            }
+        }
+        ImGui::End();
     }
-    // The beacon must not outlive the dialog. Leaving this screen is how the
-    // operator says they have stopped watching for new machines, so anything
-    // still waiting on an answer is turned away rather than carried over.
-    if (!staying_open || (!ImGui::IsPopupOpen("pairing-popup") &&
-                          control_plane.pairing_window_open())) {
+
+    // The beacon must not outlive the visible panel. Closing it explicitly
+    // stops discovery and refuses unanswered requests.
+    if (!state.pairing_panel_open && control_plane.pairing_window_open()) {
         control_plane.set_pairing_window(false);
     }
 }
@@ -3003,6 +3064,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     } else if (arguments.find(L"--language=en") != std::wstring_view::npos) {
         dashboard.language = Language::english;
     }
+    dashboard.pairing_panel_open =
+        arguments.find(L"--pairing") != std::wstring_view::npos;
     dashboard.dark_mode =
         arguments.find(L"--dark") != std::wstring_view::npos;
     g_language = dashboard.language;
@@ -3088,12 +3151,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         // than sitting in the list until the window is closed.
         control_plane.expire_pending_pairings();
         const auto now = std::chrono::steady_clock::now();
+        // Continuous monitoring: keep every online computer snapshotting without
+        // the operator clicking "Start snapshots" per machine. The sweep is
+        // throttled to at most once every 2 s, so a client that has not yet
+        // acknowledged is re-armed and a reconnecting client is picked up
+        // automatically. Turning off auto_monitor restores per-computer control.
+        if (dashboard.auto_monitor &&
+            now >= dashboard.next_auto_monitor_sweep) {
+            for (const auto& monitored : clients) {
+                if (monitored.status == nstu::server::ClientStatus::online &&
+                    !monitored.snapshotting) {
+                    std::string monitor_error;
+                    (void)control_plane.set_snapshots(
+                        monitored.id, true,
+                        static_cast<std::uint16_t>(
+                            dashboard.snapshot_interval_seconds),
+                        &monitor_error);
+                }
+            }
+            dashboard.next_auto_monitor_sweep = now + std::chrono::seconds(2);
+        }
         if (dashboard.broadcast_enabled &&
             now >= dashboard.next_host_snapshot) {
             nstu::screen::JpegImage jpeg;
             std::string error;
             if (nstu::screen::capture_primary_screen_jpeg(
-                    jpeg, 480, 270, 52,
+                    jpeg, 1280, 720, 72,
                     nstu::control::kMaximumSnapshotJpegBytes, &error)) {
                 const auto captured_at = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(

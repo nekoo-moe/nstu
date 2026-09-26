@@ -47,6 +47,12 @@ struct PendingPairing {
     std::uint32_t seconds_remaining = 0;
 };
 
+struct PairingDiscoveryStats {
+    bool beacon_enabled = false;
+    std::uint64_t probes_received = 0;
+    std::uint64_t beacons_sent = 0;
+};
+
 class ServerControlPlane {
 public:
     ServerControlPlane(ClientRegistry& registry,
@@ -122,6 +128,7 @@ public:
     // empty does the caller's own fallback (the computer name) apply.
     void set_pairing_window(bool open, std::string_view server_name = {});
     [[nodiscard]] bool pairing_window_open() const noexcept;
+    [[nodiscard]] PairingDiscoveryStats pairing_discovery_stats() const noexcept;
     // The persisted, operator-editable room label. Empty means "not set";
     // callers fall back to the computer name. The setter sanitizes to the
     // discovery name bound and takes effect on the next beacon.

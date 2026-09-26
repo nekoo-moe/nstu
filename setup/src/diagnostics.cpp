@@ -1601,6 +1601,40 @@ bool installed_agent_running_in_session(
     return found;
 }
 
+bool token_is_administrator(HANDLE token, PSID administrators,
+                            bool& is_administrator) {
+    BOOL member = FALSE;
+    if (!CheckTokenMembership(token, administrators, &member)) return false;
+    if (member != FALSE) {
+        is_administrator = true;
+        return true;
+    }
+
+    TOKEN_ELEVATION_TYPE elevation = TokenElevationTypeDefault;
+    DWORD bytes = 0;
+    if (!GetTokenInformation(token, TokenElevationType, &elevation,
+                             sizeof(elevation), &bytes)) {
+        return false;
+    }
+    if (elevation != TokenElevationTypeLimited) {
+        is_administrator = false;
+        return true;
+    }
+
+    TOKEN_LINKED_TOKEN linked{};
+    if (!GetTokenInformation(token, TokenLinkedToken, &linked, sizeof(linked),
+                             &bytes)) {
+        return false;
+    }
+    member = FALSE;
+    const bool checked =
+        CheckTokenMembership(linked.LinkedToken, administrators, &member) != FALSE;
+    CloseHandle(linked.LinkedToken);
+    if (!checked) return false;
+    is_administrator = member != FALSE;
+    return true;
+}
+
 DiagnosticResult check_service(const DiagnosticOptions& options) {
     if (options.role != DiagnosticRole::client || !options.boot_check) {
         return result("service", DiagnosticSeverity::not_applicable,
@@ -1670,6 +1704,22 @@ DiagnosticResult check_service(const DiagnosticOptions& options) {
         GetCurrentProcessId(), &interactive_session) != FALSE &&
         interactive_session != 0 &&
         interactive_session != std::numeric_limits<DWORD>::max();
+    HANDLE token = nullptr;
+    if (runtime.interactive_session &&
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY;
+        PSID administrators = nullptr;
+        if (AllocateAndInitializeSid(
+                &authority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
+                &administrators)) {
+            runtime.interactive_user_known = token_is_administrator(
+                token, administrators,
+                runtime.interactive_user_administrator);
+            FreeSid(administrators);
+        }
+        CloseHandle(token);
+    }
     if (runtime.service_running && runtime.service_automatic &&
         runtime.service_local_system && runtime.service_session_zero &&
         runtime.agent_binary_present && runtime.interactive_session) {
@@ -1733,7 +1783,27 @@ DiagnosticResult check_service(const DiagnosticOptions& options) {
                       L"Client runtime", L"Client runtime",
                       L"Diagnostics is not running in an interactive user session.",
                       L"Diagnostics không chạy trong session người dùng tương tác.",
-                      {}, {}, 20);
+                      L"Sign in to the existing standard classroom account, then run the boot check again.",
+                      L"Đăng nhập tài khoản lớp học tiêu chuẩn hiện có, rồi chạy lại boot check.",
+                      20);
+    case ClientRuntimeState::interactive_user_unavailable:
+        return result(
+            "service", DiagnosticSeverity::failure,
+            L"Classroom account", L"Tài khoản lớp học",
+            L"The active interactive account could not be classified.",
+            L"Không thể phân loại tài khoản tương tác đang hoạt động.",
+            L"Sign out, select the existing standard classroom account, and run the boot check again.",
+            L"Đăng xuất, chọn tài khoản lớp học tiêu chuẩn hiện có và chạy lại boot check.",
+            33);
+    case ClientRuntimeState::interactive_user_administrator:
+        return result(
+            "service", DiagnosticSeverity::failure,
+            L"Classroom account", L"Tài khoản lớp học",
+            L"The active classroom session belongs to the local Administrators group.",
+            L"Session lớp học đang hoạt động thuộc nhóm Administrators cục bộ.",
+            L"Sign out and manually select the existing standard classroom account. NSTU does not create accounts or configure automatic sign-in.",
+            L"Đăng xuất và tự chọn tài khoản lớp học tiêu chuẩn hiện có. NSTU không tạo tài khoản hoặc cấu hình tự động đăng nhập.",
+            34);
     case ClientRuntimeState::agent_not_running:
     default:
         return result(
@@ -1856,6 +1926,12 @@ ClientRuntimeState classify_client_runtime(
     }
     if (!snapshot.interactive_session) {
         return ClientRuntimeState::interactive_session_unavailable;
+    }
+    if (!snapshot.interactive_user_known) {
+        return ClientRuntimeState::interactive_user_unavailable;
+    }
+    if (snapshot.interactive_user_administrator) {
+        return ClientRuntimeState::interactive_user_administrator;
     }
     if (!snapshot.agent_running_in_session) {
         return ClientRuntimeState::agent_not_running;

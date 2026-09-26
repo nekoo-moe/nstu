@@ -49,9 +49,12 @@ inline constexpr std::uint16_t kMaximumSnapshotIntervalSeconds = 10;
 // Snapshot dimensions are part of the application contract.  Keeping this
 // bound at the wire boundary prevents a tiny compressed payload from forcing
 // an unexpectedly large decode/texture allocation on the teacher machine.
-inline constexpr std::uint16_t kMaximumSnapshotWidth = 480;
-inline constexpr std::uint16_t kMaximumSnapshotHeight = 270;
-inline constexpr std::size_t kMaximumSnapshotJpegBytes = 60u * 1024u;
+// The ceiling is 720p so the teacher broadcast (a full desktop shown fullscreen
+// on each client) stays legible; monitoring thumbnails choose a far smaller
+// capture size at their call sites, so this bound does not grow the wall.
+inline constexpr std::uint16_t kMaximumSnapshotWidth = 1280;
+inline constexpr std::uint16_t kMaximumSnapshotHeight = 720;
+inline constexpr std::size_t kMaximumSnapshotJpegBytes = 512u * 1024u;
 
 enum class UwfConfigureOutcome : std::uint8_t {
     armed = 1,

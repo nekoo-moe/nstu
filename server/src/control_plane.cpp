@@ -633,6 +633,14 @@ public:
         return pairing_window_open_;
     }
 
+    PairingDiscoveryStats pairing_discovery_stats() const noexcept {
+        return {
+            .beacon_enabled = discovery_responder_.pairing_beacon_enabled(),
+            .probes_received = discovery_responder_.pairing_probes_received(),
+            .beacons_sent = discovery_responder_.pairing_beacons_sent(),
+        };
+    }
+
     std::string server_name() const {
         std::scoped_lock pairing_lock(pairing_mutex_);
         return server_name_;
@@ -1695,6 +1703,11 @@ void ServerControlPlane::set_pairing_window(bool open,
 
 bool ServerControlPlane::pairing_window_open() const noexcept {
     return impl_->pairing_window_open();
+}
+
+PairingDiscoveryStats
+ServerControlPlane::pairing_discovery_stats() const noexcept {
+    return impl_->pairing_discovery_stats();
 }
 
 std::string ServerControlPlane::server_name() const {

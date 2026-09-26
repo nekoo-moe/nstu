@@ -1,5 +1,6 @@
 #include "nstu/client_pairing.hpp"
 
+#include "nstu/multicast.hpp"
 #include "nstu/network.hpp"
 #include "nstu/protocol.hpp"
 
@@ -343,6 +344,14 @@ PairingAttemptResult pair_with_server(
         return result;
     }
 
+    // Discovery owns its UDP Winsock lifetime and may release the process's last
+    // WSAStartup reference before this TCP handshake starts. Keep an independent
+    // reference for the whole pairing connection.
+    net::WinsockRuntime winsock;
+    if (!winsock.ready()) {
+        set_error(error, "Winsock initialization failed");
+        return result;
+    }
     net::TcpSocket socket;
     if (!socket.connect_with_timeout(candidate.address, candidate.port,
                                      options.connect_timeout_ms, error) ||
