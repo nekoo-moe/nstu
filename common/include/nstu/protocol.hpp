@@ -97,6 +97,9 @@ enum class CommandType : std::uint16_t {
     // transcript; the client submits its own lines over the authenticated
     // control channel (the reverse direction reuses `chat`).
     client_chat = 51,
+    // Erase annotation strokes near a path. Reuses the overlay-stroke payload
+    // shape but removes existing strokes instead of adding one.
+    overlay_erase = 52,
 };
 
 enum class ConnectionRole : std::uint8_t {

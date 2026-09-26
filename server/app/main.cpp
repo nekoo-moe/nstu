@@ -403,6 +403,7 @@ enum class AnnotationTool : int {
     arrow,
     rectangle,
     ellipse,
+    eraser,
 };
 
 Language g_language = Language::english;
@@ -1725,6 +1726,24 @@ void draw_selected_client(
             (void)control_plane.send_overlay_stroke(
                 selected_client->id, stroke, &ignored_error);
         };
+        const auto send_erase = [&](ImVec2 start, ImVec2 end) {
+            const ImVec2 first = normalized(clamp_to_surface(start));
+            const ImVec2 last = normalized(clamp_to_surface(end));
+            const nstu::control::OverlayStroke path{
+                .x0 = static_cast<std::uint16_t>(first.x),
+                .y0 = static_cast<std::uint16_t>(first.y),
+                .x1 = static_cast<std::uint16_t>(last.x),
+                .y1 = static_cast<std::uint16_t>(last.y),
+                .thickness = static_cast<std::uint16_t>(
+                    state.annotation_thickness),
+                // Colour is ignored for erase; a non-zero alpha only satisfies
+                // the shared stroke codec.
+                .rgba = 0xffffffffu,
+            };
+            std::string ignored_error;
+            (void)control_plane.send_overlay_erase(
+                selected_client->id, path, &ignored_error);
+        };
         const auto send_shape = [&](ImVec2 start, ImVec2 end) {
             const float left = std::min(start.x, end.x);
             const float right = std::max(start.x, end.x);
@@ -1779,6 +1798,7 @@ void draw_selected_client(
                 break;
             }
             case AnnotationTool::pen:
+            case AnnotationTool::eraser:
                 break;
             }
         };
@@ -1786,20 +1806,29 @@ void draw_selected_client(
             state.annotation_dragging = true;
             state.previous_annotation_point = mouse;
         }
+        const bool freehand = state.annotation_tool == AnnotationTool::pen ||
+                              state.annotation_tool == AnnotationTool::eraser;
         if (state.annotation_dragging &&
-            ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
-            state.annotation_tool == AnnotationTool::pen && inside) {
+            ImGui::IsMouseDown(ImGuiMouseButton_Left) && freehand && inside) {
             const float delta_x = mouse.x - state.previous_annotation_point.x;
             const float delta_y = mouse.y - state.previous_annotation_point.y;
             if (delta_x * delta_x + delta_y * delta_y >= 9.0f) {
-                send_segment(state.previous_annotation_point, mouse);
+                if (state.annotation_tool == AnnotationTool::eraser) {
+                    send_erase(state.previous_annotation_point, mouse);
+                } else {
+                    send_segment(state.previous_annotation_point, mouse);
+                }
                 state.previous_annotation_point = mouse;
             }
         }
         if (state.annotation_dragging &&
             ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
             const ImVec2 end = inside ? mouse : state.previous_annotation_point;
-            if (state.annotation_tool != AnnotationTool::pen) {
+            if (state.annotation_tool == AnnotationTool::eraser) {
+                if (inside) {
+                    send_erase(state.previous_annotation_point, end);
+                }
+            } else if (state.annotation_tool != AnnotationTool::pen) {
                 send_shape(state.previous_annotation_point, end);
             } else if (inside) {
                 send_segment(state.previous_annotation_point, end);
@@ -1990,15 +2019,15 @@ void draw_selected_client(
         ImGui::SameLine();
         const char* tool_items =
             state.language == Language::vietnamese
-                ? "Bút\0Thước\0Mũi tên\0Hình chữ nhật\0Elip\0"
-                : "Pen\0Ruler\0Arrow\0Rectangle\0Ellipse\0";
+                ? "Bút\0Thước\0Mũi tên\0Hình chữ nhật\0Elip\0Tẩy\0"
+                : "Pen\0Ruler\0Arrow\0Rectangle\0Ellipse\0Eraser\0";
         int tool_index = static_cast<int>(state.annotation_tool);
         ImGui::SetNextItemWidth(150.0f);
         if (ImGui::Combo(tr(state, "Tool", "Công cụ"), &tool_index,
                          tool_items)) {
             state.annotation_tool = static_cast<AnnotationTool>(
                 std::clamp(tool_index, 0,
-                           static_cast<int>(AnnotationTool::ellipse)));
+                           static_cast<int>(AnnotationTool::eraser)));
             state.annotation_dragging = false;
         }
         ImGui::SameLine();

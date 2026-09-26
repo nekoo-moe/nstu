@@ -1853,6 +1853,18 @@ bool ServerControlPlane::send_overlay_stroke(
                         payload, error);
 }
 
+bool ServerControlPlane::send_overlay_erase(
+    std::uint64_t client_id, const control::OverlayStroke& stroke,
+    std::string* error) {
+    const auto payload = control::encode_overlay_stroke(stroke);
+    if (payload.empty()) {
+        set_error(error, "invalid overlay erase path");
+        return false;
+    }
+    return send_command(client_id, protocol::CommandType::overlay_erase,
+                        payload, error);
+}
+
 bool ServerControlPlane::clear_overlay(std::uint64_t client_id,
                                        std::string* error) {
     return send_command(client_id, protocol::CommandType::overlay_clear, {},

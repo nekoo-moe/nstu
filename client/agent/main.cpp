@@ -804,6 +804,51 @@ void pipe_control_loop(HWND overlay) {
                     PostMessageW(g_annotation_window,
                                  kAnnotationUpdatedMessage, 0, 0);
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::overlay_erase) {
+                    const auto path = nstu::control::decode_overlay_stroke(
+                        message->payload);
+                    if (path) {
+                        bool changed = false;
+                        {
+                            std::scoped_lock lock(g_annotation_mutex);
+                            // Strokes and the erase path share the 0..65535
+                            // normalized space. Remove any stroke with an
+                            // endpoint inside the erase brush around either end
+                            // of this path segment; freehand strokes are short,
+                            // so endpoint proximity tracks the cursor well.
+                            const double radius =
+                                std::max(1200.0,
+                                         static_cast<double>(path->thickness) *
+                                             400.0);
+                            const double r2 = radius * radius;
+                            const auto near_end = [&](std::uint16_t sx,
+                                                      std::uint16_t sy) {
+                                const double d0x =
+                                    static_cast<double>(sx) - path->x0;
+                                const double d0y =
+                                    static_cast<double>(sy) - path->y0;
+                                const double d1x =
+                                    static_cast<double>(sx) - path->x1;
+                                const double d1y =
+                                    static_cast<double>(sy) - path->y1;
+                                return (d0x * d0x + d0y * d0y) <= r2 ||
+                                       (d1x * d1x + d1y * d1y) <= r2;
+                            };
+                            const auto before = g_annotation_strokes.size();
+                            std::erase_if(
+                                g_annotation_strokes,
+                                [&](const nstu::control::OverlayStroke& s) {
+                                    return near_end(s.x0, s.y0) ||
+                                           near_end(s.x1, s.y1);
+                                });
+                            changed = g_annotation_strokes.size() != before;
+                        }
+                        if (changed) {
+                            PostMessageW(g_annotation_window,
+                                         kAnnotationUpdatedMessage, 0, 0);
+                        }
+                    }
+                } else if (message->type ==
                            nstu::client::AgentMessageType::host_snapshot) {
                     const auto frame = nstu::control::decode_snapshot_frame(
                         message->payload);

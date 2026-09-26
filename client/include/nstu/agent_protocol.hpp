@@ -54,6 +54,8 @@ enum class AgentMessageType : std::uint16_t {
     // the agent chat window; the service relays it to the server as
     // CommandType::client_chat. The reverse direction reuses `chat`.
     chat_submit = 30,
+    // Server-to-agent overlay erase: remove annotation strokes near a path.
+    overlay_erase = 31,
 };
 
 struct AgentMessage {

@@ -1420,6 +1420,13 @@ void handle_server_command(
                  command.payload});
         }
         break;
+    case nstu::protocol::CommandType::overlay_erase:
+        if (nstu::control::decode_overlay_stroke(command.payload)) {
+            queue_agent_message(
+                {nstu::client::AgentMessageType::overlay_erase,
+                 command.payload});
+        }
+        break;
     case nstu::protocol::CommandType::overlay_clear:
         queue_agent_message(
             {nstu::client::AgentMessageType::overlay_clear, {}});

@@ -96,6 +96,11 @@ public:
     [[nodiscard]] bool send_overlay_stroke(
         std::uint64_t client_id, const control::OverlayStroke& stroke,
         std::string* error = nullptr);
+    // Erase annotation strokes near the given path on the client. The stroke's
+    // geometry defines the path; its colour is ignored.
+    [[nodiscard]] bool send_overlay_erase(
+        std::uint64_t client_id, const control::OverlayStroke& stroke,
+        std::string* error = nullptr);
     [[nodiscard]] bool clear_overlay(std::uint64_t client_id,
                                      std::string* error = nullptr);
     [[nodiscard]] bool broadcast_host_snapshot(
