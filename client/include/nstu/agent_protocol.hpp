@@ -50,6 +50,12 @@ enum class AgentMessageType : std::uint16_t {
     // Service-to-agent display state. The service remains the only
     // process that reads and writes the machine-wide flag.
     managed_state = 29,
+    // Agent-to-service chat submission. The interactive user types a line in
+    // the agent chat window; the service relays it to the server as
+    // CommandType::client_chat. The reverse direction reuses `chat`.
+    chat_submit = 30,
+    // Server-to-agent overlay erase: remove annotation strokes near a path.
+    overlay_erase = 31,
 };
 
 struct AgentMessage {

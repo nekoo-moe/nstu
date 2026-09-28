@@ -1,6 +1,7 @@
 #include "nstu/setup/diagnostics.hpp"
 
 #include "nstu/deployment.hpp"
+#include "nstu/discovery.hpp"
 #include "nstu/protocol.hpp"
 #include "nstu/setup/driver_scan.hpp"
 #include "nstu/setup/hardware_scan.hpp"
@@ -1440,6 +1441,55 @@ DiagnosticResult check_server(const DiagnosticOptions& options) {
                   L"TCP endpoint is reachable.", L"TCP endpoint có thể kết nối.");
 }
 
+// A client that cannot pair often CAN reach the server on TCP: the failure is
+// in the UDP discovery/pairing exchange, which the server silently drops when
+// the client's clock is skewed past the freshness bound. This probe reuses the
+// real client sweep so "the server never answers" is named, with clock skew
+// called out first because it is the cause that leaves no other trace.
+DiagnosticResult check_pairing_discovery(const DiagnosticOptions& options) {
+    if (options.role != DiagnosticRole::client) {
+        return result("pairing_discovery", DiagnosticSeverity::not_applicable,
+                      L"Server discovery", L"Dò tìm server",
+                      L"Discovery answering is verified from the client side.",
+                      L"Việc trả lời dò tìm được kiểm tra từ phía client.");
+    }
+    if (options.installer) {
+        // Installer preflight leaves server selection to post-install pairing,
+        // so skip the ~1.2s LAN sweep instead of running it then discarding it.
+        return result(
+            "pairing_discovery", DiagnosticSeverity::not_applicable,
+            L"Server discovery", L"Dò tìm server",
+            L"No server is expected to answer discovery during install preflight.",
+            L"Không kỳ vọng server trả lời dò tìm trong bước kiểm tra trước khi cài.");
+    }
+    nstu::discovery::ClientDiscoveryOptions sweep;
+    if (!options.server_address.empty()) {
+        sweep.target_addresses.push_back(wide_to_utf8(options.server_address));
+    }
+    std::string error;
+    const auto candidates =
+        nstu::discovery::discover_pairing_candidates(sweep, &error);
+    if (!candidates.empty()) {
+        const auto name = utf8_to_wide(candidates.front().server_name);
+        const auto address = utf8_to_wide(candidates.front().address);
+        const std::wstring detail = std::to_wstring(candidates.size()) +
+            L" NSTU server(s) answered discovery (first: " + name + L" at " +
+            address + L").";
+        const std::wstring detail_vi = std::to_wstring(candidates.size()) +
+            L" server NSTU đã trả lời dò tìm (đầu tiên: " + name + L" tại " +
+            address + L").";
+        return result("pairing_discovery", DiagnosticSeverity::pass,
+                      L"Server discovery", L"Dò tìm server", detail, detail_vi);
+    }
+    return result(
+        "pairing_discovery", DiagnosticSeverity::warning, L"Server discovery",
+        L"Dò tìm server", L"No NSTU server answered discovery on this network.",
+        L"Không có server NSTU nào trả lời dò tìm trên mạng này.",
+        L"If a teacher's server is running here, the most common cause is a clock difference over 120 seconds between this PC and the server: NSTU silently ignores stale discovery probes, so pairing and reconnect never happen. Sync this PC's clock to the server first, then confirm the teacher has the 'Add computers' window open and that UDP discovery is not blocked by a firewall or VLAN.",
+        L"Nếu có server của giáo viên đang chạy ở đây, nguyên nhân phổ biến nhất là chênh lệch đồng hồ quá 120 giây giữa máy này và server: NSTU âm thầm bỏ qua gói dò tìm quá hạn nên ghép nối và kết nối lại không bao giờ xảy ra. Hãy đồng bộ đồng hồ máy này với server trước, sau đó kiểm tra giáo viên đã mở cửa sổ 'Add computers' và UDP dò tìm không bị firewall hoặc VLAN chặn.",
+        35);
+}
+
 DiagnosticResult check_time() {
     SYSTEMTIME time{};
     GetSystemTime(&time);
@@ -1463,8 +1513,8 @@ DiagnosticResult check_time() {
                   sane ? (running ? L"Thời gian hợp lệ và Windows Time đang chạy."
                                   : L"Thời gian hợp lệ; Windows Time chưa chạy.")
                        : L"Thời gian hệ thống nằm ngoài khoảng triển khai dự kiến.",
-                  L"Do not adjust time automatically; synchronize it through the school's approved policy.",
-                  L"Không tự động chỉnh giờ; đồng bộ theo policy được trường phê duyệt.", sane ? 0 : 11);
+                  L"Synchronize this PC's clock through the school's approved policy; do not rely on an unattended change. NSTU pairing and reconnect silently fail once the clock differs from the server by more than 120 seconds, so a large drift is a likely cause of 'cannot connect'.",
+                  L"Đồng bộ đồng hồ máy này theo policy được trường phê duyệt; không dựa vào thay đổi tự động. Ghép nối và kết nối lại của NSTU âm thầm thất bại khi đồng hồ lệch server quá 120 giây, nên lệch giờ lớn là nguyên nhân thường gặp của 'không kết nối được'.", sane ? 0 : 11);
 }
 
 DiagnosticResult check_internet() {
@@ -1601,6 +1651,40 @@ bool installed_agent_running_in_session(
     return found;
 }
 
+bool token_is_administrator(HANDLE token, PSID administrators,
+                            bool& is_administrator) {
+    BOOL member = FALSE;
+    if (!CheckTokenMembership(token, administrators, &member)) return false;
+    if (member != FALSE) {
+        is_administrator = true;
+        return true;
+    }
+
+    TOKEN_ELEVATION_TYPE elevation = TokenElevationTypeDefault;
+    DWORD bytes = 0;
+    if (!GetTokenInformation(token, TokenElevationType, &elevation,
+                             sizeof(elevation), &bytes)) {
+        return false;
+    }
+    if (elevation != TokenElevationTypeLimited) {
+        is_administrator = false;
+        return true;
+    }
+
+    TOKEN_LINKED_TOKEN linked{};
+    if (!GetTokenInformation(token, TokenLinkedToken, &linked, sizeof(linked),
+                             &bytes)) {
+        return false;
+    }
+    member = FALSE;
+    const bool checked =
+        CheckTokenMembership(linked.LinkedToken, administrators, &member) != FALSE;
+    CloseHandle(linked.LinkedToken);
+    if (!checked) return false;
+    is_administrator = member != FALSE;
+    return true;
+}
+
 DiagnosticResult check_service(const DiagnosticOptions& options) {
     if (options.role != DiagnosticRole::client || !options.boot_check) {
         return result("service", DiagnosticSeverity::not_applicable,
@@ -1670,6 +1754,22 @@ DiagnosticResult check_service(const DiagnosticOptions& options) {
         GetCurrentProcessId(), &interactive_session) != FALSE &&
         interactive_session != 0 &&
         interactive_session != std::numeric_limits<DWORD>::max();
+    HANDLE token = nullptr;
+    if (runtime.interactive_session &&
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY;
+        PSID administrators = nullptr;
+        if (AllocateAndInitializeSid(
+                &authority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
+                &administrators)) {
+            runtime.interactive_user_known = token_is_administrator(
+                token, administrators,
+                runtime.interactive_user_administrator);
+            FreeSid(administrators);
+        }
+        CloseHandle(token);
+    }
     if (runtime.service_running && runtime.service_automatic &&
         runtime.service_local_system && runtime.service_session_zero &&
         runtime.agent_binary_present && runtime.interactive_session) {
@@ -1733,7 +1833,27 @@ DiagnosticResult check_service(const DiagnosticOptions& options) {
                       L"Client runtime", L"Client runtime",
                       L"Diagnostics is not running in an interactive user session.",
                       L"Diagnostics không chạy trong session người dùng tương tác.",
-                      {}, {}, 20);
+                      L"Sign in to the existing standard classroom account, then run the boot check again.",
+                      L"Đăng nhập tài khoản lớp học tiêu chuẩn hiện có, rồi chạy lại boot check.",
+                      20);
+    case ClientRuntimeState::interactive_user_unavailable:
+        return result(
+            "service", DiagnosticSeverity::failure,
+            L"Classroom account", L"Tài khoản lớp học",
+            L"The active interactive account could not be classified.",
+            L"Không thể phân loại tài khoản tương tác đang hoạt động.",
+            L"Sign out, select the existing standard classroom account, and run the boot check again.",
+            L"Đăng xuất, chọn tài khoản lớp học tiêu chuẩn hiện có và chạy lại boot check.",
+            33);
+    case ClientRuntimeState::interactive_user_administrator:
+        return result(
+            "service", DiagnosticSeverity::failure,
+            L"Classroom account", L"Tài khoản lớp học",
+            L"The active classroom session belongs to the local Administrators group.",
+            L"Session lớp học đang hoạt động thuộc nhóm Administrators cục bộ.",
+            L"Sign out and manually select the existing standard classroom account. NSTU does not create accounts or configure automatic sign-in.",
+            L"Đăng xuất và tự chọn tài khoản lớp học tiêu chuẩn hiện có. NSTU không tạo tài khoản hoặc cấu hình tự động đăng nhập.",
+            34);
     case ClientRuntimeState::agent_not_running:
     default:
         return result(
@@ -1857,10 +1977,29 @@ ClientRuntimeState classify_client_runtime(
     if (!snapshot.interactive_session) {
         return ClientRuntimeState::interactive_session_unavailable;
     }
+    if (!snapshot.interactive_user_known) {
+        return ClientRuntimeState::interactive_user_unavailable;
+    }
+    if (snapshot.interactive_user_administrator) {
+        return ClientRuntimeState::interactive_user_administrator;
+    }
     if (!snapshot.agent_running_in_session) {
         return ClientRuntimeState::agent_not_running;
     }
     return ClientRuntimeState::ready;
+}
+
+ClockSkewAssessment classify_clock_skew(std::int64_t local_unix_seconds,
+                                        std::int64_t server_unix_seconds,
+                                        std::int64_t tolerance_seconds) noexcept {
+    const std::int64_t skew = local_unix_seconds - server_unix_seconds;
+    if (skew > tolerance_seconds) {
+        return {ClockSkewState::client_ahead, skew};
+    }
+    if (skew < -tolerance_seconds) {
+        return {ClockSkewState::client_behind, skew};
+    }
+    return {ClockSkewState::in_tolerance, skew};
 }
 
 std::vector<DiagnosticCheck> diagnostic_checks(const DiagnosticOptions&) {
@@ -1881,6 +2020,7 @@ std::vector<DiagnosticCheck> diagnostic_checks(const DiagnosticOptions&) {
         {"time", L"System time", L"Thời gian hệ thống"},
         {"internet", L"Public Internet", L"Internet công cộng"},
         {"server", L"NSTU server reachability", L"Khả năng kết nối server NSTU"},
+        {"pairing_discovery", L"Server discovery", L"Dò tìm server"},
     };
     checks.push_back({"service", L"Client runtime", L"Tiến trình client"});
     return checks;
@@ -1936,6 +2076,8 @@ void run_startup_diagnostics(const DiagnosticOptions& options,
     run_named("time", [] { return check_time(); });
     run_named("internet", [] { return check_internet(); });
     run_named("server", [&] { return check_server(options); });
+    run_named("pairing_discovery",
+              [&] { return check_pairing_discovery(options); });
     run_named("service", [&] { return check_service(options); });
 }
 

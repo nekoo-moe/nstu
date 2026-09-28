@@ -84,6 +84,12 @@ trước khi cài file server và data root được bảo vệ. UWF được b�
 dụng cho role server vì dữ liệu server phải bền vững. Chạy qualification UWF
 bằng `--target=client` trên image client riêng.
 
+Sau khi cài client và restart Windows, Windows hiện màn hình đăng nhập bình
+thường. Người vận hành phải tự chọn tài khoản lớp học tiêu chuẩn hiện có. NSTU,
+UWF và Managed mode không tạo hoặc chọn tài khoản Windows, không thu thập/lưu
+mật khẩu và không cấu hình autologon. Boot diagnostics của client từ chối session
+Administrator cục bộ đang hoạt động cho vận hành lớp học bình thường.
+
 Installer server đồng thời tạo giá trị startup toàn máy `NSTU Server` tại
 `HKLM\Software\Microsoft\Windows\CurrentVersion\Run`. Vì vậy ứng dụng desktop
 server tự chạy trong session tương tác của giáo viên ở mỗi lần đăng nhập

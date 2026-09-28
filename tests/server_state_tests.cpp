@@ -1,5 +1,6 @@
 #include "nstu/client_registry.hpp"
 #include "nstu/snapshot_generation_gate.hpp"
+#include "nstu/stream_rearm_watchdog.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -201,5 +202,66 @@ int main() {
     assert(registry.expire(now + 10s, 5s) == 1);
     clients = registry.snapshot();
     assert(clients[0].status == nstu::server::ClientStatus::offline);
+
+    // StreamRearmWatchdog: level-triggered self-heal for a stalled live stream.
+    // stalled_since resets to the timestamp of the last delivered frame, so the
+    // stall window is measured from the most recent generation change. The first
+    // re-arm of a contiguous stall episode returns `first`; later ones `repeat`.
+    {
+        using nstu::server::StreamRearm;
+        nstu::server::StreamRearmWatchdog watchdog;
+        const auto base = std::chrono::steady_clock::now();
+        constexpr auto stall = 2000ms;
+
+        // Wanting no client never re-arms.
+        assert(watchdog.update(0, 0, base, stall) == StreamRearm::none);
+
+        // First arm of client 7 seeds the baseline without re-arming on the
+        // same tick the edge-triggered path already issued set_streaming.
+        assert(watchdog.update(7, 100, base, stall) == StreamRearm::none);
+        assert(watchdog.watched_client_id() == 7);
+
+        // Frames flowing (generation advances) hold the watchdog off and move
+        // the stall baseline forward to each frame's timestamp.
+        assert(watchdog.update(7, 101, base + 1s, stall) == StreamRearm::none);
+        assert(watchdog.update(7, 102, base + 2s, stall) ==
+               StreamRearm::none);  // last frame at +2s
+
+        // Frames stop (generation frozen at 102). Measured from +2s:
+        assert(watchdog.update(7, 102, base + 3s, stall) ==
+               StreamRearm::none);  // 1.0s < 2s
+        assert(watchdog.update(7, 102, base + 3900ms, stall) ==
+               StreamRearm::none);  // 1.9s < 2s
+        assert(watchdog.update(7, 102, base + 4s, stall) ==
+               StreamRearm::first);  // 2.0s -> first re-arm of episode
+
+        // Subsequent re-arms in the same episode are `repeat` (re-sent quietly),
+        // one per full window.
+        assert(watchdog.update(7, 102, base + 5s, stall) ==
+               StreamRearm::none);  // 1.0s since +4s
+        assert(watchdog.update(7, 102, base + 6s, stall) ==
+               StreamRearm::repeat);  // 2.0s since +4s
+
+        // A delivered frame ends the episode; the next stall logs `first` again.
+        assert(watchdog.update(7, 103, base + 6500ms, stall) ==
+               StreamRearm::none);  // frame -> baseline +6.5s
+        assert(watchdog.update(7, 103, base + 8s, stall) ==
+               StreamRearm::none);  // 1.5s since +6.5s
+
+        // Switching the wanted client re-seeds; no immediate re-arm even if the
+        // new client has delivered nothing yet.
+        assert(watchdog.update(9, 500, base + 100s, stall) == StreamRearm::none);
+        assert(watchdog.watched_client_id() == 9);
+        assert(watchdog.update(9, 500, base + 101s, stall) ==
+               StreamRearm::none);  // 1s stalled
+        assert(watchdog.update(9, 500, base + 102s, stall) ==
+               StreamRearm::first);  // 2s stalled -> first re-arm of new episode
+
+        // Dropping to no wanted client disarms; re-selecting seeds fresh.
+        assert(watchdog.update(0, 0, base + 103s, stall) == StreamRearm::none);
+        assert(watchdog.watched_client_id() == 0);
+        assert(watchdog.update(9, 500, base + 103s, stall) ==
+               StreamRearm::none);  // seeds, no re-arm
+    }
     return 0;
 }

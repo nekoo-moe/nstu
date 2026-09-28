@@ -478,10 +478,12 @@ Cũng có thể chọn sẵn Tiếng Việt và dark mode khi khởi động:
 2. Installer chạy diagnostics client, đăng ký `nstu-service` để khởi động cùng
    Windows và cấu hình
    service recovery. Service không được khởi động ngay bên trong phiên cài đặt.
-3. Restart Windows khi installer yêu cầu. Ở lần boot tiếp theo, service tự chạy
-   và khởi động đúng một instance `nstu-agent.exe` trong user session đang active
-   khi đăng nhập hoặc mở khóa.
-4. Sau khi restart, Administrator có thể kiểm tra service bằng:
+3. Restart Windows khi installer yêu cầu. Windows dừng ở màn hình đăng nhập bình
+   thường; tự chọn tài khoản lớp học tiêu chuẩn hiện có. NSTU, UWF và Managed mode
+   không tạo hoặc chọn tài khoản, không lưu mật khẩu và không cấu hình tự động
+   đăng nhập. Sau khi đăng nhập, service mở đúng một instance `nstu-agent.exe`
+   trong user session đó.
+4. Administrator có thể kiểm tra service sau bằng:
 
    ```powershell
    Get-Service nstu-service

@@ -172,11 +172,12 @@ và `Request keyframe` của H.264 vẫn còn cho continuous-video mode tùy ch�
 
 ## Cài đặt và kiểm thử
 
-Installer hợp nhất tự gọi service lifecycle script với quyền Administrator.
-Cài đặt client đăng ký service ở chế độ automatic, cấu hình recovery và đặt cờ
-bắt buộc restart; service bắt đầu ở lần boot tiếp theo. Lần gọi uninstaller đầu
-chỉ stage startup task và không thay đổi service, process hoặc file; việc dừng,
-xóa và xử lý file bị khóa chỉ chạy sau restart.
+Installer hợp nhất gọi trực tiếp binary theo vai trò với quyền Administrator;
+PowerShell lifecycle script chỉ là công cụ vận hành trong source tree và không
+được đóng gói vào installer. Cài đặt client đăng ký service automatic, cấu hình
+recovery và yêu cầu restart; service bắt đầu ở lần boot tiếp theo. Windows vẫn
+hiện đăng nhập bình thường để người vận hành tự chọn tài khoản lớp học tiêu chuẩn
+hiện có. NSTU không tạo tài khoản, lưu mật khẩu hoặc cấu hình autologon.
 
 Lifecycle helper chạy `test-system-setup.ps1` để kiểm tra Windows x64,
 quyền Administrator, data root NTFS/ReFS có thể ghi, Windows Firewall và

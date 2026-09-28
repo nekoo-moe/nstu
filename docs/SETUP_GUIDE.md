@@ -89,6 +89,12 @@ reported as not applicable for the server role because server data is
 persistent. Run UWF qualification with `--target=client` on a separate client
 image.
 
+After client installation restarts Windows, Windows shows its normal sign-in
+screen. Operator must manually select an existing standard classroom account.
+NSTU, UWF, and Managed mode do not create or select Windows accounts, collect or
+store account passwords, or configure autologon. Client boot diagnostics reject
+an active local-Administrator session for normal classroom operation.
+
 The server installer also creates the machine startup value `NSTU Server`
 under `HKLM\Software\Microsoft\Windows\CurrentVersion\Run`. The desktop server
 therefore starts in the interactive teacher session at each Windows sign-in;

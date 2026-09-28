@@ -102,9 +102,13 @@ Chạy trình tự sau và giữ lại transcript/ảnh chụp màn hình:
 1. Cài trong khi guest đang Thawed hoặc chưa chứa Deep Freeze.
 2. Xác nhận rằng installer yêu cầu restart và service không được khởi động bên
    trong transaction của installer.
-3. Restart và xác nhận service `LocalSystem` tự khởi động cùng việc agent khởi
-   chạy trong session của người dùng tiêu chuẩn.
-4. Diễn tập `End task` của Task Manager với agent và kiểm tra recovery.
+3. Restart. Xác nhận Windows hiện màn hình đăng nhập bình thường; tự chọn tài
+   khoản lớp học tiêu chuẩn hiện có. Xác nhận service `LocalSystem` tự khởi động
+   cùng agent trong session đó. NSTU, UWF và Managed mode không được tạo/chọn tài
+   khoản, lưu mật khẩu hoặc cấu hình autologon.
+4. Đăng nhập một lần bằng administrator và xác nhận boot diagnostics từ chối
+   session đó cho vận hành lớp học. Đăng xuất rồi trở lại tài khoản tiêu chuẩn.
+5. Diễn tập `End task` của Task Manager với agent và kiểm tra recovery.
 5. Xác nhận rằng người dùng tiêu chuẩn không thể dừng/xóa service hoặc sửa đổi
    các binary đã cài và data root được bảo vệ.
 6. Giữ mở một file package đã cài, chạy uninstaller đã nâng quyền và ghi lại

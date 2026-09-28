@@ -104,6 +104,36 @@ int main() {
     assert(nstu::setup::is_uwf_supported_product(0xbc));
     assert(!nstu::setup::is_uwf_supported_product(0x30));
 
+    {
+        using nstu::setup::classify_clock_skew;
+        using nstu::setup::ClockSkewState;
+        // Identical clocks and offsets within the pairing tolerance pass.
+        assert(classify_clock_skew(1'000, 1'000).state ==
+               ClockSkewState::in_tolerance);
+        assert(classify_clock_skew(1'000, 1'050).state ==
+               ClockSkewState::in_tolerance);
+        assert(classify_clock_skew(1'050, 1'000).state ==
+               ClockSkewState::in_tolerance);
+        // The boundary is inclusive at exactly the tolerance, exclusive beyond.
+        assert(classify_clock_skew(1'000, 1'120).state ==
+               ClockSkewState::in_tolerance);
+        assert(classify_clock_skew(1'000, 1'121).state ==
+               ClockSkewState::client_behind);
+        assert(classify_clock_skew(1'121, 1'000).state ==
+               ClockSkewState::client_ahead);
+        // The ~3h51m VM skew that silently broke pairing on 2026-09-28: this PC
+        // far behind the server, reported with a signed second delta.
+        const auto behind = classify_clock_skew(1'000'000, 1'013'870);
+        assert(behind.state == ClockSkewState::client_behind);
+        assert(behind.skew_seconds == -13'870);
+        const auto ahead = classify_clock_skew(1'013'870, 1'000'000);
+        assert(ahead.state == ClockSkewState::client_ahead);
+        assert(ahead.skew_seconds == 13'870);
+        // A custom (tighter) tolerance is honoured.
+        assert(classify_clock_skew(1'000, 1'030, 10).state ==
+               ClockSkewState::client_behind);
+    }
+
     nstu::setup::UwfProbeSnapshot unsupported{};
     unsupported.product_type = 0x30;
     assert(nstu::setup::classify_uwf(unsupported) ==
@@ -183,6 +213,13 @@ int main() {
            nstu::setup::ClientRuntimeState::interactive_session_unavailable);
     runtime.interactive_session = true;
     assert(nstu::setup::classify_client_runtime(runtime) ==
+           nstu::setup::ClientRuntimeState::interactive_user_unavailable);
+    runtime.interactive_user_known = true;
+    runtime.interactive_user_administrator = true;
+    assert(nstu::setup::classify_client_runtime(runtime) ==
+           nstu::setup::ClientRuntimeState::interactive_user_administrator);
+    runtime.interactive_user_administrator = false;
+    assert(nstu::setup::classify_client_runtime(runtime) ==
            nstu::setup::ClientRuntimeState::agent_not_running);
     runtime.agent_running_in_session = true;
     assert(nstu::setup::classify_client_runtime(runtime) ==
@@ -243,12 +280,12 @@ int main() {
     // The MSVC diagnostics library must decode UTF-8 source independently of
     // the developer machine's active ANSI code page.
     assert(checks.front().title_vi == L"H\u1ec7 \u0111i\u1ec1u h\u00e0nh");
-    constexpr std::array<const char*, 17> expected_ids = {
-        "os",          "uwf",          "uwf_volumes", "uwf_exclusions",
-        "uwf_overlay", "uwf_events",   "safe_mode",   "installation",
-        "registry",    "hardware",     "network",     "graphics",
-        "encoder",     "time",         "internet",    "server",
-        "service"};
+    constexpr std::array<const char*, 18> expected_ids = {
+        "os",          "uwf",          "uwf_volumes",  "uwf_exclusions",
+        "uwf_overlay", "uwf_events",   "safe_mode",    "installation",
+        "registry",    "hardware",     "network",      "graphics",
+        "encoder",     "time",         "internet",     "server",
+        "pairing_discovery",           "service"};
     assert(checks.size() == expected_ids.size());
     for (std::size_t index = 0; index < expected_ids.size(); ++index) {
         assert(checks[index].id == expected_ids[index]);

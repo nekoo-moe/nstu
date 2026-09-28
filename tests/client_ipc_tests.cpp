@@ -112,6 +112,28 @@ int main() {
     assert(nstu::control::decode_freeze_state(
                decoded_managed->payload) == true);
 
+    // New IPC message types must be accepted by both ends of the agent-service
+    // pipe. A stale upper bound here silently drops the message before it ever
+    // reaches the service.
+    const std::array<std::byte, 4> chat_payload{
+        std::byte{'c'}, std::byte{'h'}, std::byte{'a'}, std::byte{'t'}};
+    const auto chat_wire = nstu::client::encode_agent_message(
+        {nstu::client::AgentMessageType::chat_submit,
+         {chat_payload.begin(), chat_payload.end()}});
+    assert(!chat_wire.empty());
+    const auto decoded_chat = nstu::client::decode_agent_message(chat_wire);
+    assert(decoded_chat.has_value());
+    assert(decoded_chat->type == nstu::client::AgentMessageType::chat_submit);
+    assert(decoded_chat->payload ==
+           std::vector<std::byte>(chat_payload.begin(), chat_payload.end()));
+
+    const auto erase_wire = nstu::client::encode_agent_message(
+        {nstu::client::AgentMessageType::overlay_erase, {std::byte{1}}});
+    assert(!erase_wire.empty());
+    const auto decoded_erase = nstu::client::decode_agent_message(erase_wire);
+    assert(decoded_erase.has_value());
+    assert(decoded_erase->type == nstu::client::AgentMessageType::overlay_erase);
+
     auto corrupt = status_wire;
     corrupt[0] ^= std::byte{1};
     assert(!nstu::client::decode_agent_message(corrupt).has_value());

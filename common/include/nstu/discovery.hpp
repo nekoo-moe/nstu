@@ -139,6 +139,8 @@ public:
     // unenrolled machine cannot fingerprint the server the rest of the time.
     void set_pairing_beacon(bool enabled, std::string_view server_name);
     [[nodiscard]] bool pairing_beacon_enabled() const noexcept;
+    [[nodiscard]] std::uint64_t pairing_probes_received() const noexcept;
+    [[nodiscard]] std::uint64_t pairing_beacons_sent() const noexcept;
 
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::uint16_t local_port() const noexcept;
