@@ -960,9 +960,12 @@ void pipe_control_loop(HWND overlay) {
                                        g_snapshotting.load() &&
                                        now >= next_snapshot;
             if (want_stream || want_snapshot) {
-                const std::uint32_t capture_width = want_stream ? 1280u : 480u;
-                const std::uint32_t capture_height = want_stream ? 720u : 270u;
-                const int capture_quality = want_stream ? 60 : 52;
+                const std::uint16_t capture_width =
+                    static_cast<std::uint16_t>(want_stream ? 1280 : 480);
+                const std::uint16_t capture_height =
+                    static_cast<std::uint16_t>(want_stream ? 720 : 270);
+                const std::uint8_t capture_quality =
+                    static_cast<std::uint8_t>(want_stream ? 60 : 52);
                 nstu::screen::JpegImage jpeg;
                 const auto capture_begin = std::chrono::steady_clock::now();
                 if (nstu::screen::capture_primary_screen_jpeg(
