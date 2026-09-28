@@ -1704,6 +1704,23 @@ public:
         return it == chat_history_.end() ? std::vector<ChatMessage>{}
                                          : it->second;
     }
+    std::unordered_map<std::uint64_t, std::size_t> chat_counts() const {
+        std::scoped_lock lock(chat_mutex_);
+        std::unordered_map<std::uint64_t, std::size_t> counts;
+        counts.reserve(chat_history_.size());
+        for (const auto& [id, log] : chat_history_) {
+            std::size_t inbound = 0;
+            for (const auto& message : log) {
+                if (!message.from_teacher) {
+                    ++inbound;
+                }
+            }
+            if (inbound != 0) {
+                counts.emplace(id, inbound);
+            }
+        }
+        return counts;
+    }
     mutable std::mutex states_mutex_;
     mutable std::mutex exam_contexts_mutex_;
     std::unordered_map<net::ConnectionId,
@@ -1914,6 +1931,11 @@ bool ServerControlPlane::send_chat(std::uint64_t client_id,
 std::vector<ChatMessage> ServerControlPlane::chat_history(
     std::uint64_t client_id) const {
     return impl_->chat_snapshot(client_id);
+}
+
+std::unordered_map<std::uint64_t, std::size_t>
+ServerControlPlane::chat_message_counts() const {
+    return impl_->chat_counts();
 }
 
 bool ServerControlPlane::start_remote_control(std::uint64_t client_id,

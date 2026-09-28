@@ -316,6 +316,13 @@ nstu_server_commit:
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU" "DisplayName" "NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Server" '"$INSTDIR\server\nstu-server.exe"'
+  ; Start Menu shortcut so the teacher can find and launch NSTU Server from
+  ; Windows Search / the Start menu. SetOutPath fixes the shortcut's working
+  ; directory to the server folder so the bundled MinGW runtime DLLs resolve.
+  SetOutPath "$INSTDIR\server"
+  CreateDirectory "$SMPROGRAMS\NSTU"
+  CreateShortCut "$SMPROGRAMS\NSTU\NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@.lnk" "$INSTDIR\server\nstu-server.exe" "" "$INSTDIR\server\nstu-server.exe" 0
+  SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   RMDir /r "$INSTDIR\.nstu-backup-server"
   RMDir /r "$INSTDIR\.nstu-backup-diagnostics"
@@ -553,6 +560,10 @@ nstu_uninstall_files:
   Delete "$0\NSTU\uninstall-state.json"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Diagnostics"
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "NSTU Server"
+  ; Remove the Start Menu shortcut created for the server role (harmless for the
+  ; client role, where it was never created).
+  Delete "$SMPROGRAMS\NSTU\NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@.lnk"
+  RMDir "$SMPROGRAMS\NSTU"
   DeleteRegKey HKLM "Software\NSTU"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\NSTU"
   RMDir /r /REBOOTOK "$INSTDIR\client"

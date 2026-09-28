@@ -36,6 +36,45 @@ screen snapshots, and teacher-screen broadcast over a local network.
 > validation matrix are not complete. Do not deploy the current nightly build
 > as a security control in a real school.
 
+## Recent updates
+
+The `feature/zero-touch-enrollment` branch adds a batch of reliability and
+classroom-UX changes (pending review on [PR #3](https://github.com/nekoo-moe/nstu/pull/3)):
+
+- **Service setup & upgrades** — each `ChangeServiceConfig2W` recovery step is
+  applied and reported individually with its Win32 error; `nstu-service
+  --prepare-update` provides a Managed-mode-safe maintenance stop; NSIS
+  same-role upgrades stage/rename/roll back the program payload while preserving
+  `DataRoot` and `HKLM\Software\NSTU`.
+- **Pairing** — an independent `WinsockRuntime` is held across the pairing TCP
+  handshake (fixes "TCP socket creation failed" after discovery released the
+  last Winsock reference); the "Add computers" window is persistent and shows
+  live probe/beacon counters.
+- **Chat** — client→server messages are transmitted over the control channel
+  and stored in a per-client transcript with sender labels; incoming teacher
+  messages are labelled `Teacher:` on the client.
+- **Monitoring** — every online computer is snapshotted automatically for the
+  class view (no per-machine Start click); the teacher broadcast is captured at
+  1280×720 for legible text.
+- **Annotation** — an eraser tool was added, and drawing is restricted to Focus
+  mode; the ribbon's manual snapshot controls were removed.
+- **Reboot-to-restore** — the "Enable reboot-to-restore" action is disabled with
+  a reason when a client has reported an unsupported Windows edition.
+- **UI** — minimizing the manager keeps it on the taskbar instead of hiding to
+  the system tray.
+
+### Verification (2026-09-26)
+
+- Full MinGW/UCRT64 build clean; 38/38 unit tests pass.
+- On a Windows client VM the updated service and agent were installed
+  (`nstu-service --install`) and the client **reconnected to the teacher server
+  automatically after the LAN IP changed** — both host and client moved to a new
+  subnet after an internet restart, and authenticated re-discovery brought the
+  client back online without re-pairing. Automatic class-view snapshots resumed
+  with no operator action.
+- Interactive teacher-side checks (chat transcript, eraser, broadcast) still
+  need to be exercised through the manager UI.
+
 ## Why NSTU exists
 
 NSTU grew from regret at seeing schools rely on unlicensed classroom software.

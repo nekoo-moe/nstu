@@ -670,7 +670,11 @@ bool apply_remote_input(const nstu::wire::RemoteInputPacket& packet) {
             (height - 1));
     }
     input.mi.mouseData = packet.mouse_data;
-    input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    // MOUSEEVENTF_MOVE is required alongside ABSOLUTE for the dx/dy to
+    // reposition the cursor; without it SendInput succeeds but the pointer
+    // never moves and button events fire at a stale location.
+    input.mi.dwFlags =
+        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
     const auto flags = packet.flags;
     if ((flags & static_cast<std::uint8_t>(
                      nstu::wire::RemoteInputFlags::mouse_left_down)) != 0) {
@@ -693,6 +697,15 @@ bool apply_remote_input(const nstu::wire::RemoteInputPacket& packet) {
 
 void pipe_control_loop(HWND overlay) {
     auto next_snapshot = std::chrono::steady_clock::now();
+    // Live Focus streaming captures on its own fps-paced clock, distinct from
+    // the slow class-view snapshot cadence above.
+    auto next_stream_frame = std::chrono::steady_clock::now();
+    // Streaming diagnostics accumulators (plan Epic B); flushed ~once/second so
+    // "laggy" can be attributed to real capture+encode cost, not guessed.
+    auto stream_stat_window = std::chrono::steady_clock::now();
+    int stream_frame_count = 0;
+    double stream_capture_ms_total = 0.0;
+    std::size_t stream_bytes_total = 0;
     while (!g_agent_stopping.load()) {
         nstu::client::NamedPipe pipe;
         if (!pipe.connect_client(nstu::client::kControlPipeName, 1000,
@@ -751,9 +764,13 @@ void pipe_control_loop(HWND overlay) {
                     }
                 } else if (message->type ==
                            nstu::client::AgentMessageType::remote_start) {
-                    if (BlockInput(TRUE) != FALSE) {
-                        g_remote_control_active = true;
-                    }
+                    // Arm remote control unconditionally. BlockInput(TRUE)
+                    // fails for a non-elevated / RDP-session agent, and gating
+                    // arming on it silently dropped every remote_input packet
+                    // (see apply below). Suppressing local input is a
+                    // best-effort nicety, not a precondition for control.
+                    g_remote_control_active = true;
+                    (void)BlockInput(TRUE);
                 } else if (message->type ==
                            nstu::client::AgentMessageType::remote_input) {
                     const auto packet = nstu::client::decode_remote_input(
@@ -934,11 +951,24 @@ void pipe_control_loop(HWND overlay) {
                 }
             }
             const auto now = std::chrono::steady_clock::now();
-            if (g_snapshotting.load() && now >= next_snapshot) {
+            // Focus live streaming takes priority over the slow class-view
+            // snapshot: while streaming, capture at the requested fps and a
+            // higher resolution; otherwise fall back to the periodic snapshot.
+            const bool streaming = g_streaming.load();
+            const bool want_stream = streaming && now >= next_stream_frame;
+            const bool want_snapshot = !streaming &&
+                                       g_snapshotting.load() &&
+                                       now >= next_snapshot;
+            if (want_stream || want_snapshot) {
+                const std::uint32_t capture_width = want_stream ? 1280u : 480u;
+                const std::uint32_t capture_height = want_stream ? 720u : 270u;
+                const int capture_quality = want_stream ? 60 : 52;
                 nstu::screen::JpegImage jpeg;
+                const auto capture_begin = std::chrono::steady_clock::now();
                 if (nstu::screen::capture_primary_screen_jpeg(
-                        jpeg, 480, 270, 52,
+                        jpeg, capture_width, capture_height, capture_quality,
                         nstu::control::kMaximumSnapshotJpegBytes, nullptr)) {
+                    const std::size_t jpeg_bytes = jpeg.bytes.size();
                     nstu::control::SnapshotFrame frame;
                     frame.width = jpeg.width;
                     frame.height = jpeg.height;
@@ -957,9 +987,54 @@ void pipe_control_loop(HWND overlay) {
                             break;
                         }
                     }
+                    if (want_stream) {
+                        stream_capture_ms_total +=
+                            std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() -
+                                capture_begin)
+                                .count();
+                        stream_bytes_total += jpeg_bytes;
+                        ++stream_frame_count;
+                    }
                 }
-                next_snapshot = now + std::chrono::seconds(
-                    g_snapshot_interval_seconds.load());
+                if (want_stream) {
+                    const std::uint8_t fps = std::clamp<std::uint8_t>(
+                        g_stream_fps.load(), 5, 15);
+                    next_stream_frame =
+                        now + std::chrono::milliseconds(1000 / fps);
+                    const auto window_elapsed =
+                        std::chrono::steady_clock::now() - stream_stat_window;
+                    if (window_elapsed >= std::chrono::seconds(1) &&
+                        stream_frame_count > 0) {
+                        const double secs =
+                            std::chrono::duration<double>(window_elapsed)
+                                .count();
+                        const auto fmt1 = [](double v) {
+                            const long long t =
+                                static_cast<long long>(v * 10.0 + 0.5);
+                            return std::to_string(t / 10) + "." +
+                                   std::to_string(t % 10);
+                        };
+                        const std::string line =
+                            "NSTU stream: " +
+                            fmt1(stream_frame_count / secs) + " fps (target " +
+                            std::to_string(fps) + "), capture+encode avg " +
+                            fmt1(stream_capture_ms_total / stream_frame_count) +
+                            " ms, avg " +
+                            std::to_string((stream_bytes_total /
+                                            stream_frame_count) /
+                                           1024) +
+                            " KiB/frame\n";
+                        OutputDebugStringA(line.c_str());
+                        stream_stat_window = std::chrono::steady_clock::now();
+                        stream_frame_count = 0;
+                        stream_capture_ms_total = 0.0;
+                        stream_bytes_total = 0;
+                    }
+                } else {
+                    next_snapshot = now + std::chrono::seconds(
+                        g_snapshot_interval_seconds.load());
+                }
             }
         }
         stop_remote_control();

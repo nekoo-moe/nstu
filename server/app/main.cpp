@@ -6,12 +6,15 @@
 #include "nstu/screen_snapshot.hpp"
 #include "nstu/secret_store.hpp"
 #include "nstu/snapshot_generation_gate.hpp"
+#include "nstu/stream_rearm_watchdog.hpp"
 #include "nstu/telemetry.hpp"
 #include "nstu/protocol_headers.h"
 
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <dxgi.h>
 #include <dxgi1_2.h>
+#include <windowsx.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mferror.h>
@@ -362,6 +365,9 @@ constexpr UINT kTrayToggleWindow = 2001;
 constexpr UINT kTrayExit = 2002;
 UINT g_taskbar_created_message = 0;
 NOTIFYICONDATAW g_tray_icon{};
+// The manager's main window, used for taskbar attention (FlashWindowEx) when a
+// student chat arrives while the window is not in the foreground.
+HWND g_main_window = nullptr;
 
 constexpr int kMinimumSnapshotInterval = 5;
 constexpr int kMaximumSnapshotInterval = 10;
@@ -422,11 +428,21 @@ struct DashboardState {
     bool dark_mode = false;
     bool show_offline = true;
     bool broadcast_enabled = false;
-    bool remote_control_enabled = false;
-    std::uint64_t remote_control_client_id = 0;
-    bool remote_pointer_down = false;
-    ImVec2 remote_pointer_last{};
-    std::array<char, 64> remote_keyboard_input{};
+    // The client currently receiving a live Focus stream (~15fps). Distinct
+    // from the slow class-view snapshots; zero when no client is focused.
+    std::uint64_t streaming_client_id = 0;
+    // Measured delivered-frame rate for the focused stream (from
+    // ClientRecord::snapshot_generation deltas) — Epic B diagnostic so the
+    // Focus label shows real fps instead of a fixed "~15fps".
+    std::uint64_t fps_sample_client_id = 0;
+    std::uint64_t fps_sample_generation = 0;
+    std::chrono::steady_clock::time_point fps_sample_time{};
+    double measured_stream_fps = 0.0;
+    // Self-heals a stalled Focus/remote stream. Arming above is edge-triggered
+    // on the streamed client id, so a start_stream lost across a client/agent
+    // reconnect leaves the server believing a client streams while its agent
+    // sends nothing. This re-asserts set_streaming when delivered frames stop.
+    nstu::server::StreamRearmWatchdog stream_watchdog;
     bool annotation_enabled = false;
     bool uwf_confirmation_open = false;
     std::uint64_t uwf_confirmation_client_id = 0;
@@ -444,6 +460,17 @@ struct DashboardState {
     bool telemetry_report_requested = false;
     std::array<char, 96> client_filter{};
     std::array<char, 512> chat_input{};
+    // Chat notification state. `chat_counts` is the current per-client inbound
+    // (student) message count refreshed each frame; `chat_seen_counts` is the
+    // count when the teacher last had that client's chat on screen (badge
+    // baseline); `chat_observed_counts` is the count at the previous poll (edge
+    // detection for the one-shot taskbar flash). `chat_counts_initialized`
+    // seeds all three from the first poll so pre-existing history neither badges
+    // nor flashes when the manager launches.
+    std::unordered_map<std::uint64_t, std::size_t> chat_counts;
+    std::unordered_map<std::uint64_t, std::size_t> chat_seen_counts;
+    std::unordered_map<std::uint64_t, std::size_t> chat_observed_counts;
+    bool chat_counts_initialized = false;
     // Operator-editable room label shown to computers choosing this server. The
     // buffer backs the "Add computers" text field (sized to the discovery name
     // bound plus a NUL); room_name_path is where the plaintext hint persists and
@@ -457,6 +484,19 @@ struct DashboardState {
 const char* tr(const DashboardState& state, const char* english,
                const char* vietnamese) {
     return state.language == Language::vietnamese ? vietnamese : english;
+}
+
+// A client has unread student chat when its current inbound count exceeds the
+// count the teacher last had on screen for it.
+bool client_has_unread_chat(const DashboardState& state, std::uint64_t id) {
+    const auto current = state.chat_counts.find(id);
+    if (current == state.chat_counts.end()) {
+        return false;
+    }
+    const auto seen = state.chat_seen_counts.find(id);
+    const std::size_t seen_count =
+        seen == state.chat_seen_counts.end() ? 0 : seen->second;
+    return current->second > seen_count;
 }
 
 bool update_telemetry_policy(
@@ -716,6 +756,358 @@ bool create_device(HWND window) {
     g_graphics_device_lost = false;
     refresh_graphics_report();
     return true;
+}
+
+// ---- Separate remote-control window (Part C) ------------------------------
+// An independent top-level window that shows the controlled client's live
+// stream and forwards mouse/keyboard as RemoteInputPacket. It shares the main
+// D3D11 device through a second swap chain plus a tiny texture-blit pipeline,
+// so the Focus view stays display-only (plus annotation) with no embedded
+// remote input. All access happens on the UI thread: the window is created,
+// pumped, rendered, and torn down from the main loop's single thread.
+struct RemoteImageRect {
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 0.0f;
+    float h = 0.0f;
+};
+
+HWND g_remote_window = nullptr;
+Microsoft::WRL::ComPtr<IDXGISwapChain> g_remote_swap_chain;
+Microsoft::WRL::ComPtr<ID3D11RenderTargetView> g_remote_render_target;
+Microsoft::WRL::ComPtr<ID3D11VertexShader> g_remote_vertex_shader;
+Microsoft::WRL::ComPtr<ID3D11PixelShader> g_remote_pixel_shader;
+Microsoft::WRL::ComPtr<ID3D11SamplerState> g_remote_sampler;
+// A second, point-filtered sampler used only when the remote window is enlarged
+// past the 720p stream. Bilinear upscaling blurs small text; nearest keeps it
+// crisp. Downscaling still uses the linear sampler to avoid aliasing.
+Microsoft::WRL::ComPtr<ID3D11SamplerState> g_remote_sampler_point;
+std::uint64_t g_remote_target_client = 0;
+nstu::server::ServerControlPlane* g_remote_control_plane = nullptr;
+RemoteImageRect g_remote_image_rect;
+std::atomic_bool g_remote_close_pending{false};
+bool g_remote_class_registered = false;
+
+bool ensure_remote_pipeline() {
+    if (g_remote_vertex_shader && g_remote_pixel_shader && g_remote_sampler &&
+        g_remote_sampler_point) {
+        return true;
+    }
+    if (!g_device) {
+        return false;
+    }
+    static const char kVertexShader[] =
+        "struct VSOut{float4 pos:SV_POSITION;float2 uv:TEXCOORD0;};"
+        "VSOut main(uint id:SV_VertexID){VSOut o;"
+        "float2 uv=float2((id<<1)&2,id&2);o.uv=uv;"
+        "o.pos=float4(uv*float2(2,-2)+float2(-1,1),0,1);return o;}";
+    static const char kPixelShader[] =
+        "Texture2D tex:register(t0);SamplerState smp:register(s0);"
+        "float4 main(float4 pos:SV_POSITION,float2 uv:TEXCOORD0):SV_TARGET"
+        "{return tex.Sample(smp,uv);}";
+    Microsoft::WRL::ComPtr<ID3DBlob> vs_blob;
+    Microsoft::WRL::ComPtr<ID3DBlob> ps_blob;
+    Microsoft::WRL::ComPtr<ID3DBlob> errors;
+    HRESULT hr = D3DCompile(kVertexShader, sizeof(kVertexShader) - 1, "remote_vs",
+                            nullptr, nullptr, "main", "vs_4_0", 0, 0, &vs_blob,
+                            &errors);
+    if (FAILED(hr)) {
+        record_diagnostic("error", "D3D11",
+                          "Remote vertex shader compile failed " + hresult_text(hr));
+        return false;
+    }
+    hr = D3DCompile(kPixelShader, sizeof(kPixelShader) - 1, "remote_ps", nullptr,
+                    nullptr, "main", "ps_4_0", 0, 0, &ps_blob, &errors);
+    if (FAILED(hr)) {
+        record_diagnostic("error", "D3D11",
+                          "Remote pixel shader compile failed " + hresult_text(hr));
+        return false;
+    }
+    if (FAILED(g_device->CreateVertexShader(vs_blob->GetBufferPointer(),
+                                            vs_blob->GetBufferSize(), nullptr,
+                                            &g_remote_vertex_shader)) ||
+        FAILED(g_device->CreatePixelShader(ps_blob->GetBufferPointer(),
+                                           ps_blob->GetBufferSize(), nullptr,
+                                           &g_remote_pixel_shader))) {
+        g_remote_vertex_shader.Reset();
+        g_remote_pixel_shader.Reset();
+        return false;
+    }
+    D3D11_SAMPLER_DESC sampler_desc{};
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(g_device->CreateSamplerState(&sampler_desc, &g_remote_sampler))) {
+        return false;
+    }
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    if (FAILED(g_device->CreateSamplerState(&sampler_desc,
+                                            &g_remote_sampler_point))) {
+        return false;
+    }
+    return true;
+}
+
+bool create_remote_render_target() {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> back_buffer;
+    if (!g_remote_swap_chain ||
+        FAILED(g_remote_swap_chain->GetBuffer(0, IID_PPV_ARGS(&back_buffer)))) {
+        return false;
+    }
+    return SUCCEEDED(g_device->CreateRenderTargetView(
+        back_buffer.Get(), nullptr, &g_remote_render_target));
+}
+
+void render_remote_window(ID3D11ShaderResourceView* srv, std::uint32_t tex_w,
+                          std::uint32_t tex_h) {
+    if (!g_remote_window || !g_remote_swap_chain || !g_remote_render_target ||
+        !g_context || g_graphics_device_lost) {
+        return;
+    }
+    RECT client{};
+    GetClientRect(g_remote_window, &client);
+    const float cw = static_cast<float>(client.right - client.left);
+    const float ch = static_cast<float>(client.bottom - client.top);
+    if (cw < 1.0f || ch < 1.0f) {
+        return;
+    }
+    // Letterbox the client's stream aspect into the window client area so the
+    // whole remote screen stays visible and input maps to the right pixels.
+    float iw = cw;
+    float ih = ch;
+    float ix = 0.0f;
+    float iy = 0.0f;
+    if (tex_w > 0 && tex_h > 0) {
+        const float ta = static_cast<float>(tex_w) / static_cast<float>(tex_h);
+        const float ca = cw / ch;
+        if (ca > ta) {
+            ih = ch;
+            iw = ch * ta;
+            ix = (cw - iw) * 0.5f;
+        } else {
+            iw = cw;
+            ih = cw / ta;
+            iy = (ch - ih) * 0.5f;
+        }
+    }
+    g_remote_image_rect = {ix, iy, iw, ih};
+    const float clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    g_context->OMSetRenderTargets(1, g_remote_render_target.GetAddressOf(),
+                                  nullptr);
+    g_context->ClearRenderTargetView(g_remote_render_target.Get(), clear_color);
+    if (srv != nullptr && ensure_remote_pipeline()) {
+        D3D11_VIEWPORT viewport{};
+        viewport.TopLeftX = ix;
+        viewport.TopLeftY = iy;
+        viewport.Width = iw;
+        viewport.Height = ih;
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        g_context->RSSetViewports(1, &viewport);
+        g_context->IASetInputLayout(nullptr);
+        g_context->IASetPrimitiveTopology(
+            D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_context->VSSetShader(g_remote_vertex_shader.Get(), nullptr, 0);
+        g_context->PSSetShader(g_remote_pixel_shader.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* views[1] = {srv};
+        g_context->PSSetShaderResources(0, 1, views);
+        // Enlarged past the source: nearest-filter keeps text crisp instead of
+        // blurring it. At or below native, linear avoids downscale aliasing.
+        const bool upscaling =
+            tex_w > 0 && iw > static_cast<float>(tex_w);
+        ID3D11SamplerState* sampler =
+            (upscaling ? g_remote_sampler_point : g_remote_sampler).Get();
+        g_context->PSSetSamplers(0, 1, &sampler);
+        g_context->Draw(3, 0);
+        ID3D11ShaderResourceView* null_views[1] = {nullptr};
+        g_context->PSSetShaderResources(0, 1, null_views);
+    }
+    (void)g_remote_swap_chain->Present(0, 0);
+}
+
+LRESULT CALLBACK remote_window_proc(HWND hwnd, UINT message, WPARAM wparam,
+                                    LPARAM lparam) {
+    switch (message) {
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP: {
+        if (g_remote_control_plane != nullptr && g_remote_target_client != 0) {
+            const int mx = GET_X_LPARAM(lparam);
+            const int my = GET_Y_LPARAM(lparam);
+            const RemoteImageRect& rect = g_remote_image_rect;
+            float rx = 0.5f;
+            float ry = 0.5f;
+            if (rect.w > 0.0f && rect.h > 0.0f) {
+                rx = std::clamp((static_cast<float>(mx) - rect.x) / rect.w, 0.0f,
+                                1.0f);
+                ry = std::clamp((static_cast<float>(my) - rect.y) / rect.h, 0.0f,
+                                1.0f);
+            }
+            nstu::wire::RemoteInputPacket packet{};
+            packet.input_type =
+                static_cast<std::uint8_t>(nstu::wire::RemoteInputType::mouse);
+            packet.flags =
+                static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputFlags::mouse_absolute) |
+                static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputFlags::mouse_normalized);
+            if (message == WM_LBUTTONDOWN) {
+                packet.flags |= static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputFlags::mouse_left_down);
+                SetCapture(hwnd);
+            } else if (message == WM_LBUTTONUP) {
+                packet.flags |= static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputFlags::mouse_left_up);
+                ReleaseCapture();
+            } else if (message == WM_RBUTTONDOWN) {
+                packet.flags |= static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputFlags::mouse_right_down);
+                SetCapture(hwnd);
+            } else if (message == WM_RBUTTONUP) {
+                packet.flags |= static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputFlags::mouse_right_up);
+                ReleaseCapture();
+            }
+            packet.x = static_cast<std::int32_t>(rx * 65535.0f);
+            packet.y = static_cast<std::int32_t>(ry * 65535.0f);
+            std::string ignored;
+            (void)g_remote_control_plane->send_remote_input(
+                g_remote_target_client, packet, &ignored);
+        }
+        return 0;
+    }
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP: {
+        if (g_remote_control_plane != nullptr && g_remote_target_client != 0) {
+            nstu::wire::RemoteInputPacket packet{};
+            packet.input_type =
+                static_cast<std::uint8_t>(nstu::wire::RemoteInputType::keyboard);
+            packet.virtual_key = static_cast<std::uint16_t>(wparam);
+            if (message == WM_KEYUP || message == WM_SYSKEYUP) {
+                packet.flags = static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputFlags::key_up);
+            }
+            std::string ignored;
+            (void)g_remote_control_plane->send_remote_input(
+                g_remote_target_client, packet, &ignored);
+        }
+        return 0;
+    }
+    case WM_SIZE:
+        if (g_remote_swap_chain && wparam != SIZE_MINIMIZED) {
+            g_remote_render_target.Reset();
+            (void)g_remote_swap_chain->ResizeBuffers(
+                0, LOWORD(lparam), HIWORD(lparam), DXGI_FORMAT_UNKNOWN, 0);
+            create_remote_render_target();
+        }
+        return 0;
+    case WM_CLOSE:
+        // Tear-down runs on the main loop (COM release + control-plane stop)
+        // rather than inside this synchronous window callback.
+        g_remote_close_pending.store(true);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void close_remote_window(nstu::server::ServerControlPlane& control_plane) {
+    if (g_remote_target_client != 0) {
+        (void)control_plane.stop_remote_control(g_remote_target_client, nullptr);
+        g_remote_target_client = 0;
+    }
+    g_remote_render_target.Reset();
+    g_remote_swap_chain.Reset();
+    if (g_remote_window != nullptr) {
+        DestroyWindow(g_remote_window);
+        g_remote_window = nullptr;
+    }
+    g_remote_image_rect = {};
+    g_remote_close_pending.store(false);
+}
+
+bool open_remote_window(nstu::server::ServerControlPlane& control_plane,
+                        std::uint64_t client_id) {
+    if (!g_device || client_id == 0) {
+        return false;
+    }
+    g_remote_control_plane = &control_plane;
+    if (!ensure_remote_pipeline()) {
+        return false;
+    }
+    if (g_remote_window == nullptr) {
+        if (!g_remote_class_registered) {
+            WNDCLASSW window_class{};
+            window_class.lpfnWndProc = remote_window_proc;
+            window_class.hInstance = GetModuleHandleW(nullptr);
+            window_class.lpszClassName = L"NstuRemoteWindow";
+            window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+            window_class.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+            RegisterClassW(&window_class);
+            g_remote_class_registered = true;
+        }
+        g_remote_window = CreateWindowW(
+            L"NstuRemoteWindow", L"NSTU Remote control", WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT, CW_USEDEFAULT, 1120, 700, nullptr, nullptr,
+            GetModuleHandleW(nullptr), nullptr);
+        if (g_remote_window == nullptr) {
+            return false;
+        }
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+        Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+        Microsoft::WRL::ComPtr<IDXGIFactory> factory;
+        if (FAILED(g_device.As(&dxgi_device)) ||
+            FAILED(dxgi_device->GetAdapter(&adapter)) ||
+            FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) {
+            DestroyWindow(g_remote_window);
+            g_remote_window = nullptr;
+            return false;
+        }
+        DXGI_SWAP_CHAIN_DESC description{};
+        description.BufferCount = 2;
+        description.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        description.OutputWindow = g_remote_window;
+        description.SampleDesc.Count = 1;
+        description.Windowed = TRUE;
+        description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        if (FAILED(factory->CreateSwapChain(g_device.Get(), &description,
+                                            &g_remote_swap_chain)) ||
+            !create_remote_render_target()) {
+            g_remote_render_target.Reset();
+            g_remote_swap_chain.Reset();
+            DestroyWindow(g_remote_window);
+            g_remote_window = nullptr;
+            return false;
+        }
+        RECT client{};
+        GetClientRect(g_remote_window, &client);
+        g_remote_image_rect = {0.0f, 0.0f,
+                               static_cast<float>(client.right - client.left),
+                               static_cast<float>(client.bottom - client.top)};
+        ShowWindow(g_remote_window, SW_SHOW);
+    }
+    if (g_remote_target_client != 0 && g_remote_target_client != client_id) {
+        (void)control_plane.stop_remote_control(g_remote_target_client, nullptr);
+        g_remote_target_client = 0;
+    }
+    std::string error;
+    const bool ok = control_plane.start_remote_control(client_id, &error);
+    if (ok) {
+        g_remote_target_client = client_id;
+        SetForegroundWindow(g_remote_window);
+    } else {
+        record_operation_failure("RemoteControl", "Start command failed", error);
+    }
+    return ok;
 }
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
@@ -1129,7 +1521,8 @@ void draw_icon(ImDrawList* draw_list, IconKind icon, ImVec2 center,
 
 bool draw_icon_button(const char* id, const char* label, IconKind icon,
                       ImVec2 size, bool selected = false,
-                      bool enabled = true, bool show_label = true) {
+                      bool enabled = true, bool show_label = true,
+                      bool badge = false) {
     ImGui::PushID(id);
     if (!enabled) {
         ImGui::BeginDisabled();
@@ -1161,6 +1554,14 @@ bool draw_icon_button(const char* id, const char* label, IconKind icon,
     }
     if (hovered && !show_label) {
         ImGui::SetTooltip("%s", label);
+    }
+    if (badge) {
+        // Small attention dot at the top-right corner; draws over the icon so it
+        // reads as an unread marker regardless of label state.
+        const ImVec2 center{maximum.x - 6.0f, minimum.y + 6.0f};
+        draw_list->AddCircleFilled(center, 4.5f, IM_COL32(229, 72, 77, 255));
+        draw_list->AddCircle(center, 4.5f, IM_COL32(255, 255, 255, 235), 12,
+                             1.4f);
     }
     if (!enabled) {
         ImGui::EndDisabled();
@@ -1439,6 +1840,14 @@ void draw_focus_client_list(
                     state.selected_client_id = client.id;
                     state.annotation_enabled = false;
                 }
+                if (client_has_unread_chat(state, client.id)) {
+                    const ImVec2 rect_min = ImGui::GetItemRectMin();
+                    const ImVec2 rect_max = ImGui::GetItemRectMax();
+                    ImGui::GetWindowDrawList()->AddCircleFilled(
+                        {rect_max.x - 9.0f,
+                         (rect_min.y + rect_max.y) * 0.5f},
+                        4.0f, IM_COL32(229, 72, 77, 255));
+                }
                 ImGui::TableSetColumnIndex(1);
                 ImGui::TextColored(status_text_color(client.status), "%s",
                                    client_status_label(client.status, state));
@@ -1629,65 +2038,36 @@ void draw_selected_client(
 
     ImGui::TextUnformatted(tr(state, "Latest screen snapshot",
                               "Ảnh chụp màn hình mới nhất"));
+    const bool live_now = selected_client->streaming;
+    ImGui::SameLine();
+    if (live_now) {
+        const ImVec4 live_color = g_dark_mode
+                                      ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
+                                      : ImVec4{0.10f, 0.55f, 0.24f, 1.0f};
+        std::string live_label;
+        if (state.measured_stream_fps > 0.0) {
+            const long long tenths = static_cast<long long>(
+                state.measured_stream_fps * 10.0 + 0.5);
+            live_label = std::string(tr(state, "· Live ", "· Trực tiếp ")) +
+                         std::to_string(tenths / 10) + "." +
+                         std::to_string(tenths % 10) + " fps";
+        } else {
+            live_label =
+                tr(state, "· Live (measuring)", "· Trực tiếp (đang đo)");
+        }
+        ImGui::TextColored(live_color, "%s", live_label.c_str());
+    } else {
+        ImGui::TextDisabled("%s", tr(state, "· Snapshot", "· Ảnh chụp"));
+    }
     const float preview_width = ImGui::GetContentRegionAvail().x;
     const float preview_height = std::clamp(
         preview_width * 0.5625f, 220.0f,
         std::max(220.0f, ImGui::GetContentRegionAvail().y - 210.0f));
     const auto surface = draw_screen_surface(
         *selected_client, preview_height, "##focus-screen", state);
-    if (state.remote_control_enabled && surface.has_frame) {
-        const ImVec2 mouse = ImGui::GetIO().MousePos;
-        const bool inside = mouse.x >= surface.image_min.x &&
-                            mouse.x <= surface.image_max.x &&
-                            mouse.y >= surface.image_min.y &&
-                            mouse.y <= surface.image_max.y;
-        const auto send_mouse = [&](ImVec2 point, std::uint8_t flags,
-                                    bool require_inside) {
-            if (require_inside && !inside) {
-                return;
-            }
-            const float x_ratio = std::clamp(
-                (point.x - surface.image_min.x) /
-                    (surface.image_max.x - surface.image_min.x),
-                0.0f, 1.0f);
-            const float y_ratio = std::clamp(
-                (point.y - surface.image_min.y) /
-                    (surface.image_max.y - surface.image_min.y),
-                0.0f, 1.0f);
-            nstu::wire::RemoteInputPacket packet{};
-            packet.input_type = static_cast<std::uint8_t>(
-                nstu::wire::RemoteInputType::mouse);
-            packet.flags = flags | static_cast<std::uint8_t>(
-                nstu::wire::RemoteInputFlags::mouse_absolute) |
-                static_cast<std::uint8_t>(
-                    nstu::wire::RemoteInputFlags::mouse_normalized);
-            packet.x = static_cast<std::int32_t>(x_ratio * 65535.0f);
-            packet.y = static_cast<std::int32_t>(y_ratio * 65535.0f);
-            std::string ignored_error;
-            (void)control_plane.send_remote_input(
-                selected_client->id, packet, &ignored_error);
-        };
-        if (inside && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            state.remote_pointer_down = true;
-            state.remote_pointer_last = mouse;
-            send_mouse(mouse, static_cast<std::uint8_t>(
-                nstu::wire::RemoteInputFlags::mouse_left_down), true);
-        }
-        if (state.remote_pointer_down && inside &&
-            ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            state.remote_pointer_last = mouse;
-            send_mouse(mouse, 0, true);
-        }
-        if (state.remote_pointer_down &&
-            ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            send_mouse(inside ? mouse : state.remote_pointer_last,
-                       static_cast<std::uint8_t>(
-                           nstu::wire::RemoteInputFlags::mouse_left_up), false);
-            state.remote_pointer_down = false;
-        }
-    } else {
-        state.remote_pointer_down = false;
-    }
+    // Remote input no longer rides on this embedded Focus surface: it lives in a
+    // separate top-level window (see open_remote_window). The Focus view is a
+    // read-only live preview plus teacher annotation.
     if (state.annotation_enabled && surface.has_frame) {
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         const bool inside = mouse.x >= surface.image_min.x &&
@@ -1888,79 +2268,29 @@ void draw_selected_client(
     ImGui::SameLine();
     const bool remote_available = selected_client->status !=
         nstu::server::ClientStatus::offline;
-    if (ImGui::Button(state.remote_control_enabled
+    const bool remote_open_here = g_remote_window != nullptr &&
+        g_remote_target_client == selected_client->id;
+    if (ImGui::Button(remote_open_here
                           ? tr(state, "Stop remote", "Dừng điều khiển")
                           : tr(state, "Start remote", "Bắt đầu điều khiển"))) {
-        std::string error;
-        if (state.remote_control_enabled) {
-            const bool ok = control_plane.stop_remote_control(
-                selected_client->id, &error);
-            state.control_status = ok
-                ? tr(state, "Remote control stopped.",
-                     "Đã dừng điều khiển từ xa.")
-                : error;
-            if (!ok) {
-                record_operation_failure("RemoteControl",
-                                         "Stop command failed", error);
-            }
-            state.remote_control_enabled = false;
-            state.remote_control_client_id = 0;
-            state.remote_pointer_down = false;
+        if (remote_open_here) {
+            close_remote_window(control_plane);
+            state.control_status = tr(state, "Remote control window closed.",
+                                      "Đã đóng cửa sổ điều khiển từ xa.");
         } else if (remote_available) {
-            const bool ok = control_plane.start_remote_control(
-                selected_client->id, &error);
+            const bool ok =
+                open_remote_window(control_plane, selected_client->id);
             state.control_status = ok
-                ? tr(state, "Remote control enabled.",
-                     "Đã bật điều khiển từ xa.")
-                : error;
-            if (!ok) {
-                record_operation_failure("RemoteControl",
-                                         "Start command failed", error);
-            }
-            state.remote_control_enabled = ok;
-            state.remote_control_client_id = ok ? selected_client->id : 0;
+                ? tr(state, "Remote control window opened.",
+                     "Đã mở cửa sổ điều khiển từ xa.")
+                : tr(state, "Could not open the remote control window.",
+                     "Không thể mở cửa sổ điều khiển từ xa.");
         }
         ImGui::OpenPopup("control-status");
     }
-    if (!remote_available && state.remote_control_enabled) {
-        (void)control_plane.stop_remote_control(selected_client->id, nullptr);
-        state.remote_control_enabled = false;
-        state.remote_control_client_id = 0;
-        state.remote_pointer_down = false;
-    }
-    if (state.remote_control_enabled) {
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(220.0f);
-        const bool submit_key = ImGui::InputText(
-            "##remote-key", state.remote_keyboard_input.data(),
-            state.remote_keyboard_input.size(),
-            ImGuiInputTextFlags_EnterReturnsTrue);
-        if (submit_key && state.remote_keyboard_input[0] != '\0') {
-            for (const unsigned char character : std::string_view(
-                     state.remote_keyboard_input.data())) {
-                const SHORT key = VkKeyScanA(character);
-                if (key == -1) {
-                    continue;
-                }
-                nstu::wire::RemoteInputPacket down{};
-                down.input_type = static_cast<std::uint8_t>(
-                    nstu::wire::RemoteInputType::keyboard);
-                down.virtual_key = LOBYTE(key);
-                nstu::wire::RemoteInputPacket up = down;
-                up.flags = static_cast<std::uint8_t>(
-                    nstu::wire::RemoteInputFlags::key_up);
-                std::string ignored_error;
-                (void)control_plane.send_remote_input(
-                    selected_client->id, down, &ignored_error);
-                (void)control_plane.send_remote_input(
-                    selected_client->id, up, &ignored_error);
-            }
-            state.remote_keyboard_input[0] = '\0';
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Type ASCII text and press Enter to send it");
-        }
-    }
+    // Keyboard entry and the offline auto-stop now belong to the separate
+    // remote-control window: it forwards real key events and the main loop
+    // closes it when the controlled client drops offline.
     ImGui::SameLine();
     if (ImGui::Button(state.annotation_enabled
                           ? tr(state, "Finish drawing", "Kết thúc vẽ")
@@ -2838,9 +3168,17 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
                 : error;
         }
         ImGui::SameLine();
+        bool any_unread_chat = false;
+        for (const auto& client : clients) {
+            if (client_has_unread_chat(state, client.id)) {
+                any_unread_chat = true;
+                break;
+            }
+        }
         if (draw_icon_button("chat-client", tr(state, "Chat", "Chat"),
                              IconKind::chat, {58.0f, 54.0f}, false,
-                             selected_client != nullptr)) {
+                             selected_client != nullptr, true,
+                             any_unread_chat)) {
             state.view = DashboardView::selected_client;
         }
         draw_ribbon_group_caption(teaching_width,
@@ -3067,6 +3405,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         return 1;
     }
     ShowWindow(window, SW_SHOWDEFAULT);
+    g_main_window = window;
     add_tray_icon(window);
 
     DashboardState dashboard;
@@ -3161,6 +3500,56 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                          ImGuiWindowFlags_NoBringToFrontOnFocus);
 
         const auto clients = registry.snapshot();
+        // Chat notifications: refresh per-client inbound (student) counts, flash
+        // the taskbar once when a new student line arrives while the manager is
+        // not in the foreground, and expose unread state for the badges. The
+        // first poll seeds the baselines so existing history neither flashes nor
+        // badges at launch.
+        dashboard.chat_counts = control_plane.chat_message_counts();
+        {
+            const std::uint64_t viewing_chat_id =
+                dashboard.view == DashboardView::selected_client
+                    ? dashboard.selected_client_id
+                    : 0;
+            if (!dashboard.chat_counts_initialized) {
+                dashboard.chat_observed_counts = dashboard.chat_counts;
+                dashboard.chat_seen_counts = dashboard.chat_counts;
+                dashboard.chat_counts_initialized = true;
+            } else {
+                bool new_inbound = false;
+                for (const auto& [id, count] : dashboard.chat_counts) {
+                    const auto observed =
+                        dashboard.chat_observed_counts.find(id);
+                    const std::size_t previous =
+                        observed == dashboard.chat_observed_counts.end()
+                            ? 0
+                            : observed->second;
+                    if (count > previous && id != viewing_chat_id) {
+                        new_inbound = true;
+                    }
+                    dashboard.chat_observed_counts[id] = count;
+                }
+                if (new_inbound && g_main_window != nullptr &&
+                    GetForegroundWindow() != g_main_window) {
+                    FLASHWINFO flash{};
+                    flash.cbSize = sizeof(flash);
+                    flash.hwnd = g_main_window;
+                    flash.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
+                    flash.uCount = 3;
+                    FlashWindowEx(&flash);
+                }
+            }
+            // The focused client's chat panel is on screen, so its lines are
+            // read as they arrive.
+            if (viewing_chat_id != 0) {
+                const auto current =
+                    dashboard.chat_counts.find(viewing_chat_id);
+                dashboard.chat_seen_counts[viewing_chat_id] =
+                    current == dashboard.chat_counts.end()
+                        ? 0
+                        : current->second;
+            }
+        }
         // Requests the teacher never answered clear themselves rather
         // than sitting in the list until the window is closed.
         control_plane.expire_pending_pairings();
@@ -3229,14 +3618,112 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         const nstu::server::ClientRecord* selected =
             selected_client == clients.end() ? nullptr : &*selected_client;
 
-        if (dashboard.remote_control_enabled &&
-            (selected == nullptr || dashboard.view != DashboardView::selected_client ||
-             dashboard.remote_control_client_id != selected->id)) {
-            (void)control_plane.stop_remote_control(
-                dashboard.remote_control_client_id, nullptr);
-            dashboard.remote_control_enabled = false;
-            dashboard.remote_control_client_id = 0;
-            dashboard.remote_pointer_down = false;
+        // Delivered-fps meter for the focused/streaming client (Epic B
+        // diagnostic): sample snapshot_generation once per second so the Focus
+        // label reports the real frame rate reaching the manager, not "~15fps".
+        if (selected != nullptr && selected->streaming) {
+            if (dashboard.fps_sample_client_id != selected->id) {
+                dashboard.fps_sample_client_id = selected->id;
+                dashboard.fps_sample_generation = selected->snapshot_generation;
+                dashboard.fps_sample_time = now;
+                dashboard.measured_stream_fps = 0.0;
+            } else {
+                const auto elapsed = now - dashboard.fps_sample_time;
+                if (elapsed >= std::chrono::seconds(1)) {
+                    const double secs =
+                        std::chrono::duration<double>(elapsed).count();
+                    const std::uint64_t current_generation =
+                        selected->snapshot_generation;
+                    // A reconnect under the same id can reset the generation
+                    // below the stored baseline; guard the unsigned subtraction
+                    // so this one sample reports 0 instead of underflowing to an
+                    // absurd frame count.
+                    const std::uint64_t frames =
+                        current_generation >= dashboard.fps_sample_generation
+                            ? current_generation -
+                                  dashboard.fps_sample_generation
+                            : 0;
+                    dashboard.measured_stream_fps =
+                        static_cast<double>(frames) / secs;
+                    dashboard.fps_sample_generation = current_generation;
+                    dashboard.fps_sample_time = now;
+                }
+            }
+        } else {
+            dashboard.fps_sample_client_id = 0;
+            dashboard.measured_stream_fps = 0.0;
+        }
+
+        // Live streaming: the independent remote-control window keeps its
+        // controlled client streaming regardless of the current view; otherwise
+        // the client shown in Focus streams at ~15fps. Leaving Focus with no
+        // remote window open, or the client going offline, stops the stream and
+        // the class wall falls back to its slower snapshot cadence.
+        std::uint64_t desired_stream_id = 0;
+        if (g_remote_window != nullptr && g_remote_target_client != 0) {
+            for (const auto& streamed : clients) {
+                if (streamed.id == g_remote_target_client &&
+                    streamed.status !=
+                        nstu::server::ClientStatus::offline) {
+                    desired_stream_id = streamed.id;
+                    break;
+                }
+            }
+        }
+        if (desired_stream_id == 0 && selected != nullptr &&
+            dashboard.view == DashboardView::selected_client &&
+            selected->status != nstu::server::ClientStatus::offline) {
+            desired_stream_id = selected->id;
+        }
+        if (dashboard.streaming_client_id != desired_stream_id) {
+            if (dashboard.streaming_client_id != 0) {
+                (void)control_plane.set_streaming(
+                    dashboard.streaming_client_id, false, 0, nullptr);
+            }
+            if (desired_stream_id != 0) {
+                std::string stream_error;
+                if (!control_plane.set_streaming(desired_stream_id, true, 15,
+                                                 &stream_error)) {
+                    record_operation_failure(
+                        "Focus", "Live stream start failed", stream_error);
+                }
+            }
+            dashboard.streaming_client_id = desired_stream_id;
+        }
+
+        // Self-heal a stalled live stream. The arming above is edge-triggered on
+        // the streamed client id, so a start_stream dropped across a client or
+        // agent reconnect leaves the server believing the client streams while
+        // its agent has stopped capturing -- the Focus surface and the remote
+        // window freeze on the last frame with no edge to re-fire. Re-assert
+        // set_streaming when the wanted client stops delivering frames (its
+        // snapshot_generation stops advancing) for longer than the stall window.
+        constexpr auto kStreamStallRearm = std::chrono::milliseconds(2000);
+        std::uint64_t desired_generation = 0;
+        if (desired_stream_id != 0) {
+            for (const auto& candidate : clients) {
+                if (candidate.id == desired_stream_id) {
+                    desired_generation = candidate.snapshot_generation;
+                    break;
+                }
+            }
+        }
+        const nstu::server::StreamRearm rearm =
+            dashboard.stream_watchdog.update(desired_stream_id,
+                                             desired_generation, now,
+                                             kStreamStallRearm);
+        if (rearm != nstu::server::StreamRearm::none) {
+            std::string rearm_error;
+            if (!control_plane.set_streaming(desired_stream_id, true, 15,
+                                             &rearm_error)) {
+                record_operation_failure("Focus", "Live stream re-arm failed",
+                                         rearm_error);
+            } else if (rearm == nstu::server::StreamRearm::first) {
+                // Log once per stall episode; a still-dark client re-arms
+                // quietly (`repeat`) so it can't churn the diagnostics ring.
+                record_diagnostic("info", "Focus",
+                                  "Re-armed a stalled live stream");
+            }
         }
 
         draw_dashboard_shell(clients, selected, dashboard, control_plane);
@@ -3270,11 +3757,39 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                 }
             }
         }
+
+        // Independent remote-control window: process a pending close (posted by
+        // its WM_CLOSE) and otherwise blit the controlled client's latest frame
+        // through the shared device's second swap chain.
+        if (g_remote_close_pending.load()) {
+            close_remote_window(control_plane);
+        } else if (g_remote_window != nullptr) {
+            const nstu::server::ClientRecord* remote_client = nullptr;
+            for (const auto& candidate : clients) {
+                if (candidate.id == g_remote_target_client) {
+                    remote_client = &candidate;
+                    break;
+                }
+            }
+            if (remote_client == nullptr ||
+                remote_client->status ==
+                    nstu::server::ClientStatus::offline) {
+                close_remote_window(control_plane);
+            } else {
+                SnapshotTexture* remote_texture =
+                    snapshot_texture(*remote_client);
+                render_remote_window(
+                    remote_texture ? remote_texture->view.Get() : nullptr,
+                    remote_texture ? remote_texture->width : 0u,
+                    remote_texture ? remote_texture->height : 0u);
+            }
+        }
     }
 
-    if (dashboard.remote_control_enabled) {
-        (void)control_plane.stop_remote_control(
-            dashboard.remote_control_client_id, nullptr);
+    close_remote_window(control_plane);
+    if (dashboard.streaming_client_id != 0) {
+        (void)control_plane.set_streaming(dashboard.streaming_client_id, false,
+                                          0, nullptr);
     }
     control_plane.stop();
     Shell_NotifyIconW(NIM_DELETE, &g_tray_icon);

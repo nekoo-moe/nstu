@@ -44,6 +44,8 @@ constexpr UINT_PTR kCloseTimer = 2;
 constexpr int kListId = 1001;
 constexpr int kStatusId = 1002;
 constexpr int kCloseId = 1003;
+constexpr int kServerIpEditId = 1004;
+constexpr int kTestId = 1005;
 
 enum class Language { english, vietnamese };
 
@@ -60,6 +62,7 @@ Options g_options;
 HWND g_window = nullptr;
 HWND g_list = nullptr;
 HWND g_status = nullptr;
+HWND g_server_ip_edit = nullptr;
 std::vector<nstu::setup::DiagnosticResult> g_results;
 using DiagnosticEvent = std::variant<nstu::setup::DiagnosticCheck,
                                      nstu::setup::DiagnosticResult>;
@@ -297,6 +300,7 @@ void finish(HWND window) {
     }
     SetWindowTextW(g_status, message.c_str());
     EnableWindow(GetDlgItem(window, kCloseId), TRUE);
+    EnableWindow(GetDlgItem(window, kTestId), TRUE);
     // Manual issue runs remain open for review. NSIS invokes this helper
     // synchronously, so installer issue runs use a bounded timer instead of
     // blocking the install indefinitely. Save the report before choosing the
@@ -353,20 +357,87 @@ void process_progress(HWND window) {
     if (complete) finish(window);
 }
 
+// Starts (or restarts) the diagnostic worker against the current options. Shared
+// by first launch and the "Test IP" button so a technician can re-probe a typed
+// endpoint without relaunching. Returns false only if the progress timer could
+// not be armed. The previous worker has already finished whenever this restarts
+// (Test is enabled only once a run completes), so the join is immediate.
+bool start_diagnostic_run(HWND window) {
+    if (g_worker.joinable()) {
+        g_worker.join();
+    }
+    // Cancel any pending auto-close armed by the previous run's finish() so a
+    // "Test IP" restart cannot be destroyed mid-flight by a stale close timer.
+    KillTimer(window, kCloseTimer);
+    g_complete = false;
+    g_failed = false;
+    g_warning = false;
+    g_report_written = false;
+    g_worker_complete.store(false, std::memory_order_release);
+    g_worker_failed.store(false, std::memory_order_release);
+    g_results.clear();
+    if (g_list != nullptr) {
+        SendMessageW(g_list, LB_RESETCONTENT, 0, 0);
+    }
+    g_expected_checks =
+        nstu::setup::diagnostic_checks(g_options.diagnostics).size();
+    g_results.reserve(g_expected_checks + 3);
+    if (SetTimer(window, kProgressTimer, 100, nullptr) == 0) {
+        return false;
+    }
+    EnableWindow(GetDlgItem(window, kCloseId), FALSE);
+    EnableWindow(GetDlgItem(window, kTestId), FALSE);
+    // WM_CREATE runs before CreateWindowExW assigns g_window. Capture the actual
+    // callback HWND instead of racing that assignment in the worker.
+    g_worker = std::jthread([window] {
+        try {
+            nstu::setup::run_startup_diagnostics(
+                g_options.diagnostics,
+                [window](const nstu::setup::DiagnosticCheck& check) {
+                    queue_event(window, check);
+                },
+                [window](nstu::setup::DiagnosticResult item) {
+                    queue_event(window, std::move(item));
+                });
+        } catch (...) {
+            g_worker_failed.store(true, std::memory_order_release);
+        }
+        g_worker_complete.store(true, std::memory_order_release);
+        PostMessageW(window, kProgressMessage, 0, 0);
+    });
+    return true;
+}
+
 LRESULT window_proc_impl(HWND window, UINT message, WPARAM wparam,
                          LPARAM lparam) {
     switch (message) {
     case WM_CREATE: {
         HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         const bool vi = g_options.language == Language::vietnamese;
-        CreateWindowExW(0, L"STATIC",
-                        vi ? kHeadingVietnamese : kHeadingEnglish,
-                        WS_CHILD | WS_VISIBLE, 16, 14, 900, 24, window,
-                        nullptr, nullptr, nullptr);
+        CreateWindowExW(0, L"STATIC", vi ? kHeadingVietnamese : kHeadingEnglish,
+                        WS_CHILD | WS_VISIBLE, 16, 12, 900, 22, window, nullptr,
+                        nullptr, nullptr);
+        // Connectivity re-test row: type a server IP/hostname and probe it
+        // without relaunching the tool.
+        CreateWindowExW(0, L"STATIC", vi ? L"IP server:" : L"Server IP:",
+                        WS_CHILD | WS_VISIBLE, 16, 44, 70, 22, window, nullptr,
+                        nullptr, nullptr);
+        g_server_ip_edit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT",
+            g_options.diagnostics.server_address.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 90, 41, 230, 24,
+            window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kServerIpEditId)),
+            nullptr, nullptr);
+        HWND test = CreateWindowExW(
+            0, L"BUTTON", vi ? L"Kiểm tra IP" : L"Test IP",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 330, 40, 120, 26, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTestId)), nullptr,
+            nullptr);
         g_list = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
-            16, 46, 920, 420, window,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT, 16, 76,
+            920, 392, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kListId)), nullptr,
             nullptr);
         g_status = CreateWindowExW(
@@ -380,35 +451,18 @@ LRESULT window_proc_impl(HWND window, UINT message, WPARAM wparam,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCloseId)), nullptr,
             nullptr);
         if (g_list == nullptr || g_status == nullptr || close == nullptr ||
-            SetTimer(window, kProgressTimer, 100, nullptr) == 0) {
+            g_server_ip_edit == nullptr || test == nullptr) {
             g_failed = true;
             return -1;
         }
-        for (HWND child : {g_list, g_status, close}) {
+        for (HWND child : {g_server_ip_edit, test, g_list, g_status, close}) {
             SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
         EnableWindow(close, FALSE);
-        g_expected_checks =
-            nstu::setup::diagnostic_checks(g_options.diagnostics).size();
-        g_results.reserve(g_expected_checks + 3);
-        // WM_CREATE runs before CreateWindowExW assigns g_window. Capture the
-        // actual callback HWND instead of racing that assignment in the worker.
-        g_worker = std::jthread([window] {
-            try {
-                nstu::setup::run_startup_diagnostics(
-                    g_options.diagnostics,
-                    [window](const nstu::setup::DiagnosticCheck& check) {
-                        queue_event(window, check);
-                    },
-                    [window](nstu::setup::DiagnosticResult item) {
-                        queue_event(window, std::move(item));
-                    });
-            } catch (...) {
-                g_worker_failed.store(true, std::memory_order_release);
-            }
-            g_worker_complete.store(true, std::memory_order_release);
-            PostMessageW(window, kProgressMessage, 0, 0);
-        });
+        if (!start_diagnostic_run(window)) {
+            g_failed = true;
+            return -1;
+        }
         return 0;
     }
     case WM_GETMINMAXINFO: {
@@ -435,6 +489,32 @@ LRESULT window_proc_impl(HWND window, UINT message, WPARAM wparam,
         if (LOWORD(wparam) == kCloseId && HIWORD(wparam) == BN_CLICKED &&
             g_complete) {
             DestroyWindow(window);
+            return 0;
+        }
+        if (LOWORD(wparam) == kTestId && HIWORD(wparam) == BN_CLICKED &&
+            g_complete) {
+            const bool vi = g_options.language == Language::vietnamese;
+            std::array<wchar_t, 256> buffer{};
+            const int length = GetWindowTextW(g_server_ip_edit, buffer.data(),
+                                              static_cast<int>(buffer.size()));
+            std::wstring address(buffer.data(),
+                                 length > 0 ? static_cast<std::size_t>(length)
+                                            : 0);
+            if (!nstu::setup::valid_diagnostic_server_address(address)) {
+                SetWindowTextW(g_status,
+                               vi ? L"Địa chỉ IP hoặc tên máy không hợp lệ."
+                                  : L"Enter a valid server IP or hostname.");
+                return 0;
+            }
+            // Probe the typed endpoint as a client would, so the server-
+            // reachability and discovery/clock checks actually run against it.
+            g_options.diagnostics.role = nstu::setup::DiagnosticRole::client;
+            g_options.diagnostics.server_address = std::move(address);
+            g_options.invalid_configuration = false;
+            if (!start_diagnostic_run(window)) {
+                g_failed = true;
+                DestroyWindow(window);
+            }
             return 0;
         }
         break;

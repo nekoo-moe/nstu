@@ -140,6 +140,26 @@ enum class Readiness : std::uint8_t {
     unrated,
 };
 
+// The NSTU discovery/pairing handshake rejects any probe whose timestamp is
+// more than this many seconds from the server's clock (see
+// common/src/discovery.cpp answer_pairing_probe -> time_is_valid). A client
+// skewed beyond this bound silently never pairs and never reconnects: the
+// server counts the probe but sends no beacon reply. Diagnostics compares the
+// two clocks against the same bound so the failure is named, not invisible.
+inline constexpr std::int64_t kPairingClockToleranceSeconds = 120;
+
+enum class ClockSkewState : std::uint8_t {
+    in_tolerance,
+    client_behind,  // this PC's clock is behind the server's
+    client_ahead,   // this PC's clock is ahead of the server's
+};
+
+struct ClockSkewAssessment {
+    ClockSkewState state = ClockSkewState::in_tolerance;
+    // local_unix_seconds - server_unix_seconds; negative when this PC is behind.
+    std::int64_t skew_seconds = 0;
+};
+
 struct ClientRuntimeSnapshot {
     bool service_present = false;
     bool service_running = false;
@@ -199,6 +219,17 @@ inline constexpr std::uint32_t kDiagnosticInstallerIssueCloseDelayMs = 6000;
                                            std::uint32_t logical) noexcept;
 [[nodiscard]] ClientRuntimeState classify_client_runtime(
     const ClientRuntimeSnapshot& snapshot) noexcept;
+
+// Pure comparison of this PC's clock to a server clock, using the same
+// tolerance the discovery/pairing handshake enforces; skew_seconds is
+// local - server. Unit-tested, but NOT yet wired to a live check: obtaining the
+// server's clock needs the pairing beacon to carry it (a future change). Until
+// then the shipping clock-skew guidance is the heuristic in
+// check_pairing_discovery (server probes arrive but no beacon => probable skew),
+// not a measured figure from this function.
+[[nodiscard]] ClockSkewAssessment classify_clock_skew(
+    std::int64_t local_unix_seconds, std::int64_t server_unix_seconds,
+    std::int64_t tolerance_seconds = kPairingClockToleranceSeconds) noexcept;
 
 [[nodiscard]] std::vector<DiagnosticCheck> diagnostic_checks(
     const DiagnosticOptions& options);

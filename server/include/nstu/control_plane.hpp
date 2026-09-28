@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace nstu::server {
@@ -116,6 +117,12 @@ public:
     // both teacher-sent lines and messages received from the client.
     [[nodiscard]] std::vector<ChatMessage> chat_history(
         std::uint64_t client_id) const;
+    // Per-client count of messages received *from the client* (student lines
+    // only; teacher-sent lines are excluded), for detecting new student chat
+    // without copying every transcript each UI frame. Only clients with at
+    // least one inbound message appear.
+    [[nodiscard]] std::unordered_map<std::uint64_t, std::size_t>
+    chat_message_counts() const;
     [[nodiscard]] bool start_remote_control(std::uint64_t client_id,
                                             std::string* error = nullptr);
     [[nodiscard]] bool send_remote_input(
