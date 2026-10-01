@@ -905,11 +905,15 @@ void pipe_control_loop(HWND overlay) {
                 } else if (message->type ==
                                nstu::client::AgentMessageType::exam_answer_ack ||
                            message->type ==
-                               nstu::client::AgentMessageType::exam_state_response) {
+                               nstu::client::AgentMessageType::exam_state_response ||
+                           message->type ==
+                               nstu::client::AgentMessageType::exam_begin) {
                     // The service has already decoded and authenticated these
                     // payloads. The bounded bridge lets an optional exam host
                     // consume them on the UI thread without blocking this
-                    // transport loop.
+                    // transport loop. exam_begin is the synchronized-start
+                    // release: the host reveals the questions and anchors the
+                    // countdown to its authoritative start time.
                     if (nstu::client::exam_bridge().publish(std::move(*message))) {
                         PostMessageW(overlay, kExamBridgeMessage, 0, 0);
                     }

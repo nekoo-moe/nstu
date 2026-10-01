@@ -21,7 +21,8 @@ public:
     ExamBridge(const ExamBridge&) = delete;
     ExamBridge& operator=(const ExamBridge&) = delete;
 
-    // Publishes only service-to-agent exam responses. Older responses are
+    // Publishes only service-to-agent exam responses: answer acks, bounded
+    // state chunks, and the synchronized-start exam_begin. Older responses are
     // discarded when the host is temporarily busy; durable state remains in
     // the service outbox/server journal and can be requested again.
     [[nodiscard]] bool publish(AgentMessage message) noexcept;
