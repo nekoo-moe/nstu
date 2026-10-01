@@ -100,6 +100,13 @@ enum class CommandType : std::uint16_t {
     // Erase annotation strokes near a path. Reuses the overlay-stroke payload
     // shape but removes existing strokes instead of adding one.
     overlay_erase = 52,
+    // Synchronized exam start barrier. exam_ready is client -> server ("package
+    // staged and verified, kiosk locked, loading screen up"); exam_begin is
+    // server -> client and carries the authoritative start time so a cohort
+    // reveals the questions together. Payloads are the ERDY/EBGN codecs in
+    // exam_control.
+    exam_ready = 53,
+    exam_begin = 54,
 };
 
 enum class ConnectionRole : std::uint8_t {
