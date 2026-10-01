@@ -116,16 +116,24 @@ Goal: produce a valid manifest + assets → a signed `.nstuexam`. Three options:
 - *Recommendation:* fix the manifest contract first, ship **C** quickly, then
   grow into **A** if you want authoring + signing + fleet-push in one place.
 
-### Phase 3 — Hard isolation: block apps and internet ✚ ⚠
+### Phase 3 — Hard isolation: block apps and internet ✚ ⚠ (authorized)
 At start, the LocalSystem **service** installs egress firewall rules (WFP or
-`netsh advfirewall`) that allow only the NSTU server, and suppresses
-non-allowlisted applications; both revert at stop. **Hard requirements:** a
-watchdog that restores networking and apps on exam end, service crash, or
-timeout (never strand a machine offline or app-less), and a conservative
-allowlist (OS, critical, and NSTU processes excluded). Recommend
-**network-block first** (high value, lower risk); app suppression second. UWF
-reboot-to-restore is a safety net, not a substitute for a clean, reboot-free
-restore.
+`netsh advfirewall`) and suppresses non-allowlisted applications; both revert at
+stop. The network block is an **allowlist, not a blackout**: the teacher server
+and the exam's **declared online-document origins stay reachable** (exams may
+read online documents) while everything else is blocked — so the WebView2
+resource filter and the manifest schema also grow a way to declare those
+origins. **Hard requirements:** a watchdog that restores networking and apps on
+exam end, service crash, or timeout (never strand a machine offline or
+app-less); a conservative process allowlist (OS, critical, and NSTU processes
+excluded); and it must be **impossible to engage outside a live exam on a
+student machine** (never on the server, in dev, or in CI). Implemented in
+**native service code**, not a shelled-out script. **Testing is deferred:**
+activating the block here severs the active connection (RDP / data stream), so
+it is verified on an isolated VM later — unit-test the rule-building, allowlist,
+and watchdog state machine without flipping the real firewall. Recommend
+**network-block first**; app suppression second. UWF reboot-to-restore is a
+safety net, not a substitute for a clean, reboot-free restore.
 
 ### Phase 4 — Anticheat timing telemetry ✚  (the "answer-timing logs")
 In `web/app.js`, capture per-question first-view, dwell, time-to-first-answer,
