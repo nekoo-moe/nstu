@@ -221,6 +221,17 @@ if(TARGET nstu_client_platform)
     nstu_enable_test_assertions(nstu_exam_host_protocol_tests)
     add_test(NAME nstu.exam_host_protocol COMMAND nstu_exam_host_protocol_tests)
 
+    # Fail-safe exam network-lockdown policy; pure state machine over the WFP
+    # allowlist config, no firewall touched.
+    add_executable(nstu_exam_network_lockdown_tests
+        exam_network_lockdown_tests.cpp)
+    target_link_libraries(nstu_exam_network_lockdown_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_network_lockdown_tests)
+    nstu_enable_test_assertions(nstu_exam_network_lockdown_tests)
+    add_test(NAME nstu.exam_network_lockdown
+        COMMAND nstu_exam_network_lockdown_tests)
+
     add_executable(nstu_client_freeze_tests client_freeze_tests.cpp)
     target_link_libraries(nstu_client_freeze_tests PRIVATE nstu_client_platform)
     nstu_enable_warnings(nstu_client_freeze_tests)
