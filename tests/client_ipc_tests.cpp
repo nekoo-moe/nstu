@@ -134,6 +134,23 @@ int main() {
     assert(decoded_erase.has_value());
     assert(decoded_erase->type == nstu::client::AgentMessageType::overlay_erase);
 
+    // server_online is the newest IPC type (service -> agent teacher-connection
+    // state, 1-byte payload). Guard the valid_type() upper bound: if it is not
+    // raised to include server_online, encode/decode silently drop it and the
+    // agent never learns a teacher connected -- the same stale-bound bug that
+    // previously swallowed chat_submit and overlay_erase.
+    for (const std::byte flag : {std::byte{1}, std::byte{0}}) {
+        const auto online_wire = nstu::client::encode_agent_message(
+            {nstu::client::AgentMessageType::server_online, {flag}});
+        assert(!online_wire.empty());
+        const auto decoded_online =
+            nstu::client::decode_agent_message(online_wire);
+        assert(decoded_online.has_value());
+        assert(decoded_online->type ==
+               nstu::client::AgentMessageType::server_online);
+        assert(decoded_online->payload == std::vector<std::byte>{flag});
+    }
+
     auto corrupt = status_wire;
     corrupt[0] ^= std::byte{1};
     assert(!nstu::client::decode_agent_message(corrupt).has_value());

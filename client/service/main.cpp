@@ -75,6 +75,11 @@ std::mutex g_exam_outbox_state_mutex;
 bool g_exam_outbox_ready = false;
 std::atomic_bool g_stop_requested = false;
 std::atomic_bool g_agent_connected = false;
+// Whether this machine currently holds a live authenticated session to the
+// teacher server. Only the control-session loop writes it; the agent handshake
+// reads it to seed a freshly-connected agent, and the agent gates its chat
+// window on the server_online messages driven from it.
+std::atomic_bool g_server_online = false;
 // Managed mode as this service currently believes it to be. The registry
 // value is the source of truth; this is the copy the control handler can
 // consult without touching the registry on every SCM callback.
@@ -741,6 +746,14 @@ void agent_pipe_loop() {
         queue_agent_message(
             {nstu::client::AgentMessageType::managed_state,
              nstu::control::encode_freeze_state(g_frozen.load())});
+        // Seed the freshly-connected agent with the current teacher-connection
+        // state so its chat gate is correct from the first frame, without
+        // waiting for the next connect/disconnect edge.
+        queue_agent_message(
+            {nstu::client::AgentMessageType::server_online,
+             {std::byte{g_server_online.load()
+                            ? static_cast<unsigned char>(1)
+                            : static_cast<unsigned char>(0)}}});
         queue_agent_message(
             {nstu::client::AgentMessageType::status_request, {}});
         while (!g_stop_requested.load()) {
@@ -1817,6 +1830,13 @@ void remote_control_loop(std::stop_token stop_token) {
                     // installer request therefore cannot mutate UWF merely
                     // because a config file names an unreachable or spoofed
                     // endpoint.
+                    // This is also the one point that proves a live teacher
+                    // session exists, so tell the agent its chat may open.
+                    if (!g_server_online.exchange(true)) {
+                        queue_agent_message(
+                            {nstu::client::AgentMessageType::server_online,
+                             {std::byte{static_cast<unsigned char>(1)}}});
+                    }
                     {
                         std::scoped_lock endpoint_lock(g_server_endpoint_mutex);
                         g_server_address = endpoint.address;
@@ -1859,6 +1879,13 @@ void remote_control_loop(std::stop_token stop_token) {
             clear_exam_inflight();
             queue_exam_stop();
             set_desired_lock(false);
+            // The authenticated teacher session has ended. Tell the agent so it
+            // hides / refuses chat until a teacher is reachable again.
+            if (g_server_online.exchange(false)) {
+                queue_agent_message(
+                    {nstu::client::AgentMessageType::server_online,
+                     {std::byte{static_cast<unsigned char>(0)}}});
+            }
             queue_agent_message(
                 {nstu::client::AgentMessageType::stop_stream, {}});
             queue_agent_message(

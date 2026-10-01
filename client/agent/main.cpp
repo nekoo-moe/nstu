@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <iterator>
@@ -88,6 +89,12 @@ HWND g_chat_window = nullptr;
 HWND g_chat_messages = nullptr;
 HWND g_chat_input = nullptr;
 WNDPROC g_chat_input_original_proc = nullptr;
+// Shared Segoe UI font for the agent's Win32 form controls (chat + pairing).
+// The default GUI stock font is the dated MS Shell Dlg face; a real Segoe UI
+// pass is what stops the chat looking like a 90s dialog. Created lazily and
+// kept for the process lifetime (reclaimed by the OS at exit).
+HFONT g_ui_font = nullptr;
+UINT g_ui_font_dpi = 0;
 HWND g_lock_window = nullptr;
 HWND g_annotation_window = nullptr;
 HWND g_broadcast_window = nullptr;
@@ -103,6 +110,11 @@ std::atomic<std::uint16_t> g_snapshot_interval_seconds = 0;
 std::atomic_bool g_viewing_broadcast = false;
 std::atomic_bool g_remote_control_active = false;
 std::atomic_bool g_managed = false;
+// Whether the service currently reports a live authenticated session to the
+// teacher server. The chat window is gated on this: it only opens when a
+// teacher is actually reachable, otherwise the agent shows "Something went
+// wrong." Driven by AgentMessageType::server_online from the service.
+std::atomic_bool g_server_connected = false;
 std::mutex g_annotation_mutex;
 std::vector<nstu::control::OverlayStroke> g_annotation_strokes;
 std::mutex g_broadcast_mutex;
@@ -924,6 +936,21 @@ void pipe_control_loop(HWND overlay) {
                             static_cast<LPARAM>(*managed));
                     }
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::server_online) {
+                    // Teacher-connection state. One payload byte, strictly 0
+                    // or 1 per the protocol contract: anything else is a
+                    // malformed frame and must not be read as "connected".
+                    if (message->payload.size() == 1 &&
+                        (message->payload[0] == std::byte{0} ||
+                         message->payload[0] == std::byte{1})) {
+                        const bool connected =
+                            message->payload[0] == std::byte{1};
+                        g_server_connected = connected;
+                        SendMessageW(overlay, kAgentCommandMessage,
+                                     static_cast<WPARAM>(message->type),
+                                     static_cast<LPARAM>(connected ? 1 : 0));
+                    }
+                } else if (message->type ==
                            nstu::client::AgentMessageType::pairing_choices) {
                     if (auto choices =
                             nstu::client::decode_agent_pairing_choices(
@@ -1042,6 +1069,14 @@ void pipe_control_loop(HWND overlay) {
         }
         stop_remote_control();
         hide_pairing_view();
+        // Losing the service pipe means chat can no longer reach the teacher
+        // (chat_submit rides this pipe), so drop the connected flag and take
+        // the chat window down until a fresh session re-seeds server_online.
+        g_server_connected = false;
+        PostMessageW(overlay, kAgentCommandMessage,
+                     static_cast<WPARAM>(
+                         nstu::client::AgentMessageType::server_online),
+                     0);
         pipe.close();
         if (pipe_failed && !g_agent_stopping.load()) {
             // Fail closed for exams. The host owns the WebView2 controller and
@@ -1063,9 +1098,20 @@ void append_chat_line(const wchar_t* message) {
     }
     SendMessageW(g_chat_messages, LB_ADDSTRING, 0,
                  reinterpret_cast<LPARAM>(message));
-    const auto count = SendMessageW(g_chat_messages, LB_GETCOUNT, 0, 0);
+    // The agent runs for the whole session, so the transcript is bounded the
+    // same way the server's is; an unbounded LISTBOX grows USER/GDI memory for
+    // as long as the machine stays on.
+    constexpr LRESULT maximum_lines = 200;
+    LRESULT count = SendMessageW(g_chat_messages, LB_GETCOUNT, 0, 0);
+    while (count > maximum_lines) {
+        SendMessageW(g_chat_messages, LB_DELETESTRING, 0, 0);
+        --count;
+    }
     if (count > 0) {
-        SendMessageW(g_chat_messages, LB_SETCURSEL, count - 1, 0);
+        // Scroll the newest line into view *without* selecting it. LB_SETCURSEL
+        // would also paint the full-width system highlight across that row,
+        // which reads as a selected item in what is really a transcript.
+        SendMessageW(g_chat_messages, LB_SETTOPINDEX, count - 1, 0);
     }
 }
 
@@ -1079,9 +1125,16 @@ void submit_chat_message() {
     if (message_text[0] == L'\0') {
         return;
     }
+    // Nothing can be sent without a live teacher session; saying "You: ..."
+    // then would claim a delivery that never happens.
+    if (!g_server_connected.load()) {
+        append_chat_line(L"Not connected to the teacher. Message not sent.");
+        return;
+    }
     // Relay the raw line to the teacher through the service. Discovery/UI runs
     // on this thread; the pipe thread drains the bounded service queue, so this
     // never blocks on the socket.
+    bool queued = false;
     const int utf8_length = WideCharToMultiByte(CP_UTF8, 0, message_text, -1,
                                                 nullptr, 0, nullptr, nullptr);
     if (utf8_length > 1) {
@@ -1094,7 +1147,12 @@ void submit_chat_message() {
             queue_service_message(
                 {nstu::client::AgentMessageType::chat_submit,
                  std::move(payload)});
+            queued = true;
         }
+    }
+    if (!queued) {
+        append_chat_line(L"That message could not be sent.");
+        return;
     }
     wchar_t line[540]{};
     swprintf_s(line, L"You: %s", message_text);
@@ -1119,20 +1177,182 @@ LRESULT CALLBACK chat_input_window_proc(HWND control, UINT message,
     return DefWindowProcW(control, message, wparam, lparam);
 }
 
+// Resolves an optional OS export without a function-pointer cast. Casting a
+// FARPROC straight to the typed signature trips -Wcast-function-type on GCC
+// and C4191 on MSVC (both warnings are errors in CI), so copy the bits the way
+// client/src/exam_host.cpp already does.
+template <typename Function>
+Function load_proc(HMODULE module, const char* name) noexcept {
+    const FARPROC raw = module == nullptr ? nullptr : GetProcAddress(module, name);
+    Function function{};
+    static_assert(sizeof(function) == sizeof(raw));
+    std::memcpy(&function, &raw, sizeof(function));
+    return function;
+}
+
+// Per-monitor DPI, resolved per window. The agent's form windows are authored
+// in 96-DPI pixels; every control rect and font height is mapped through the
+// owning window's DPI so Windows never has to bitmap-stretch (blur) them.
+UINT window_dpi(HWND window) noexcept {
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    static const auto get_dpi_for_window = load_proc<GetDpiForWindowFn>(
+        GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+    if (get_dpi_for_window != nullptr && window != nullptr) {
+        const UINT dpi = get_dpi_for_window(window);
+        if (dpi >= 72u) {
+            return dpi;
+        }
+    }
+    return 96u;
+}
+
+// Maps a length authored at 96 DPI onto `dpi`. Identity at 96 DPI, so the
+// layout is byte-identical on a standard display.
+int dpi_scaled(int length_at_96dpi, UINT dpi) noexcept {
+    return MulDiv(length_at_96dpi, static_cast<int>(dpi), 96);
+}
+
+// DPI the OS last reported for each form window. WM_DPICHANGED carries the
+// authoritative new value in wParam, and the relayout and repaint it triggers
+// have to use that same number: a path that re-queries the window instead can
+// read the pre-change DPI and leave the fonts and the control rects
+// disagreeing. Zero means the OS has not told us yet, so ask it.
+UINT g_chat_window_dpi = 0;
+UINT g_pairing_window_dpi = 0;
+
+UINT cached_or_window_dpi(UINT cached, HWND window) noexcept {
+    return cached != 0u ? cached : window_dpi(window);
+}
+
+// Windows paints the caption bar light unless the window opts in, which left a
+// white title bar sitting above the agent's dark client area. Attribute 20 is
+// the documented value from Windows 10 20H1 on; 19 is the pre-20H1 spelling.
+// Both are resolved at runtime so the agent still starts where neither exists.
+void apply_dark_titlebar(HWND window) noexcept {
+    using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID,
+                                                     DWORD);
+    // Deliberately never freed: the agent keeps its windows for the whole
+    // session, and the import is resolved once.
+    static const HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");
+    static const auto set_attribute =
+        load_proc<DwmSetWindowAttributeFn>(dwmapi, "DwmSetWindowAttribute");
+    if (set_attribute == nullptr || window == nullptr) {
+        return;
+    }
+    constexpr DWORD kImmersiveDarkMode = 20;
+    constexpr DWORD kImmersiveDarkModePre20H1 = 19;
+    const BOOL enabled = TRUE;
+    if (FAILED(set_attribute(window, kImmersiveDarkMode, &enabled,
+                             sizeof(enabled)))) {
+        (void)set_attribute(window, kImmersiveDarkModePre20H1, &enabled,
+                            sizeof(enabled));
+    }
+}
+
+// Opt the whole process into per-monitor DPI v2 before any window exists.
+// Without this Windows reports virtualized coordinates and stretches every
+// agent window, which is what made the chat look soft and dated on a scaled
+// display. Falls back through the older APIs on down-level Windows.
+void enable_process_dpi_awareness() noexcept {
+    using SetProcessDpiAwarenessContextFn =
+        BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+    using SetProcessDpiAwarenessFn = HRESULT(WINAPI*)(int);
+    if (const auto user32 = GetModuleHandleW(L"user32.dll")) {
+        const auto set_context = load_proc<SetProcessDpiAwarenessContextFn>(
+            user32, "SetProcessDpiAwarenessContext");
+        if (set_context != nullptr &&
+            set_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+            return;
+        }
+    }
+    if (const auto shcore = LoadLibraryW(L"shcore.dll")) {
+        const auto set_awareness =
+            load_proc<SetProcessDpiAwarenessFn>(shcore, "SetProcessDpiAwareness");
+        if (set_awareness != nullptr) {
+            // 2 == PROCESS_PER_MONITOR_DPI_AWARE
+            (void)set_awareness(2);
+        }
+        FreeLibrary(shcore);
+        return;
+    }
+    (void)SetProcessDPIAware();
+}
+
+// Lazily builds the shared Segoe UI control font for a DPI. CLEARTYPE_QUALITY
+// keeps it crisp; ~12pt at the window's DPI matches the pairing screen's text.
+HFONT ui_font(UINT dpi) {
+    if (g_ui_font == nullptr || g_ui_font_dpi != dpi) {
+        const HFONT replacement = CreateFontW(
+            -dpi_scaled(16, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        if (replacement == nullptr) {
+            return g_ui_font;
+        }
+        if (g_ui_font != nullptr) {
+            DeleteObject(g_ui_font);
+        }
+        g_ui_font = replacement;
+        g_ui_font_dpi = dpi;
+    }
+    return g_ui_font;
+}
+
+// Applies the current font to every child control of a form window.
+BOOL CALLBACK set_child_font(HWND child, LPARAM font) {
+    SendMessageW(child, WM_SETFONT, static_cast<WPARAM>(font), TRUE);
+    return TRUE;
+}
+
+// Dark surface palette for the agent's form windows. These mirror the server
+// dashboard's default dark theme so a student machine and the teacher console
+// read as one product instead of a dark app next to a white 90s dialog.
+constexpr COLORREF kSurfaceColor = RGB(25, 28, 33);
+constexpr COLORREF kControlColor = RGB(33, 37, 43);
+constexpr COLORREF kTextColor = RGB(224, 228, 234);
+constexpr COLORREF kMutedTextColor = RGB(133, 141, 153);
+constexpr COLORREF kButtonColor = RGB(42, 47, 55);
+constexpr COLORREF kButtonHoverColor = RGB(54, 60, 69);
+constexpr COLORREF kAccentColor = RGB(96, 163, 200);
+
+HBRUSH surface_brush() {
+    static const HBRUSH brush = CreateSolidBrush(kSurfaceColor);
+    return brush;
+}
+
+HBRUSH control_brush() {
+    static const HBRUSH brush = CreateSolidBrush(kControlColor);
+    return brush;
+}
+
+// Paints a themed control background and text colour for the standard
+// LISTBOX/EDIT/STATIC children, which otherwise render system-white.
+LRESULT themed_control_color(WPARAM device_context, COLORREF background,
+                             HBRUSH brush) {
+    const auto hdc = reinterpret_cast<HDC>(device_context);
+    SetTextColor(hdc, kTextColor);
+    SetBkColor(hdc, background);
+    return reinterpret_cast<LRESULT>(brush);
+}
+
 LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
                                   LPARAM lparam) {
     switch (message) {
-    case WM_CREATE:
+    case WM_CREATE: {
+        const UINT dpi = window_dpi(window);
+        g_chat_window_dpi = dpi;
+        apply_dark_titlebar(window);
         g_chat_messages = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
-            8, 8, 460, 220, window,
+            0, L"LISTBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
+                LBS_NOINTEGRALHEIGHT,
+            0, 0, 0, 0, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kChatMessages)),
             GetModuleHandleW(nullptr), nullptr);
         g_chat_input = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", nullptr,
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            8, 240, 360, 26, window,
+            0, L"EDIT", nullptr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            0, 0, 0, 0, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kChatInput)),
             GetModuleHandleW(nullptr), nullptr);
         if (g_chat_input != nullptr) {
@@ -1141,29 +1361,88 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
                                   reinterpret_cast<LONG_PTR>(
                                       chat_input_window_proc)));
         }
+        // Owner-drawn so the action button follows the dark palette; a themed
+        // system button ignores WM_CTLCOLORBTN and would stay light grey.
         CreateWindowExW(
             0, L"BUTTON", L"Send",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            380, 240, 80, 26, window,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            0, 0, 0, 0, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kChatSend)),
             GetModuleHandleW(nullptr), nullptr);
+        EnumChildWindows(window, set_child_font,
+                         reinterpret_cast<LPARAM>(ui_font(dpi)));
         append_chat_line(L"NSTU client chat ready.");
         return 0;
+    }
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLOREDIT:
+        return themed_control_color(wparam, kControlColor, control_brush());
+    case WM_CTLCOLORSTATIC:
+        return themed_control_color(wparam, kSurfaceColor, surface_brush());
+    case WM_DRAWITEM: {
+        const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
+        if (item == nullptr || item->CtlID != kChatSend) {
+            break;
+        }
+        const bool pressed = (item->itemState & ODS_SELECTED) != 0;
+        const bool focused = (item->itemState & ODS_FOCUS) != 0;
+        const HBRUSH face = CreateSolidBrush(
+            pressed ? kButtonHoverColor : kButtonColor);
+        FillRect(item->hDC, &item->rcItem, face);
+        DeleteObject(face);
+        if (focused) {
+            // A visible focus ring is what makes Tab navigation usable.
+            const HBRUSH ring = CreateSolidBrush(kAccentColor);
+            FrameRect(item->hDC, &item->rcItem, ring);
+            DeleteObject(ring);
+        }
+        wchar_t caption[32]{};
+        GetWindowTextW(item->hwndItem, caption,
+                       static_cast<int>(std::size(caption)));
+        SetBkMode(item->hDC, TRANSPARENT);
+        SetTextColor(item->hDC, kTextColor);
+        RECT text_area = item->rcItem;
+        DrawTextW(item->hDC, caption, -1, &text_area,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return TRUE;
+    }
+    case WM_DPICHANGED: {
+        g_chat_window_dpi = HIWORD(wparam);
+        const auto* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested != nullptr) {
+            SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        EnumChildWindows(
+            window, set_child_font,
+            reinterpret_cast<LPARAM>(ui_font(g_chat_window_dpi)));
+        return 0;
+    }
     case WM_SIZE: {
+        const UINT dpi = cached_or_window_dpi(g_chat_window_dpi, window);
+        const int pad = dpi_scaled(8, dpi);
+        const int gap = dpi_scaled(8, dpi);
+        const int row_height = dpi_scaled(28, dpi);
+        const int send_width = dpi_scaled(76, dpi);
         const int width = LOWORD(lparam);
         const int height = HIWORD(lparam);
-        const int input_y = std::max(32, height - 38);
+        // Lay the bottom row out from the right edge so the input and the
+        // button always meet with one gap and neither overhangs the frame.
+        const int row_y = std::max(pad, height - pad - row_height);
+        const int send_x = std::max(pad, width - pad - send_width);
         if (g_chat_messages != nullptr) {
-            MoveWindow(g_chat_messages, 8, 8, std::max(80, width - 16),
-                       std::max(40, input_y - 16), TRUE);
+            MoveWindow(g_chat_messages, pad, pad,
+                       std::max(pad, width - pad * 2),
+                       std::max(pad, row_y - gap - pad), TRUE);
         }
         if (g_chat_input != nullptr) {
-            MoveWindow(g_chat_input, 8, input_y, std::max(40, width - 96), 26,
-                       TRUE);
+            MoveWindow(g_chat_input, pad, row_y,
+                       std::max(pad, send_x - gap - pad), row_height, TRUE);
         }
-        const auto send_button = GetDlgItem(window, kChatSend);
-        if (send_button != nullptr) {
-            MoveWindow(send_button, std::max(8, width - 80), input_y, 72, 26,
+        if (const HWND send_button = GetDlgItem(window, kChatSend)) {
+            MoveWindow(send_button, send_x, row_y, send_width, row_height,
                        TRUE);
         }
         return 0;
@@ -1243,24 +1522,81 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
                                      WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE: {
+        const UINT dpi = window_dpi(window);
+        g_pairing_window_dpi = dpi;
+        apply_dark_titlebar(window);
         g_pairing_list = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
-            WS_CHILD | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
-            16, 96, 452, 112, window,
+            0, L"LISTBOX", nullptr,
+            WS_CHILD | WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT |
+                LBS_NOTIFY,
+            dpi_scaled(16, dpi), dpi_scaled(96, dpi), dpi_scaled(452, dpi),
+            dpi_scaled(112, dpi), window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPairingList)),
             GetModuleHandleW(nullptr), nullptr);
         const HWND connect = CreateWindowExW(
-            0, L"BUTTON", L"Connect", WS_CHILD | BS_DEFPUSHBUTTON,
-            368, 218, 100, 28, window,
+            0, L"BUTTON", L"Connect",
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            dpi_scaled(368, dpi), dpi_scaled(218, dpi), dpi_scaled(100, dpi),
+            dpi_scaled(28, dpi), window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPairingConnect)),
             GetModuleHandleW(nullptr), nullptr);
-        const auto font = GetStockObject(DEFAULT_GUI_FONT);
-        for (const HWND control : {g_pairing_list, connect}) {
-            if (control != nullptr) {
-                SendMessageW(control, WM_SETFONT,
-                             reinterpret_cast<WPARAM>(font), TRUE);
-            }
+        (void)connect;
+        EnumChildWindows(window, set_child_font,
+                         reinterpret_cast<LPARAM>(ui_font(dpi)));
+        return 0;
+    }
+    case WM_CTLCOLORLISTBOX:
+        return themed_control_color(wparam, kControlColor, control_brush());
+    case WM_CTLCOLORSTATIC:
+        return themed_control_color(wparam, kSurfaceColor, surface_brush());
+    case WM_DRAWITEM: {
+        const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
+        if (item == nullptr || item->CtlID != kPairingConnect) {
+            break;
         }
+        const bool pressed = (item->itemState & ODS_SELECTED) != 0;
+        const bool focused = (item->itemState & ODS_FOCUS) != 0;
+        const HBRUSH face = CreateSolidBrush(
+            pressed ? kButtonHoverColor : kButtonColor);
+        FillRect(item->hDC, &item->rcItem, face);
+        DeleteObject(face);
+        if (focused) {
+            const HBRUSH ring = CreateSolidBrush(kAccentColor);
+            FrameRect(item->hDC, &item->rcItem, ring);
+            DeleteObject(ring);
+        }
+        wchar_t caption[32]{};
+        GetWindowTextW(item->hwndItem, caption,
+                       static_cast<int>(std::size(caption)));
+        SetBkMode(item->hDC, TRANSPARENT);
+        SetTextColor(item->hDC, kTextColor);
+        RECT text_area = item->rcItem;
+        DrawTextW(item->hDC, caption, -1, &text_area,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return TRUE;
+    }
+    case WM_DPICHANGED: {
+        const UINT dpi = HIWORD(wparam);
+        g_pairing_window_dpi = dpi;
+        const auto* suggested = reinterpret_cast<const RECT*>(lparam);
+        if (suggested != nullptr) {
+            SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if (g_pairing_list != nullptr) {
+            MoveWindow(g_pairing_list, dpi_scaled(16, dpi),
+                       dpi_scaled(96, dpi), dpi_scaled(452, dpi),
+                       dpi_scaled(112, dpi), TRUE);
+        }
+        if (const HWND connect = GetDlgItem(window, kPairingConnect)) {
+            MoveWindow(connect, dpi_scaled(368, dpi), dpi_scaled(218, dpi),
+                       dpi_scaled(100, dpi), dpi_scaled(28, dpi), TRUE);
+        }
+        EnumChildWindows(window, set_child_font,
+                         reinterpret_cast<LPARAM>(ui_font(dpi)));
+        InvalidateRect(window, nullptr, TRUE);
         return 0;
     }
     case kPairingUpdatedMessage: {
@@ -1328,6 +1664,8 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
         const HDC device = BeginPaint(window, &paint);
         RECT client{};
         GetClientRect(window, &client);
+        FillRect(device, &client, surface_brush());
+        const UINT dpi = cached_or_window_dpi(g_pairing_window_dpi, window);
         std::wstring caption;
         std::wstring code;
         {
@@ -1336,13 +1674,17 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
             code = g_pairing_code;
         }
         SetBkMode(device, TRANSPARENT);
-        const RECT caption_area{16, 16, client.right - 16, 92};
-        draw_pairing_text(device, caption_area, -16, FW_NORMAL,
-                          L"Segoe UI", RGB(24, 24, 24), caption,
+        const RECT caption_area{dpi_scaled(16, dpi), dpi_scaled(16, dpi),
+                                client.right - dpi_scaled(16, dpi),
+                                dpi_scaled(92, dpi)};
+        draw_pairing_text(device, caption_area, -dpi_scaled(16, dpi),
+                          FW_NORMAL, L"Segoe UI", kTextColor, caption,
                           DT_WORDBREAK | DT_NOPREFIX);
-        const RECT code_area{16, 100, client.right - 16, 200};
-        draw_pairing_text(device, code_area, -56, FW_BOLD, L"Consolas",
-                          RGB(0, 70, 160), code,
+        const RECT code_area{dpi_scaled(16, dpi), dpi_scaled(100, dpi),
+                             client.right - dpi_scaled(16, dpi),
+                             dpi_scaled(200, dpi)};
+        draw_pairing_text(device, code_area, -dpi_scaled(56, dpi), FW_BOLD,
+                          L"Consolas", kAccentColor, code,
                           DT_CENTER | DT_SINGLELINE | DT_VCENTER |
                               DT_NOPREFIX);
         EndPaint(window, &paint);
@@ -1486,6 +1828,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
                 g_exam_host.enforce_foreground();
                 return 0;
             }
+            if (!g_server_connected.load()) {
+                // No live teacher session: chat has nowhere to go, so tell the
+                // student rather than opening an empty window.
+                show_pairing_status(
+                    {.outcome = 0, .detail = "Something went wrong."});
+                return 0;
+            }
             if (g_chat_window != nullptr) {
                 ShowWindow(g_chat_window,
                            IsWindowVisible(g_chat_window) ? SW_HIDE : SW_SHOW);
@@ -1523,6 +1872,16 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
                                       ? L"NSTU client - Managed"
                                       : L"NSTU client");
             Shell_NotifyIconW(NIM_MODIFY, &tray);
+        } else if (type == nstu::client::AgentMessageType::server_online) {
+            g_server_connected = lparam != 0;
+            if (lparam == 0 && g_chat_window != nullptr) {
+                // The teacher session dropped. Take the chat window down so it
+                // cannot sit open against a server that is no longer there, and
+                // make sure the exam-restore path does not bring it back while
+                // still disconnected.
+                ShowWindow(g_chat_window, SW_HIDE);
+                g_chat_was_visible_for_exam = false;
+            }
         } else if (type == nstu::client::AgentMessageType::chat && lparam != 0) {
             if (exam_host_engaged()) {
                 g_exam_host.enforce_foreground();
@@ -1603,6 +1962,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
+    // Must run before any window exists, otherwise Windows virtualizes the
+    // agent's coordinates and bitmap-stretches every control it owns.
+    enable_process_dpi_awareness();
     const UiComApartment com_apartment;
     if (!com_apartment.ready()) {
         const auto result = com_apartment.result();
@@ -1639,7 +2001,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     chat_class.lpfnWndProc = chat_window_proc;
     chat_class.lpszClassName = kChatWindowClass;
     chat_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-    chat_class.hbrBackground = static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
+    chat_class.hbrBackground = surface_brush();
     RegisterClassW(&chat_class);
     WNDCLASSW annotation_class{};
     annotation_class.hInstance = instance;
@@ -1658,8 +2020,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     pairing_class.lpfnWndProc = pairing_window_proc;
     pairing_class.lpszClassName = kPairingWindowClass;
     pairing_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
-    pairing_class.hbrBackground =
-        static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
+    pairing_class.hbrBackground = surface_brush();
     RegisterClassW(&pairing_class);
     const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -1673,9 +2034,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         return 1;
     }
     g_lock_window = window;
+    // Size and centre the chat on the primary work area at that monitor's DPI
+    // rather than letting the shell cascade a fixed 520x340 that is half-size
+    // on a scaled display.
+    const UINT primary_dpi = window_dpi(window);
+    const int chat_width = dpi_scaled(520, primary_dpi);
+    const int chat_height = dpi_scaled(340, primary_dpi);
+    RECT work_area{};
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0)) {
+        work_area = {0, 0, GetSystemMetrics(SM_CXSCREEN),
+                     GetSystemMetrics(SM_CYSCREEN)};
+    }
+    const int chat_x = work_area.left +
+        ((work_area.right - work_area.left) - chat_width) / 2;
+    const int chat_y = work_area.top +
+        ((work_area.bottom - work_area.top) - chat_height) / 2;
     g_chat_window = CreateWindowExW(
         0, kChatWindowClass, L"NSTU Client Chat", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 520, 340, nullptr, nullptr, instance,
+        chat_x, chat_y, chat_width, chat_height, nullptr, nullptr, instance,
         nullptr);
     if (g_chat_window == nullptr) {
         DestroyWindow(window);
@@ -1709,13 +2085,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     // there is nothing in it worth resizing. A machine whose desktop
     // refuses the window can still be managed once it is paired, so a
     // failure here is not fatal - every use of it is guarded.
-    constexpr int kPairingWidth = 500;
-    constexpr int kPairingHeight = 300;
+    const int kPairingWidth = dpi_scaled(500, primary_dpi);
+    const int kPairingHeight = dpi_scaled(300, primary_dpi);
     g_pairing_window = CreateWindowExW(
         WS_EX_TOPMOST, kPairingWindowClass, L"NSTU setup",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        (GetSystemMetrics(SM_CXSCREEN) - kPairingWidth) / 2,
-        (GetSystemMetrics(SM_CYSCREEN) - kPairingHeight) / 2,
+        work_area.left + ((work_area.right - work_area.left) -
+                          kPairingWidth) / 2,
+        work_area.top + ((work_area.bottom - work_area.top) -
+                         kPairingHeight) / 2,
         kPairingWidth, kPairingHeight, nullptr, nullptr, instance,
         nullptr);
     NOTIFYICONDATAW tray{};
@@ -1727,11 +2105,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     tray.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
     lstrcpyW(tray.szTip, L"NSTU client");
     Shell_NotifyIconW(NIM_ADD, &tray);
-    ShowWindow(g_chat_window, SW_SHOWDEFAULT);
+    // The chat window stays hidden at startup. It only opens once the service
+    // reports a live teacher session (server_online) and the student opens it,
+    // or when the teacher sends a message; opening it with no teacher would
+    // just present a dead window, so that path shows "Something went wrong."
     std::thread control_thread(pipe_control_loop, window);
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        // Route through the visible form window so Tab/Shift+Tab cycle its
+        // controls; without this the chat and pairing dialogs are mouse-only.
+        const HWND active = GetActiveWindow();
+        if ((active == g_chat_window || active == g_pairing_window) &&
+            active != nullptr && IsDialogMessageW(active, &message)) {
+            continue;
+        }
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }

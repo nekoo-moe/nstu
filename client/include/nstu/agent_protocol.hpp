@@ -56,6 +56,11 @@ enum class AgentMessageType : std::uint16_t {
     chat_submit = 30,
     // Server-to-agent overlay erase: remove annotation strokes near a path.
     overlay_erase = 31,
+    // Service-to-agent teacher-connection state. Payload is a single byte:
+    // 1 == this machine currently has a live authenticated session to the
+    // teacher server, 0 == not connected. The agent gates the chat window on
+    // this so chat only opens once a teacher is actually reachable.
+    server_online = 32,
 };
 
 struct AgentMessage {
