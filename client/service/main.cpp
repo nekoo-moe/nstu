@@ -323,6 +323,7 @@ void queue_exam_stop() {
     // exam before the fail-closed stop is delivered.
     std::erase_if(g_agent_queue, [](const auto& message) {
         return message.type == nstu::client::AgentMessageType::exam_start ||
+               message.type == nstu::client::AgentMessageType::exam_begin ||
                message.type == nstu::client::AgentMessageType::exam_stop;
     });
     if (g_agent_queue.size() >= kMaximumQueuedAgentMessages) {
@@ -829,6 +830,19 @@ void agent_pipe_loop() {
                         configured_client_id_matches(request->client_id)) {
                         queue_outbound_message(
                             nstu::protocol::CommandType::exam_state_request,
+                            std::move(message->payload));
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::exam_ready) {
+                    // Synchronized-start barrier: relay the agent's readiness
+                    // (kiosk up, package verified) to the server, bound to this
+                    // service's provisioned identity.
+                    const auto report =
+                        nstu::exam::decode_exam_ready_report(message->payload);
+                    if (report &&
+                        configured_client_id_matches(report->client_id)) {
+                        queue_outbound_message(
+                            nstu::protocol::CommandType::exam_ready,
                             std::move(message->payload));
                     }
                 } else if (message->type ==
@@ -1484,6 +1498,18 @@ void handle_server_command(
             queue_exam_stop();
         }
         break;
+    case nstu::protocol::CommandType::exam_begin: {
+        // Authenticated server release of the synchronized start. Bind the
+        // authoritative begin to this service's provisioned identity before it
+        // reaches the interactive agent.
+        const auto begin =
+            nstu::exam::decode_exam_begin_command(command.payload);
+        if (begin && configured_client_id_matches(begin->client_id)) {
+            queue_agent_message({nstu::client::AgentMessageType::exam_begin,
+                                 command.payload});
+        }
+        break;
+    }
     case nstu::protocol::CommandType::exam_answer_ack: {
         const auto ack = nstu::exam::decode_answer_ack(command.payload);
         if (!ack) {
