@@ -64,6 +64,23 @@ Microsoft::WRL::ComPtr<IDXGISwapChain> g_swap_chain;
 Microsoft::WRL::ComPtr<ID3D11RenderTargetView> g_render_target;
 ImFont* g_heading_font = nullptr;
 bool g_dark_mode = false;
+// Display-DPI scale factor (1.0 == 96 DPI). All style metrics and font sizes
+// are authored at 96 DPI and multiplied by this so the UI stays crisp and
+// correctly sized on high-DPI screens instead of being bitmap-scaled by Windows.
+float g_ui_scale = 1.0f;
+bool g_ui_scale_overridden = false;
+bool g_imgui_ready = false;
+
+// Maps a length authored at 96 DPI to the current display scale. Container
+// sizes, fixed panel widths and popup dimensions below are hand-authored in
+// 96-DPI pixels; wrapping them in scaled() keeps them proportional to the
+// DPI-scaled fonts so nothing clips or overlaps on high-DPI screens. At
+// g_ui_scale == 1.0 (96 DPI) this is the identity, so 96-DPI rendering is
+// byte-for-byte unchanged.
+[[nodiscard]] inline float scaled(float length_at_96dpi) noexcept {
+    return length_at_96dpi * g_ui_scale;
+}
+
 bool g_graphics_debug = false;
 bool g_graphics_device_lost = false;
 
@@ -788,6 +805,20 @@ RemoteImageRect g_remote_image_rect;
 std::atomic_bool g_remote_close_pending{false};
 bool g_remote_class_registered = false;
 
+void apply_dashboard_style(bool dark_mode);
+void load_dashboard_fonts();
+
+void apply_suggested_dpi_rect(HWND window, LPARAM lparam) {
+    const auto* suggested = reinterpret_cast<const RECT*>(lparam);
+    if (suggested == nullptr) {
+        return;
+    }
+    SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                 suggested->right - suggested->left,
+                 suggested->bottom - suggested->top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 bool ensure_remote_pipeline() {
     if (g_remote_vertex_shader && g_remote_pixel_shader && g_remote_sampler &&
         g_remote_sampler_point) {
@@ -916,8 +947,9 @@ void render_remote_window(ID3D11ShaderResourceView* srv, std::uint32_t tex_w,
         g_context->PSSetShaderResources(0, 1, views);
         // Enlarged past the source: nearest-filter keeps text crisp instead of
         // blurring it. At or below native, linear avoids downscale aliasing.
-        const bool upscaling =
-            tex_w > 0 && iw > static_cast<float>(tex_w);
+        const bool upscaling = tex_w > 0 && tex_h > 0 &&
+            (iw > static_cast<float>(tex_w) ||
+             ih > static_cast<float>(tex_h));
         ID3D11SamplerState* sampler =
             (upscaling ? g_remote_sampler_point : g_remote_sampler).Get();
         g_context->PSSetSamplers(0, 1, &sampler);
@@ -942,12 +974,26 @@ LRESULT CALLBACK remote_window_proc(HWND hwnd, UINT message, WPARAM wparam,
             const RemoteImageRect& rect = g_remote_image_rect;
             float rx = 0.5f;
             float ry = 0.5f;
-            if (rect.w > 0.0f && rect.h > 0.0f) {
-                rx = std::clamp((static_cast<float>(mx) - rect.x) / rect.w, 0.0f,
-                                1.0f);
-                ry = std::clamp((static_cast<float>(my) - rect.y) / rect.h, 0.0f,
-                                1.0f);
+            if (rect.w <= 0.0f || rect.h <= 0.0f) {
+                return 0;
             }
+            const bool inside =
+                static_cast<float>(mx) >= rect.x &&
+                static_cast<float>(mx) <= rect.x + rect.w &&
+                static_cast<float>(my) >= rect.y &&
+                static_cast<float>(my) <= rect.y + rect.h;
+            const bool release = message == WM_LBUTTONUP ||
+                                 message == WM_RBUTTONUP;
+            if (!inside && GetCapture() != hwnd && !release) {
+                // Letterbox bars are not part of the student's screen. Ignore
+                // an initial click/move there instead of clamping it to an edge
+                // and accidentally clicking the remote desktop.
+                return 0;
+            }
+            rx = std::clamp((static_cast<float>(mx) - rect.x) / rect.w,
+                            0.0f, 1.0f);
+            ry = std::clamp((static_cast<float>(my) - rect.y) / rect.h,
+                            0.0f, 1.0f);
             nstu::wire::RemoteInputPacket packet{};
             packet.input_type =
                 static_cast<std::uint8_t>(nstu::wire::RemoteInputType::mouse);
@@ -1000,6 +1046,9 @@ LRESULT CALLBACK remote_window_proc(HWND hwnd, UINT message, WPARAM wparam,
         }
         return 0;
     }
+    case WM_DPICHANGED:
+        apply_suggested_dpi_rect(hwnd, lparam);
+        return 0;
     case WM_SIZE:
         if (g_remote_swap_chain && wparam != SIZE_MINIMIZED) {
             g_remote_render_target.Reset();
@@ -1054,9 +1103,14 @@ bool open_remote_window(nstu::server::ServerControlPlane& control_plane,
             RegisterClassW(&window_class);
             g_remote_class_registered = true;
         }
+        const float remote_scale = g_main_window != nullptr
+            ? ImGui_ImplWin32_GetDpiScaleForHwnd(g_main_window)
+            : g_ui_scale;
         g_remote_window = CreateWindowW(
             L"NstuRemoteWindow", L"NSTU Remote control", WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT, CW_USEDEFAULT, 1120, 700, nullptr, nullptr,
+            CW_USEDEFAULT, CW_USEDEFAULT,
+            static_cast<int>(1120.0f * remote_scale),
+            static_cast<int>(700.0f * remote_scale), nullptr, nullptr,
             GetModuleHandleW(nullptr), nullptr);
         if (g_remote_window == nullptr) {
             return false;
@@ -1117,8 +1171,40 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     }
     if (message == WM_GETMINMAXINFO) {
         auto* minimum = reinterpret_cast<MINMAXINFO*>(lparam);
-        minimum->ptMinTrackSize.x = 960;
-        minimum->ptMinTrackSize.y = 640;
+        LONG minimum_width = static_cast<LONG>(960.0f * g_ui_scale);
+        LONG minimum_height = static_cast<LONG>(640.0f * g_ui_scale);
+        if (HMONITOR monitor =
+                MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)) {
+            MONITORINFO monitor_info{};
+            monitor_info.cbSize = sizeof(monitor_info);
+            if (GetMonitorInfoW(monitor, &monitor_info)) {
+                const LONG work_width =
+                    monitor_info.rcWork.right - monitor_info.rcWork.left;
+                const LONG work_height =
+                    monitor_info.rcWork.bottom - monitor_info.rcWork.top;
+                minimum_width = std::min(minimum_width, work_width);
+                minimum_height = std::min(minimum_height, work_height);
+            }
+        }
+        minimum->ptMinTrackSize.x = minimum_width;
+        minimum->ptMinTrackSize.y = minimum_height;
+        return 0;
+    }
+    if (message == WM_DPICHANGED && !g_ui_scale_overridden) {
+        g_ui_scale = static_cast<float>(HIWORD(wparam)) / 96.0f;
+        if (!(g_ui_scale > 0.0f)) {
+            g_ui_scale = 1.0f;
+        }
+        apply_suggested_dpi_rect(window, lparam);
+        if (g_imgui_ready) {
+            apply_dashboard_style(g_dark_mode);
+            auto& atlas = ImGui::GetIO().Fonts;
+            atlas->Clear();
+            g_heading_font = nullptr;
+            load_dashboard_fonts();
+            ImGui_ImplDX11_InvalidateDeviceObjects();
+            (void)ImGui_ImplDX11_CreateDeviceObjects();
+        }
         return 0;
     }
     if (message == g_taskbar_created_message &&
@@ -1176,7 +1262,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 
 void apply_dashboard_style(bool dark_mode) {
     g_dark_mode = dark_mode;
+    // Rebuild from the ImGui defaults every time. Theme switches may happen
+    // repeatedly; scaling the existing style would multiply untouched metrics
+    // (scrollbars, indentation, grab sizes) on every Light/Dark click.
     auto& style = ImGui::GetStyle();
+    style = ImGuiStyle{};
     style.WindowPadding = {8.0f, 6.0f};
     style.FramePadding = {8.0f, 5.0f};
     style.CellPadding = {7.0f, 6.0f};
@@ -1194,63 +1284,67 @@ void apply_dashboard_style(bool dark_mode) {
 
     auto* colors = style.Colors;
     colors[ImGuiCol_Text] = dark_mode
-        ? ImVec4{0.91f, 0.90f, 0.87f, 1.0f}
-        : ImVec4{0.12f, 0.12f, 0.11f, 1.0f};
+        ? ImVec4{0.878f, 0.895f, 0.918f, 1.0f}
+        : ImVec4{0.135f, 0.145f, 0.160f, 1.0f};
     colors[ImGuiCol_TextDisabled] = dark_mode
-        ? ImVec4{0.61f, 0.60f, 0.57f, 1.0f}
-        : ImVec4{0.46f, 0.45f, 0.43f, 1.0f};
+        ? ImVec4{0.520f, 0.552f, 0.600f, 1.0f}
+        : ImVec4{0.480f, 0.495f, 0.520f, 1.0f};
     colors[ImGuiCol_WindowBg] = dark_mode
-        ? ImVec4{0.075f, 0.075f, 0.070f, 1.0f}
-        : ImVec4{0.975f, 0.971f, 0.958f, 1.0f};
+        ? ImVec4{0.098f, 0.110f, 0.130f, 1.0f}
+        : ImVec4{0.902f, 0.906f, 0.914f, 1.0f};
     colors[ImGuiCol_ChildBg] = dark_mode
-        ? ImVec4{0.105f, 0.105f, 0.098f, 1.0f}
-        : ImVec4{1.0f, 1.0f, 1.0f, 1.0f};
+        ? ImVec4{0.130f, 0.146f, 0.170f, 1.0f}
+        : ImVec4{0.962f, 0.964f, 0.970f, 1.0f};
     colors[ImGuiCol_PopupBg] = dark_mode
-        ? ImVec4{0.12f, 0.12f, 0.11f, 1.0f}
-        : ImVec4{1.0f, 1.0f, 1.0f, 1.0f};
+        ? ImVec4{0.140f, 0.157f, 0.183f, 1.0f}
+        : ImVec4{0.968f, 0.970f, 0.976f, 1.0f};
     colors[ImGuiCol_Border] = dark_mode
-        ? ImVec4{0.22f, 0.22f, 0.20f, 1.0f}
-        : ImVec4{0.90f, 0.89f, 0.87f, 1.0f};
+        ? ImVec4{0.235f, 0.260f, 0.300f, 1.0f}
+        : ImVec4{0.820f, 0.828f, 0.845f, 1.0f};
     colors[ImGuiCol_BorderShadow] = {0.0f, 0.0f, 0.0f, 0.0f};
     colors[ImGuiCol_FrameBg] = dark_mode
-        ? ImVec4{0.14f, 0.14f, 0.13f, 1.0f}
-        : ImVec4{0.985f, 0.982f, 0.973f, 1.0f};
+        ? ImVec4{0.155f, 0.173f, 0.200f, 1.0f}
+        : ImVec4{0.940f, 0.943f, 0.950f, 1.0f};
     colors[ImGuiCol_FrameBgHovered] = dark_mode
-        ? ImVec4{0.20f, 0.20f, 0.18f, 1.0f}
-        : ImVec4{0.95f, 0.945f, 0.93f, 1.0f};
+        ? ImVec4{0.195f, 0.216f, 0.248f, 1.0f}
+        : ImVec4{0.910f, 0.914f, 0.924f, 1.0f};
     colors[ImGuiCol_FrameBgActive] = dark_mode
-        ? ImVec4{0.25f, 0.25f, 0.23f, 1.0f}
-        : ImVec4{0.92f, 0.915f, 0.90f, 1.0f};
+        ? ImVec4{0.230f, 0.254f, 0.290f, 1.0f}
+        : ImVec4{0.878f, 0.884f, 0.898f, 1.0f};
     colors[ImGuiCol_TitleBg] = colors[ImGuiCol_WindowBg];
     colors[ImGuiCol_TitleBgActive] = colors[ImGuiCol_WindowBg];
     colors[ImGuiCol_Button] = dark_mode
-        ? ImVec4{0.17f, 0.17f, 0.16f, 1.0f}
-        : ImVec4{0.93f, 0.925f, 0.91f, 1.0f};
+        ? ImVec4{0.165f, 0.184f, 0.214f, 1.0f}
+        : ImVec4{0.902f, 0.908f, 0.920f, 1.0f};
     colors[ImGuiCol_ButtonHovered] = dark_mode
-        ? ImVec4{0.24f, 0.24f, 0.22f, 1.0f}
-        : ImVec4{0.88f, 0.875f, 0.86f, 1.0f};
+        ? ImVec4{0.210f, 0.233f, 0.268f, 1.0f}
+        : ImVec4{0.860f, 0.868f, 0.882f, 1.0f};
     colors[ImGuiCol_ButtonActive] = dark_mode
-        ? ImVec4{0.30f, 0.30f, 0.28f, 1.0f}
-        : ImVec4{0.83f, 0.825f, 0.81f, 1.0f};
+        ? ImVec4{0.250f, 0.277f, 0.318f, 1.0f}
+        : ImVec4{0.818f, 0.828f, 0.845f, 1.0f};
     colors[ImGuiCol_Header] = dark_mode
-        ? ImVec4{0.17f, 0.24f, 0.27f, 1.0f}
-        : ImVec4{0.88f, 0.93f, 0.95f, 1.0f};
+        ? ImVec4{0.150f, 0.235f, 0.290f, 1.0f}
+        : ImVec4{0.820f, 0.872f, 0.910f, 1.0f};
     colors[ImGuiCol_HeaderHovered] = dark_mode
-        ? ImVec4{0.21f, 0.31f, 0.35f, 1.0f}
-        : ImVec4{0.82f, 0.90f, 0.94f, 1.0f};
+        ? ImVec4{0.185f, 0.285f, 0.345f, 1.0f}
+        : ImVec4{0.772f, 0.842f, 0.892f, 1.0f};
     colors[ImGuiCol_HeaderActive] = dark_mode
-        ? ImVec4{0.24f, 0.36f, 0.41f, 1.0f}
-        : ImVec4{0.76f, 0.87f, 0.92f, 1.0f};
+        ? ImVec4{0.215f, 0.330f, 0.400f, 1.0f}
+        : ImVec4{0.720f, 0.812f, 0.872f, 1.0f};
     colors[ImGuiCol_Separator] = colors[ImGuiCol_Border];
     colors[ImGuiCol_CheckMark] = dark_mode
-        ? ImVec4{0.52f, 0.74f, 0.82f, 1.0f}
-        : ImVec4{0.18f, 0.36f, 0.45f, 1.0f};
+        ? ImVec4{0.380f, 0.640f, 0.780f, 1.0f}
+        : ImVec4{0.160f, 0.360f, 0.470f, 1.0f};
     colors[ImGuiCol_SliderGrab] = dark_mode
-        ? ImVec4{0.72f, 0.71f, 0.68f, 1.0f}
+        ? ImVec4{0.680f, 0.705f, 0.745f, 1.0f}
         : ImVec4{0.18f, 0.18f, 0.17f, 1.0f};
     colors[ImGuiCol_SliderGrabActive] = dark_mode
-        ? ImVec4{0.90f, 0.89f, 0.86f, 1.0f}
+        ? ImVec4{0.850f, 0.870f, 0.900f, 1.0f}
         : ImVec4{0.30f, 0.30f, 0.29f, 1.0f};
+
+    // Metrics above are authored at 96 DPI; scale them to the display so the
+    // whole UI (padding, rounding, borders, scrollbars) tracks the font size.
+    style.ScaleAllSizes(g_ui_scale);
 }
 
 void load_dashboard_fonts() {
@@ -1267,12 +1361,12 @@ void load_dashboard_fonts() {
     auto& atlas = ImGui::GetIO().Fonts;
     const ImWchar* glyph_ranges = atlas->GetGlyphRangesVietnamese();
     if (GetFileAttributesA(regular.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        atlas->AddFontFromFileTTF(regular.c_str(), 15.0f, nullptr,
+        atlas->AddFontFromFileTTF(regular.c_str(), 15.0f * g_ui_scale, nullptr,
                                   glyph_ranges);
     }
     if (GetFileAttributesA(bold.c_str()) != INVALID_FILE_ATTRIBUTES) {
         g_heading_font = atlas->AddFontFromFileTTF(
-            bold.c_str(), 17.0f, nullptr, glyph_ranges);
+            bold.c_str(), 17.0f * g_ui_scale, nullptr, glyph_ranges);
     }
 }
 
@@ -1419,12 +1513,17 @@ void pop_client_id() {
 
 void draw_icon(ImDrawList* draw_list, IconKind icon, ImVec2 center,
                float size, ImU32 color) {
+    // size is authored at 96 DPI; scale it and every fixed pixel offset below
+    // by g_ui_scale so the glyph grows uniformly with the DPI-scaled fonts.
+    // At g_ui_scale == 1.0, scaled() is the identity and the glyph is drawn
+    // pixel-for-pixel as before.
+    size *= g_ui_scale;
     const float half = size * 0.5f;
     const float left = center.x - half;
     const float top = center.y - half;
     const float right = center.x + half;
     const float bottom = center.y + half;
-    const float stroke = 1.8f;
+    const float stroke = scaled(1.8f);
     switch (icon) {
     case IconKind::grid: {
         const float cell = size * 0.34f;
@@ -1436,64 +1535,73 @@ void draw_icon(ImDrawList* draw_list, IconKind icon, ImVec2 center,
                     top + row * (cell + gap)};
                 draw_list->AddRect(
                     minimum, {minimum.x + cell, minimum.y + cell}, color,
-                    1.5f, 0, stroke);
+                    scaled(1.5f), 0, stroke);
             }
         }
         break;
     }
     case IconKind::monitor:
-        draw_list->AddRect({left, top + 1.0f}, {right, bottom - 4.0f}, color,
-                           2.0f, 0, stroke);
-        draw_list->AddLine({center.x, bottom - 4.0f}, {center.x, bottom}, color,
-                           stroke);
-        draw_list->AddLine({center.x - 5.0f, bottom},
-                           {center.x + 5.0f, bottom}, color, stroke);
+        draw_list->AddRect({left, top + scaled(1.0f)},
+                           {right, bottom - scaled(4.0f)}, color, scaled(2.0f),
+                           0, stroke);
+        draw_list->AddLine({center.x, bottom - scaled(4.0f)},
+                           {center.x, bottom}, color, stroke);
+        draw_list->AddLine({center.x - scaled(5.0f), bottom},
+                           {center.x + scaled(5.0f), bottom}, color, stroke);
         break;
     case IconKind::camera:
-        draw_list->AddRect({left, top + 3.0f}, {right, bottom}, color, 2.0f, 0,
-                           stroke);
-        draw_list->AddRect({left + 4.0f, top}, {left + 10.0f, top + 4.0f},
-                           color, 1.0f, 0, stroke);
+        draw_list->AddRect({left, top + scaled(3.0f)}, {right, bottom}, color,
+                           scaled(2.0f), 0, stroke);
+        draw_list->AddRect({left + scaled(4.0f), top},
+                           {left + scaled(10.0f), top + scaled(4.0f)}, color,
+                           scaled(1.0f), 0, stroke);
         draw_list->AddCircle(center, size * 0.21f, color, 16, stroke);
         break;
     case IconKind::stop:
-        draw_list->AddRectFilled({left + 3.0f, top + 3.0f},
-                                 {right - 3.0f, bottom - 3.0f}, color, 2.0f);
+        draw_list->AddRectFilled({left + scaled(3.0f), top + scaled(3.0f)},
+                                 {right - scaled(3.0f), bottom - scaled(3.0f)},
+                                 color, scaled(2.0f));
         break;
     case IconKind::lock:
     case IconKind::unlock: {
         const bool unlocked = icon == IconKind::unlock;
-        draw_list->AddRect({left + 3.0f, center.y - 1.0f},
-                           {right - 3.0f, bottom}, color, 2.0f, 0, stroke);
+        draw_list->AddRect({left + scaled(3.0f), center.y - scaled(1.0f)},
+                           {right - scaled(3.0f), bottom}, color, scaled(2.0f),
+                           0, stroke);
         draw_list->PathClear();
         const ImVec2 shackle_center{
-            center.x + (unlocked ? 3.0f : 0.0f), center.y - 1.0f};
+            center.x + (unlocked ? scaled(3.0f) : 0.0f), center.y - scaled(1.0f)};
         draw_list->PathArcTo(shackle_center, size * 0.26f,
                              3.1415926f, 6.2831852f, 12);
         draw_list->PathStroke(color, 0, stroke);
         if (unlocked) {
-            draw_list->AddLine({left + 2.0f, top + 7.0f},
-                               {left + 2.0f, center.y - 1.0f}, color, stroke);
+            draw_list->AddLine({left + scaled(2.0f), top + scaled(7.0f)},
+                               {left + scaled(2.0f), center.y - scaled(1.0f)},
+                               color, stroke);
         }
         break;
     }
     case IconKind::pen:
-        draw_list->AddLine({left + 3.0f, bottom - 2.0f},
-                           {right - 2.0f, top + 3.0f}, color, 3.0f);
-        draw_list->AddTriangleFilled({right - 2.0f, top + 3.0f},
-                                     {right - 6.0f, top + 4.0f},
-                                     {right - 3.0f, top + 7.0f}, color);
+        draw_list->AddLine({left + scaled(3.0f), bottom - scaled(2.0f)},
+                           {right - scaled(2.0f), top + scaled(3.0f)}, color,
+                           scaled(3.0f));
+        draw_list->AddTriangleFilled({right - scaled(2.0f), top + scaled(3.0f)},
+                                     {right - scaled(6.0f), top + scaled(4.0f)},
+                                     {right - scaled(3.0f), top + scaled(7.0f)},
+                                     color);
         break;
     case IconKind::erase:
-        draw_list->AddQuad({left + 3.0f, bottom - 6.0f},
-                           {center.x + 2.0f, top + 2.0f},
-                           {right - 2.0f, top + 7.0f},
-                           {center.x - 3.0f, bottom - 1.0f}, color, stroke);
-        draw_list->AddLine({left + 5.0f, bottom - 4.0f},
-                           {right - 1.0f, bottom - 4.0f}, color, stroke);
+        draw_list->AddQuad({left + scaled(3.0f), bottom - scaled(6.0f)},
+                           {center.x + scaled(2.0f), top + scaled(2.0f)},
+                           {right - scaled(2.0f), top + scaled(7.0f)},
+                           {center.x - scaled(3.0f), bottom - scaled(1.0f)},
+                           color, stroke);
+        draw_list->AddLine({left + scaled(5.0f), bottom - scaled(4.0f)},
+                           {right - scaled(1.0f), bottom - scaled(4.0f)}, color,
+                           stroke);
         break;
     case IconKind::broadcast:
-        draw_list->AddCircleFilled(center, 2.4f, color);
+        draw_list->AddCircleFilled(center, scaled(2.4f), color);
         for (int ring = 1; ring <= 2; ++ring) {
             const float radius = size * (0.18f + ring * 0.15f);
             draw_list->PathClear();
@@ -1505,16 +1613,17 @@ void draw_icon(ImDrawList* draw_list, IconKind icon, ImVec2 center,
         }
         break;
     case IconKind::chat:
-        draw_list->AddRect({left, top}, {right, bottom - 4.0f}, color, 3.0f, 0,
-                           stroke);
-        draw_list->AddTriangleFilled({left + 4.0f, bottom - 4.0f},
-                                     {left + 8.0f, bottom - 4.0f},
-                                     {left + 4.0f, bottom}, color);
-        draw_list->AddCircleFilled({center.x - 6.0f, center.y - 2.0f}, 1.5f,
-                                   color);
-        draw_list->AddCircleFilled({center.x, center.y - 2.0f}, 1.5f, color);
-        draw_list->AddCircleFilled({center.x + 6.0f, center.y - 2.0f}, 1.5f,
-                                   color);
+        draw_list->AddRect({left, top}, {right, bottom - scaled(4.0f)}, color,
+                           scaled(3.0f), 0, stroke);
+        draw_list->AddTriangleFilled({left + scaled(4.0f), bottom - scaled(4.0f)},
+                                     {left + scaled(8.0f), bottom - scaled(4.0f)},
+                                     {left + scaled(4.0f), bottom}, color);
+        draw_list->AddCircleFilled({center.x - scaled(6.0f), center.y - scaled(2.0f)},
+                                   scaled(1.5f), color);
+        draw_list->AddCircleFilled({center.x, center.y - scaled(2.0f)},
+                                   scaled(1.5f), color);
+        draw_list->AddCircleFilled({center.x + scaled(6.0f), center.y - scaled(2.0f)},
+                                   scaled(1.5f), color);
         break;
     }
 }
@@ -1536,11 +1645,11 @@ bool draw_icon_button(const char* id, const char* label, IconKind icon,
     if (selected || hovered) {
         const ImU32 background = ImGui::GetColorU32(
             selected ? ImGuiCol_Header : ImGuiCol_FrameBgHovered);
-        draw_list->AddRectFilled(minimum, maximum, background, 4.0f);
+        draw_list->AddRectFilled(minimum, maximum, background, scaled(4.0f));
     }
     const ImU32 foreground = ImGui::GetColorU32(
         enabled ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-    const float label_height = show_label ? 20.0f : 0.0f;
+    const float label_height = show_label ? scaled(20.0f) : 0.0f;
     draw_icon(draw_list, icon,
               {minimum.x + size.x * 0.5f,
                minimum.y + (size.y - label_height) * 0.43f},
@@ -1548,8 +1657,8 @@ bool draw_icon_button(const char* id, const char* label, IconKind icon,
     if (show_label) {
         const ImVec2 text_size = ImGui::CalcTextSize(label);
         draw_list->AddText(
-            {minimum.x + std::max(3.0f, (size.x - text_size.x) * 0.5f),
-             maximum.y - text_size.y - 5.0f},
+            {minimum.x + std::max(scaled(3.0f), (size.x - text_size.x) * 0.5f),
+             maximum.y - text_size.y - scaled(5.0f)},
             foreground, label);
     }
     if (hovered && !show_label) {
@@ -1558,10 +1667,11 @@ bool draw_icon_button(const char* id, const char* label, IconKind icon,
     if (badge) {
         // Small attention dot at the top-right corner; draws over the icon so it
         // reads as an unread marker regardless of label state.
-        const ImVec2 center{maximum.x - 6.0f, minimum.y + 6.0f};
-        draw_list->AddCircleFilled(center, 4.5f, IM_COL32(229, 72, 77, 255));
-        draw_list->AddCircle(center, 4.5f, IM_COL32(255, 255, 255, 235), 12,
-                             1.4f);
+        const ImVec2 center{maximum.x - scaled(6.0f), minimum.y + scaled(6.0f)};
+        draw_list->AddCircleFilled(center, scaled(4.5f),
+                                   IM_COL32(229, 72, 77, 255));
+        draw_list->AddCircle(center, scaled(4.5f), IM_COL32(255, 255, 255, 235),
+                             12, scaled(1.4f));
     }
     if (!enabled) {
         ImGui::EndDisabled();
@@ -1574,7 +1684,7 @@ void draw_status_badge(nstu::server::ClientStatus status,
                        const DashboardState& state) {
     const char* label = client_status_label(status, state);
     const ImVec2 text_size = ImGui::CalcTextSize(label);
-    const ImVec2 size{text_size.x + 16.0f, text_size.y + 8.0f};
+    const ImVec2 size{text_size.x + scaled(16.0f), text_size.y + scaled(8.0f)};
     ImGui::PushID(label);
     ImGui::InvisibleButton("##status", size);
     const ImVec2 minimum = ImGui::GetItemRectMin();
@@ -1583,8 +1693,8 @@ void draw_status_badge(nstu::server::ClientStatus status,
     draw_list->AddRectFilled(minimum, maximum,
                              ImGui::ColorConvertFloat4ToU32(
                                  status_background_color(status)),
-                             4.0f);
-    draw_list->AddText({minimum.x + 8.0f, minimum.y + 4.0f},
+                             scaled(4.0f));
+    draw_list->AddText({minimum.x + scaled(8.0f), minimum.y + scaled(4.0f)},
                        ImGui::ColorConvertFloat4ToU32(
                            status_text_color(status)),
                        label);
@@ -1738,7 +1848,7 @@ void draw_client_card(const nstu::server::ClientRecord& client, float width,
         selected ? (g_dark_mode ? ImVec4{0.42f, 0.68f, 0.78f, 1.0f}
                                 : ImVec4{0.31f, 0.56f, 0.68f, 1.0f})
                  : ImGui::GetStyleColorVec4(ImGuiCol_Border));
-    if (ImGui::BeginChild("client-card", {width, width * 0.5625f + 58.0f},
+    if (ImGui::BeginChild("client-card", {width, width * 0.5625f + scaled(58.0f)},
                           true, ImGuiWindowFlags_NoScrollbar)) {
         if (draw_screen_surface(client, width * 0.5625f, "##screen", state)
                 .clicked) {
@@ -1793,7 +1903,7 @@ void draw_room_screen_wall(
         : ImVec4{0.91f, 0.965f, 0.985f, 1.0f};
     ImGui::PushStyleColor(ImGuiCol_ChildBg, workspace_background);
     if (ImGui::BeginChild("screen-wall", {0, 0}, false)) {
-        constexpr float minimum_card_width = 205.0f;
+        const float minimum_card_width = scaled(205.0f);
         const float gap = ImGui::GetStyle().ItemSpacing.x;
         const float available = ImGui::GetContentRegionAvail().x;
         const int columns = std::clamp(
@@ -1816,7 +1926,7 @@ void draw_room_screen_wall(
 void draw_focus_client_list(
     const std::vector<nstu::server::ClientRecord>& clients,
     DashboardState& state) {
-    if (ImGui::BeginChild("focus-client-list", {280.0f, 0}, true)) {
+    if (ImGui::BeginChild("focus-client-list", {scaled(280.0f), 0}, true)) {
         ImGui::TextUnformatted(tr(state, "Clients", "Máy học sinh"));
         ImGui::Separator();
         if (ImGui::BeginTable("focus-clients", 2,
@@ -1825,18 +1935,19 @@ void draw_focus_client_list(
             ImGui::TableSetupColumn(tr(state, "Client", "Máy"),
                                     ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn(tr(state, "Status", "Trạng thái"),
-                                    ImGuiTableColumnFlags_WidthFixed, 94.0f);
+                                    ImGuiTableColumnFlags_WidthFixed,
+                                    scaled(94.0f));
             for (const auto& client : clients) {
                 if (!client_matches_filter(client, state)) {
                     continue;
                 }
                 push_client_id(client.id);
-                ImGui::TableNextRow(0, 40.0f);
+                ImGui::TableNextRow(0, scaled(40.0f));
                 ImGui::TableSetColumnIndex(0);
                 const bool selected = state.selected_client_id == client.id;
                 if (ImGui::Selectable(client.hostname.c_str(), selected,
                                       ImGuiSelectableFlags_None,
-                                      {0.0f, 36.0f})) {
+                                      {0.0f, scaled(36.0f)})) {
                     state.selected_client_id = client.id;
                     state.annotation_enabled = false;
                 }
@@ -1844,9 +1955,9 @@ void draw_focus_client_list(
                     const ImVec2 rect_min = ImGui::GetItemRectMin();
                     const ImVec2 rect_max = ImGui::GetItemRectMax();
                     ImGui::GetWindowDrawList()->AddCircleFilled(
-                        {rect_max.x - 9.0f,
+                        {rect_max.x - scaled(9.0f),
                          (rect_min.y + rect_max.y) * 0.5f},
-                        4.0f, IM_COL32(229, 72, 77, 255));
+                        scaled(4.0f), IM_COL32(229, 72, 77, 255));
                 }
                 ImGui::TableSetColumnIndex(1);
                 ImGui::TextColored(status_text_color(client.status), "%s",
@@ -1861,7 +1972,7 @@ void draw_focus_client_list(
 
 void draw_telemetry_card(const char* label, const char* value, float width) {
     ImGui::PushID(label);
-    if (ImGui::BeginChild("telemetry", {width, 62.0f}, true,
+    if (ImGui::BeginChild("telemetry", {width, scaled(62.0f)}, true,
                           ImGuiWindowFlags_NoScrollbar)) {
         ImGui::TextDisabled("%s", label);
         ImGui::TextUnformatted(value);
@@ -2061,8 +2172,8 @@ void draw_selected_client(
     }
     const float preview_width = ImGui::GetContentRegionAvail().x;
     const float preview_height = std::clamp(
-        preview_width * 0.5625f, 220.0f,
-        std::max(220.0f, ImGui::GetContentRegionAvail().y - 210.0f));
+        preview_width * 0.5625f, scaled(220.0f),
+        std::max(scaled(220.0f), ImGui::GetContentRegionAvail().y - scaled(210.0f)));
     const auto surface = draw_screen_surface(
         *selected_client, preview_height, "##focus-screen", state);
     // Remote input no longer rides on this embedded Focus surface: it lives in a
@@ -2352,7 +2463,7 @@ void draw_selected_client(
                 ? "Bút\0Thước\0Mũi tên\0Hình chữ nhật\0Elip\0Tẩy\0"
                 : "Pen\0Ruler\0Arrow\0Rectangle\0Ellipse\0Eraser\0";
         int tool_index = static_cast<int>(state.annotation_tool);
-        ImGui::SetNextItemWidth(150.0f);
+        ImGui::SetNextItemWidth(scaled(150.0f));
         if (ImGui::Combo(tr(state, "Tool", "Công cụ"), &tool_index,
                          tool_items)) {
             state.annotation_tool = static_cast<AnnotationTool>(
@@ -2392,7 +2503,7 @@ void draw_selected_client(
             ImGui::PushID(static_cast<int>(index));
             if (ImGui::ColorButton("##pen-color", display,
                                    ImGuiColorEditFlags_NoTooltip,
-                                   {24.0f, 24.0f})) {
+                                   {scaled(24.0f), scaled(24.0f)})) {
                 state.annotation_rgba = color;
             }
             ImGui::PopID();
@@ -2401,7 +2512,7 @@ void draw_selected_client(
             }
         }
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(140.0f);
+        ImGui::SetNextItemWidth(scaled(140.0f));
         ImGui::SliderInt(tr(state, "Thickness", "Độ dày"),
                          &state.annotation_thickness, 2, 12);
     }
@@ -2410,10 +2521,10 @@ void draw_selected_client(
         ImGui::EndPopup();
     }
 
-    if (ImGui::BeginChild("chat-panel", {0, 112.0f}, true)) {
+    if (ImGui::BeginChild("chat-panel", {0, scaled(112.0f)}, true)) {
         ImGui::TextUnformatted(tr(state, "Chat", "Trò chuyện"));
         const auto chat_log = control_plane.chat_history(selected_client->id);
-        if (ImGui::BeginChild("chat-log", {0, 52.0f}, true)) {
+        if (ImGui::BeginChild("chat-log", {0, scaled(52.0f)}, true)) {
             if (chat_log.empty()) {
                 ImGui::TextDisabled(
                     "%s", tr(state, "No messages in this session.",
@@ -2432,13 +2543,13 @@ void draw_selected_client(
             }
         }
         ImGui::EndChild();
-        ImGui::SetNextItemWidth(-78.0f);
+        ImGui::SetNextItemWidth(scaled(-78.0f));
         const bool submit = ImGui::InputText(
             "##chat-input", state.chat_input.data(), state.chat_input.size(),
             ImGuiInputTextFlags_EnterReturnsTrue);
         ImGui::SameLine();
         if ((submit || ImGui::Button(tr(state, "Send", "Gửi"),
-                                     {68.0f, 0.0f})) &&
+                                     {scaled(68.0f), 0.0f})) &&
             state.chat_input[0] != '\0') {
             std::string error;
             if (control_plane.send_chat(selected_client->id,
@@ -2461,14 +2572,14 @@ bool draw_segment_option(const char* label, bool selected, float width) {
     if (selected) {
         ImGui::PushStyleColor(
             ImGuiCol_Button,
-            g_dark_mode ? ImVec4{0.82f, 0.81f, 0.78f, 1.0f}
-                        : ImVec4{0.12f, 0.12f, 0.11f, 1.0f});
+            g_dark_mode ? ImVec4{0.800f, 0.820f, 0.850f, 1.0f}
+                        : ImVec4{0.150f, 0.165f, 0.185f, 1.0f});
         ImGui::PushStyleColor(
             ImGuiCol_Text,
-            g_dark_mode ? ImVec4{0.10f, 0.10f, 0.09f, 1.0f}
+            g_dark_mode ? ImVec4{0.090f, 0.100f, 0.120f, 1.0f}
                         : ImVec4{1.0f, 1.0f, 1.0f, 1.0f});
     }
-    const bool pressed = ImGui::Button(label, {width, 28.0f});
+    const bool pressed = ImGui::Button(label, {width, scaled(28.0f)});
     if (selected) {
         ImGui::PopStyleColor(2);
     }
@@ -2476,13 +2587,13 @@ bool draw_segment_option(const char* label, bool selected, float width) {
 }
 
 void draw_preferences(DashboardState& state) {
-    constexpr float settings_width = 108.0f;
+    const float settings_width = scaled(108.0f);
     ImGui::SameLine(ImGui::GetContentRegionMax().x - settings_width);
     if (ImGui::Button(tr(state, "Settings", "Cài đặt"),
-                      {settings_width, 28.0f})) {
+                      {settings_width, scaled(28.0f)})) {
         ImGui::OpenPopup("settings-popup");
     }
-    ImGui::SetNextWindowSize({390.0f, 0.0f}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize({scaled(390.0f), 0.0f}, ImGuiCond_Appearing);
     if (!ImGui::BeginPopup("settings-popup")) {
         return;
     }
@@ -2490,14 +2601,14 @@ void draw_preferences(DashboardState& state) {
     ImGui::Separator();
     ImGui::TextDisabled("%s", tr(state, "Language", "Ngôn ngữ"));
     if (draw_segment_option("EN", state.language == Language::english,
-                            42.0f)) {
+                            scaled(42.0f))) {
         state.language = Language::english;
         g_language = state.language;
         state.control_status.clear();
     }
     ImGui::SameLine();
     if (draw_segment_option("VI", state.language == Language::vietnamese,
-                            42.0f)) {
+                            scaled(42.0f))) {
         state.language = Language::vietnamese;
         g_language = state.language;
         state.control_status.clear();
@@ -2505,19 +2616,19 @@ void draw_preferences(DashboardState& state) {
     ImGui::Spacing();
     ImGui::TextDisabled("%s", tr(state, "Appearance", "Giao diện"));
     if (draw_segment_option(tr(state, "Light", "Sáng"), !state.dark_mode,
-                            68.0f)) {
+                            scaled(68.0f))) {
         state.dark_mode = false;
         apply_dashboard_style(false);
     }
     ImGui::SameLine();
     if (draw_segment_option(tr(state, "Dark", "Tối"), state.dark_mode,
-                            68.0f)) {
+                            scaled(68.0f))) {
         state.dark_mode = true;
         apply_dashboard_style(true);
     }
     ImGui::Spacing();
     ImGui::TextDisabled("%s", tr(state, "Screen refresh", "Chu kỳ làm mới"));
-    ImGui::SetNextItemWidth(184.0f);
+    ImGui::SetNextItemWidth(scaled(184.0f));
     ImGui::SliderInt("##settings-refresh", &state.snapshot_interval_seconds,
                      kMinimumSnapshotInterval, kMaximumSnapshotInterval,
                      tr(state, "%d seconds", "%d giây"));
@@ -2578,13 +2689,13 @@ void draw_preferences(DashboardState& state) {
                     static_cast<unsigned long long>(
                         nstu::telemetry::kMaximumEvents));
         if (ImGui::Button(tr(state, "Review report", "Xem báo cáo"),
-                          {116.0f, 0.0f})) {
+                          {scaled(116.0f), 0.0f})) {
             state.telemetry_report_requested = true;
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button(tr(state, "Clear data", "Xóa dữ liệu"),
-                          {104.0f, 0.0f})) {
+                          {scaled(104.0f), 0.0f})) {
             g_telemetry_events.clear();
             g_telemetry_error_prompt_requested.store(false);
             g_telemetry_error_prompt_armed.store(
@@ -2639,10 +2750,10 @@ void toggle_teacher_broadcast(DashboardState& state,
 }
 
 void draw_diagnostics_popup(DashboardState& state) {
-    constexpr float button_width = 118.0f;
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - 116.0f);
+    const float button_width = scaled(118.0f);
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - scaled(116.0f));
     if (ImGui::Button(tr(state, "Diagnostics", "Chẩn đoán"),
-                      {button_width, 28.0f})) {
+                      {button_width, scaled(28.0f)})) {
         refresh_graphics_report();
         ImGui::OpenPopup("diagnostics-popup");
     }
@@ -2671,7 +2782,7 @@ void draw_diagnostics_popup(DashboardState& state) {
                     ? "Unknown" : g_graphics_report.h264_encoders.c_str());
     ImGui::Spacing();
     ImGui::TextUnformatted(tr(state, "Adapters", "Bộ điều hợp"));
-    if (ImGui::BeginChild("diagnostic-adapters", {620.0f, 80.0f}, true)) {
+    if (ImGui::BeginChild("diagnostic-adapters", {scaled(620.0f), scaled(80.0f)}, true)) {
         for (const auto& adapter : g_graphics_report.adapters) {
             ImGui::BulletText("%s", adapter.c_str());
         }
@@ -2679,7 +2790,7 @@ void draw_diagnostics_popup(DashboardState& state) {
     ImGui::EndChild();
     ImGui::Spacing();
     ImGui::TextUnformatted(tr(state, "Recent events", "Sự kiện gần đây"));
-    if (ImGui::BeginChild("diagnostic-events", {620.0f, 180.0f}, true)) {
+    if (ImGui::BeginChild("diagnostic-events", {scaled(620.0f), scaled(180.0f)}, true)) {
         for (const auto& event : g_diagnostics) {
             ImGui::TextWrapped("[%s] [%s] %s: %s", event.timestamp.c_str(),
                                event.severity.c_str(), event.source.c_str(),
@@ -2687,19 +2798,19 @@ void draw_diagnostics_popup(DashboardState& state) {
         }
     }
     ImGui::EndChild();
-    if (ImGui::Button(tr(state, "Refresh", "Làm mới"), {90.0f, 0.0f})) {
+    if (ImGui::Button(tr(state, "Refresh", "Làm mới"), {scaled(90.0f), 0.0f})) {
         refresh_graphics_report();
     }
     if (g_telemetry_policy.collect_in_background) {
         ImGui::SameLine();
         if (ImGui::Button(tr(state, "Review report", "Xem báo cáo"),
-                          {118.0f, 0.0f})) {
+                          {scaled(118.0f), 0.0f})) {
             state.telemetry_report_requested = true;
             ImGui::CloseCurrentPopup();
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button(tr(state, "Close", "Đóng"), {90.0f, 0.0f})) {
+    if (ImGui::Button(tr(state, "Close", "Đóng"), {scaled(90.0f), 0.0f})) {
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -2719,7 +2830,11 @@ void draw_telemetry_report_popup(DashboardState& state,
         ImGui::OpenPopup("sanitized-diagnostic-report");
     }
 
-    ImGui::SetNextWindowSize({760.0f, 600.0f}, ImGuiCond_Appearing);
+    const ImVec2 viewport_size = ImGui::GetMainViewport()->WorkSize;
+    ImGui::SetNextWindowSize(
+        {std::min(scaled(760.0f), viewport_size.x - scaled(32.0f)),
+         std::min(scaled(600.0f), viewport_size.y - scaled(32.0f))},
+        ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal("sanitized-diagnostic-report", nullptr,
                                 ImGuiWindowFlags_NoResize)) {
         return;
@@ -2732,14 +2847,14 @@ void draw_telemetry_report_popup(DashboardState& state,
         "Nothing has been sent. GitHub Issues are public. Review the complete text and remove anything you do not want to disclose before submitting.",
         "Chưa có dữ liệu nào được gửi. GitHub Issues là công khai. Hãy xem toàn bộ nội dung và xóa mọi thông tin bạn không muốn công bố trước khi gửi."));
     ImGui::Spacing();
-    if (ImGui::BeginChild("sanitized-report-preview", {0.0f, -48.0f}, true,
+    if (ImGui::BeginChild("sanitized-report-preview", {0.0f, scaled(-48.0f)}, true,
                           ImGuiWindowFlags_HorizontalScrollbar)) {
         ImGui::TextUnformatted(state.telemetry_report_preview.c_str());
     }
     ImGui::EndChild();
 
     if (ImGui::Button(tr(state, "Copy report", "Sao chép báo cáo"),
-                      {126.0f, 0.0f})) {
+                      {scaled(126.0f), 0.0f})) {
         ImGui::SetClipboardText(state.telemetry_report_preview.c_str());
         state.control_status = tr(state, "Sanitized report copied.",
                                   "Đã sao chép báo cáo đã lọc.");
@@ -2747,7 +2862,7 @@ void draw_telemetry_report_popup(DashboardState& state,
     ImGui::SameLine();
     if (ImGui::Button(tr(state, "Copy and open GitHub",
                                "Sao chép và mở GitHub"),
-                      {178.0f, 0.0f})) {
+                      {scaled(178.0f), 0.0f})) {
         ImGui::SetClipboardText(state.telemetry_report_preview.c_str());
         const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(
             nullptr, L"open", kDiagnosticIssueUrl, nullptr, nullptr,
@@ -2759,7 +2874,7 @@ void draw_telemetry_report_popup(DashboardState& state,
                  "Đã sao chép báo cáo nhưng không thể mở GitHub.");
     }
     ImGui::SameLine();
-    if (ImGui::Button(tr(state, "Clear", "Xóa"), {82.0f, 0.0f})) {
+    if (ImGui::Button(tr(state, "Clear", "Xóa"), {scaled(82.0f), 0.0f})) {
         g_telemetry_events.clear();
         g_telemetry_error_prompt_requested.store(false);
         g_telemetry_error_prompt_armed.store(
@@ -2770,7 +2885,7 @@ void draw_telemetry_report_popup(DashboardState& state,
                                   "Đã xóa dữ liệu chẩn đoán.");
     }
     ImGui::SameLine();
-    if (ImGui::Button(tr(state, "Close", "Đóng"), {82.0f, 0.0f})) {
+    if (ImGui::Button(tr(state, "Close", "Đóng"), {scaled(82.0f), 0.0f})) {
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -2843,7 +2958,7 @@ void draw_room_name_field(DashboardState& state,
     ImGui::TextUnformatted(tr(state,
         "Room name (optional label shown to computers)",
         "Tên phòng (nhãn tùy chọn hiển thị cho máy)"));
-    ImGui::SetNextItemWidth(360.0f);
+    ImGui::SetNextItemWidth(scaled(360.0f));
     if (ImGui::InputText("##room-name", state.room_name_input.data(),
                          state.room_name_input.size())) {
         control_plane.set_server_name(state.room_name_input.data());
@@ -2882,25 +2997,29 @@ void draw_pairing_requests(DashboardState& state,
     ImGui::Separator();
     const auto pending = control_plane.pending_pairings();
     if (pending.empty()) {
-        ImGui::Dummy({656.0f, 8.0f});
+        ImGui::Dummy({scaled(656.0f), scaled(8.0f)});
         ImGui::TextDisabled("%s", tr(state, "Waiting for computers...",
                                      "Đang chờ máy..."));
-        ImGui::Dummy({656.0f, 8.0f});
+        ImGui::Dummy({scaled(656.0f), scaled(8.0f)});
     } else if (ImGui::BeginTable("pairing-requests", 4,
                                  ImGuiTableFlags_RowBg |
                                      ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupColumn(tr(state, "Computer", "Máy"),
-                                ImGuiTableColumnFlags_WidthFixed, 300.0f);
+                                ImGuiTableColumnFlags_WidthFixed,
+                                scaled(300.0f));
         ImGui::TableSetupColumn(tr(state, "Code", "Mã"),
-                                ImGuiTableColumnFlags_WidthFixed, 110.0f);
+                                ImGuiTableColumnFlags_WidthFixed,
+                                scaled(110.0f));
         ImGui::TableSetupColumn(tr(state, "Time left", "Còn lại"),
-                                ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                                ImGuiTableColumnFlags_WidthFixed,
+                                scaled(70.0f));
         ImGui::TableSetupColumn("##pairing-actions",
-                                ImGuiTableColumnFlags_WidthFixed, 176.0f);
+                                ImGuiTableColumnFlags_WidthFixed,
+                                scaled(176.0f));
         ImGui::TableHeadersRow();
         for (const auto& request : pending) {
             push_client_id(request.pairing_id);
-            ImGui::TableNextRow(0, 46.0f);
+            ImGui::TableNextRow(0, scaled(46.0f));
             ImGui::TableSetColumnIndex(0);
             ImGui::TextUnformatted(request.hostname.c_str());
             if (ImGui::IsItemHovered()) {
@@ -2922,7 +3041,7 @@ void draw_pairing_requests(DashboardState& state,
             ImGui::TableSetColumnIndex(3);
             std::string error;
             if (ImGui::Button(tr(state, "Approve", "Duyệt"),
-                              {84.0f, 30.0f})) {
+                              {scaled(84.0f), scaled(30.0f)})) {
                 if (control_plane.approve_pairing(request.pairing_id,
                                                   &error)) {
                     state.pairing_status = request.hostname + " " +
@@ -2937,7 +3056,7 @@ void draw_pairing_requests(DashboardState& state,
             }
             ImGui::SameLine();
             if (ImGui::Button(tr(state, "Reject", "Từ chối"),
-                              {84.0f, 30.0f})) {
+                              {scaled(84.0f), scaled(30.0f)})) {
                 if (control_plane.reject_pairing(request.pairing_id, &error)) {
                     state.pairing_status = request.hostname + " " +
                         tr(state, "was turned away.",
@@ -2960,14 +3079,14 @@ void draw_pairing_requests(DashboardState& state,
 
 void draw_pairing_popup(DashboardState& state,
                         nstu::server::ServerControlPlane& control_plane) {
-    constexpr float button_width = 140.0f;
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - 242.0f);
+    const float button_width = scaled(140.0f);
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - scaled(242.0f));
     bool focus_panel = false;
     if (ImGui::Button(
             tr(state,
                state.pairing_panel_open ? "Pairing active" : "Add computers",
                state.pairing_panel_open ? "Đang ghép nối" : "Thêm máy"),
-            {button_width, 28.0f})) {
+            {button_width, scaled(28.0f)})) {
         if (!state.pairing_panel_open) {
             state.pairing_status.clear();
             state.pairing_panel_open = true;
@@ -2988,7 +3107,9 @@ void draw_pairing_popup(DashboardState& state,
     }
 
     if (state.pairing_panel_open) {
-        ImGui::SetNextWindowSize({720.0f, 0.0f}, ImGuiCond_FirstUseEver);
+        const float pairing_width = std::min(
+            scaled(720.0f), ImGui::GetMainViewport()->WorkSize.x - scaled(32.0f));
+        ImGui::SetNextWindowSize({pairing_width, 0.0f}, ImGuiCond_FirstUseEver);
         if (focus_panel) {
             ImGui::SetNextWindowFocus();
         }
@@ -3026,7 +3147,7 @@ void draw_pairing_popup(DashboardState& state,
             draw_pairing_requests(state, control_plane);
             ImGui::Separator();
             if (ImGui::Button(tr(state, "Done", "Xong"),
-                              {110.0f, 30.0f})) {
+                              {scaled(110.0f), scaled(30.0f)})) {
                 state.pairing_panel_open = false;
             }
         }
@@ -3042,7 +3163,7 @@ void draw_pairing_popup(DashboardState& state,
 
 void draw_menu_strip(DashboardState& state, bool has_clients,
                      nstu::server::ServerControlPlane& control_plane) {
-    if (!ImGui::BeginChild("menu-strip", {0, 31.0f}, false,
+    if (!ImGui::BeginChild("menu-strip", {0, scaled(31.0f)}, false,
                            ImGuiWindowFlags_NoScrollbar)) {
         ImGui::EndChild();
         return;
@@ -3065,14 +3186,15 @@ void draw_menu_strip(DashboardState& state, bool has_clients,
 #endif
     ImGui::SameLine();
     if (draw_segment_option(tr(state, "Class", "Lớp"),
-                            state.view == DashboardView::room_screens, 58.0f)) {
+                            state.view == DashboardView::room_screens,
+                            scaled(58.0f))) {
         state.view = DashboardView::room_screens;
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(!has_clients);
     if (draw_segment_option(tr(state, "Client", "Máy"),
                             state.view == DashboardView::selected_client,
-                            60.0f)) {
+                            scaled(60.0f))) {
         state.view = DashboardView::selected_client;
     }
     ImGui::EndDisabled();
@@ -3084,17 +3206,27 @@ void draw_menu_strip(DashboardState& state, bool has_clients,
 
 void draw_ribbon_group_caption(float width, const char* label) {
     const ImVec2 text_size = ImGui::CalcTextSize(label);
-    ImGui::SetCursorPosY(58.0f);
+    ImGui::SetCursorPosY(scaled(58.0f));
     ImGui::SetCursorPosX(std::max(
         ImGui::GetStyle().WindowPadding.x, (width - text_size.x) * 0.5f));
     ImGui::TextDisabled("%s", label);
 }
 
+// A ribbon group is at least as wide as the caption centred beneath it. The
+// authored widths are sized for the buttons; a longer caption (a translation,
+// or simply a larger font at high DPI) would otherwise spill past the group
+// and collide with the next one.
+float ribbon_group_width(float authored_width_at_96dpi, const char* caption) {
+    const float caption_width = ImGui::CalcTextSize(caption).x +
+                                ImGui::GetStyle().WindowPadding.x * 2.0f;
+    return std::max(scaled(authored_width_at_96dpi), caption_width);
+}
+
 void draw_ribbon_divider() {
     const ImVec2 start = ImGui::GetCursorScreenPos();
-    ImGui::Dummy({1.0f, 64.0f});
+    ImGui::Dummy({1.0f, scaled(64.0f)});
     ImGui::GetWindowDrawList()->AddLine(
-        {start.x, start.y + 3.0f}, {start.x, start.y + 61.0f},
+        {start.x, start.y + scaled(3.0f)}, {start.x, start.y + scaled(61.0f)},
         ImGui::GetColorU32(ImGuiCol_Separator));
 }
 
@@ -3102,54 +3234,55 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
                  const nstu::server::ClientRecord* selected_client,
                  DashboardState& state,
                  nstu::server::ServerControlPlane& control_plane) {
-    if (!ImGui::BeginChild("command-ribbon", {0, 82.0f}, true,
+    if (!ImGui::BeginChild("command-ribbon", {0, scaled(82.0f)}, true,
                            ImGuiWindowFlags_NoScrollbar)) {
         ImGui::EndChild();
         return;
     }
     const bool has_clients = !clients.empty();
-    constexpr float student_width = 140.0f;
-    if (ImGui::BeginChild("student-commands", {student_width, 74.0f}, false,
-                          ImGuiWindowFlags_NoScrollbar)) {
+    const char* student_caption = tr(state, "Student", "Học sinh");
+    const float student_width = ribbon_group_width(140.0f, student_caption);
+    if (ImGui::BeginChild("student-commands", {student_width, scaled(74.0f)},
+                          false, ImGuiWindowFlags_NoScrollbar)) {
         // Snapshots run automatically for the class view (auto_monitor), so the
         // manual Start/Stop capture buttons no longer live on the ribbon.
         if (draw_icon_button("lock-room", tr(state, "Lock", "Khóa"),
-                             IconKind::lock, {58.0f, 54.0f}, false,
-                             has_clients)) {
+                             IconKind::lock, {scaled(58.0f), scaled(54.0f)},
+                             false, has_clients)) {
             set_room_lock(clients, state, control_plane, true);
         }
         ImGui::SameLine();
         if (draw_icon_button("unlock-room", tr(state, "Unlock", "Mở khóa"),
-                             IconKind::unlock, {64.0f, 54.0f}, false,
-                             has_clients)) {
+                             IconKind::unlock, {scaled(64.0f), scaled(54.0f)},
+                             false, has_clients)) {
             set_room_lock(clients, state, control_plane, false);
         }
-        draw_ribbon_group_caption(student_width,
-                                  tr(state, "Student", "Học sinh"));
+        draw_ribbon_group_caption(student_width, student_caption);
     }
     ImGui::EndChild();
 
     ImGui::SameLine();
     draw_ribbon_divider();
     ImGui::SameLine();
-    constexpr float teaching_width = 330.0f;
-    if (ImGui::BeginChild("teaching-commands", {teaching_width, 74.0f}, false,
-                          ImGuiWindowFlags_NoScrollbar)) {
+    const char* teaching_caption = tr(state, "Teaching", "Giảng dạy");
+    const float teaching_width = ribbon_group_width(330.0f, teaching_caption);
+    if (ImGui::BeginChild("teaching-commands", {teaching_width, scaled(74.0f)},
+                          false, ImGuiWindowFlags_NoScrollbar)) {
         if (draw_icon_button("show-room", tr(state, "Screens", "Màn hình"),
-                             IconKind::grid, {66.0f, 54.0f},
+                             IconKind::grid, {scaled(66.0f), scaled(54.0f)},
                              state.view == DashboardView::room_screens)) {
             state.view = DashboardView::room_screens;
         }
         ImGui::SameLine();
         if (draw_icon_button("focus-client", tr(state, "Focus", "Tập trung"),
-                             IconKind::monitor, {66.0f, 54.0f},
+                             IconKind::monitor, {scaled(66.0f), scaled(54.0f)},
                              state.view == DashboardView::selected_client,
                              selected_client != nullptr)) {
             state.view = DashboardView::selected_client;
         }
         ImGui::SameLine();
         if (draw_icon_button("draw-client", tr(state, "Draw", "Vẽ"),
-                             IconKind::pen, {58.0f, 54.0f},
+                             IconKind::pen, {scaled(58.0f), scaled(54.0f)},
                              state.annotation_enabled,
                              selected_client != nullptr &&
                                  state.view ==
@@ -3159,8 +3292,8 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
         }
         ImGui::SameLine();
         if (draw_icon_button("clear-client", tr(state, "Clear", "Xóa"),
-                             IconKind::erase, {58.0f, 54.0f}, false,
-                             selected_client != nullptr)) {
+                             IconKind::erase, {scaled(58.0f), scaled(54.0f)},
+                             false, selected_client != nullptr)) {
             std::string error;
             state.control_status = control_plane.clear_overlay(
                                        selected_client->id, &error)
@@ -3176,33 +3309,32 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
             }
         }
         if (draw_icon_button("chat-client", tr(state, "Chat", "Chat"),
-                             IconKind::chat, {58.0f, 54.0f}, false,
-                             selected_client != nullptr, true,
+                             IconKind::chat, {scaled(58.0f), scaled(54.0f)},
+                             false, selected_client != nullptr, true,
                              any_unread_chat)) {
             state.view = DashboardView::selected_client;
         }
-        draw_ribbon_group_caption(teaching_width,
-                                  tr(state, "Teaching", "Giảng dạy"));
+        draw_ribbon_group_caption(teaching_width, teaching_caption);
     }
     ImGui::EndChild();
 
     ImGui::SameLine();
     draw_ribbon_divider();
     ImGui::SameLine();
-    constexpr float broadcast_width = 92.0f;
-    if (ImGui::BeginChild("broadcast-commands", {broadcast_width, 74.0f}, false,
-                          ImGuiWindowFlags_NoScrollbar)) {
+    const char* broadcast_caption = tr(state, "Teacher screen", "Màn hình GV");
+    const float broadcast_width = ribbon_group_width(92.0f, broadcast_caption);
+    if (ImGui::BeginChild("broadcast-commands", {broadcast_width, scaled(74.0f)},
+                          false, ImGuiWindowFlags_NoScrollbar)) {
         if (draw_icon_button(
                 "broadcast-room",
                 state.broadcast_enabled ? tr(state, "Stop", "Dừng")
                                         : tr(state, "Broadcast", "Phát"),
                 state.broadcast_enabled ? IconKind::stop : IconKind::broadcast,
-                {broadcast_width, 54.0f}, state.broadcast_enabled,
+                {broadcast_width, scaled(54.0f)}, state.broadcast_enabled,
                 has_clients)) {
             toggle_teacher_broadcast(state, control_plane);
         }
-        draw_ribbon_group_caption(
-            broadcast_width, tr(state, "Teacher screen", "Màn hình GV"));
+        draw_ribbon_group_caption(broadcast_width, broadcast_caption);
     }
     ImGui::EndChild();
     ImGui::EndChild();
@@ -3217,7 +3349,7 @@ bool draw_filter_chip(const char* id, const char* label, std::size_t count,
         ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(
                                                     ImGuiCol_Header));
     }
-    const bool pressed = ImGui::Button(text, {0, 28.0f});
+    const bool pressed = ImGui::Button(text, {0, scaled(28.0f)});
     if (selected) {
         ImGui::PopStyleColor();
     }
@@ -3258,8 +3390,8 @@ void draw_workspace_toolbar(
         state.room_filter = RoomFilter::offline;
         state.show_offline = true;
     }
-    constexpr float search_width = 210.0f;
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f,
+    const float search_width = scaled(210.0f);
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + scaled(8.0f),
                              ImGui::GetContentRegionMax().x - search_width));
     ImGui::SetNextItemWidth(search_width);
     ImGui::InputTextWithHint("##client-filter",
@@ -3273,37 +3405,37 @@ void draw_navigation_rail(
     const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
-    if (!ImGui::BeginChild("navigation-rail", {48.0f, 0}, true,
+    if (!ImGui::BeginChild("navigation-rail", {scaled(48.0f), 0}, true,
                            ImGuiWindowFlags_NoScrollbar)) {
         ImGui::EndChild();
         return;
     }
     if (draw_icon_button("nav-room", tr(state, "Room screens", "Màn hình phòng"),
-                         IconKind::grid, {36.0f, 38.0f},
+                         IconKind::grid, {scaled(36.0f), scaled(38.0f)},
                          state.view == DashboardView::room_screens, true,
                          false)) {
         state.view = DashboardView::room_screens;
     }
     if (draw_icon_button("nav-focus", tr(state, "Selected client", "Máy đang chọn"),
-                         IconKind::monitor, {36.0f, 38.0f},
+                         IconKind::monitor, {scaled(36.0f), scaled(38.0f)},
                          state.view == DashboardView::selected_client,
                          selected_client != nullptr, false)) {
         state.view = DashboardView::selected_client;
     }
     ImGui::Separator();
     if (draw_icon_button("nav-lock", tr(state, "Lock room", "Khóa phòng"),
-                         IconKind::lock, {36.0f, 38.0f}, false,
+                         IconKind::lock, {scaled(36.0f), scaled(38.0f)}, false,
                          !clients.empty(), false)) {
         set_room_lock(clients, state, control_plane, true);
     }
     if (draw_icon_button("nav-broadcast",
                          tr(state, "Teacher broadcast", "Phát màn hình giáo viên"),
-                         IconKind::broadcast, {36.0f, 38.0f},
+                         IconKind::broadcast, {scaled(36.0f), scaled(38.0f)},
                          state.broadcast_enabled, !clients.empty(), false)) {
         toggle_teacher_broadcast(state, control_plane);
     }
     if (draw_icon_button("nav-chat", tr(state, "Client chat", "Chat với máy"),
-                         IconKind::chat, {36.0f, 38.0f}, false,
+                         IconKind::chat, {scaled(36.0f), scaled(38.0f)}, false,
                          selected_client != nullptr, false)) {
         state.view = DashboardView::selected_client;
     }
@@ -3313,7 +3445,7 @@ void draw_navigation_rail(
 void draw_status_bar(const std::vector<nstu::server::ClientRecord>& clients,
                      DashboardState& state) {
     const auto counts = count_room_statuses(clients);
-    if (!ImGui::BeginChild("status-bar", {0, 28.0f}, true,
+    if (!ImGui::BeginChild("status-bar", {0, scaled(28.0f)}, true,
                            ImGuiWindowFlags_NoScrollbar)) {
         ImGui::EndChild();
         return;
@@ -3329,9 +3461,13 @@ void draw_status_bar(const std::vector<nstu::server::ClientRecord>& clients,
     }
     const char* show_offline_label =
         tr(state, "Show offline", "Hiện ngoại tuyến");
+    // Right-align on the checkbox's real width (box + inner gap + label) rather
+    // than a hand-tuned padding constant: a fixed reserve is only correct at one
+    // font size and leaves the control stranded mid-bar once the UI scales.
     const float controls_width =
-        ImGui::CalcTextSize(show_offline_label).x + 72.0f;
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f,
+        ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
+        ImGui::CalcTextSize(show_offline_label).x;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + scaled(8.0f),
                              ImGui::GetContentRegionMax().x - controls_width));
     ImGui::Checkbox(show_offline_label, &state.show_offline);
     /* Refresh interval is configured from Settings. */
@@ -3347,12 +3483,12 @@ void draw_dashboard_shell(
     draw_ribbon(clients, selected_client, state, control_plane);
     draw_workspace_toolbar(clients, state);
 
-    if (ImGui::BeginChild("main-workspace", {0, -32.0f}, false)) {
+    if (ImGui::BeginChild("main-workspace", {0, scaled(-32.0f)}, false)) {
         draw_navigation_rail(clients, selected_client, state, control_plane);
         ImGui::SameLine();
         const ImVec4 content_background = g_dark_mode
-            ? ImVec4{0.065f, 0.085f, 0.095f, 1.0f}
-            : ImVec4{0.91f, 0.965f, 0.985f, 1.0f};
+            ? ImVec4{0.075f, 0.086f, 0.104f, 1.0f}
+            : ImVec4{0.858f, 0.878f, 0.902f, 1.0f};
         ImGui::PushStyleColor(ImGuiCol_ChildBg, content_background);
         if (ImGui::BeginChild("workspace-content", {0, 0}, false)) {
             if (state.view == DashboardView::room_screens) {
@@ -3394,6 +3530,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     window_class.hIcon =
         LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+    // Opt into per-monitor DPI awareness before registering/creating any window
+    // so Windows reports real pixels and never bitmap-scales the dashboard.
+    ImGui_ImplWin32_EnableDpiAwareness();
     RegisterClassW(&window_class);
     HWND window = CreateWindowW(window_class.lpszClassName, L"NSTU Server",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
@@ -3404,9 +3543,61 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                     MB_OK | MB_ICONERROR);
         return 1;
     }
-    ShowWindow(window, SW_SHOWDEFAULT);
     g_main_window = window;
     add_tray_icon(window);
+    // Derive the DPI scale for this window and grow the default 1280x820 (96 DPI)
+    // size to match, so the scaled content has room. apply_dashboard_style and
+    // load_dashboard_fonts below read g_ui_scale. The window is still hidden
+    // here: sizing before the first ShowWindow avoids a visible 1280x820 flash
+    // and jump on a high-DPI display.
+    g_ui_scale = ImGui_ImplWin32_GetDpiScaleForHwnd(window);
+    if (!(g_ui_scale > 0.0f)) {
+        g_ui_scale = 1.0f;
+    }
+    // Optional manual override for accessibility / testing, e.g. --ui-scale=1.5.
+    if (const auto scale_pos = arguments.find(L"--ui-scale=");
+        scale_pos != std::wstring_view::npos) {
+        const float override_scale = static_cast<float>(
+            wcstod(arguments.data() + scale_pos + 11, nullptr));
+        if (override_scale >= 0.75f && override_scale <= 3.0f) {
+            g_ui_scale = override_scale;
+            g_ui_scale_overridden = true;
+        }
+    }
+    if (g_ui_scale != 1.0f) {
+        int target_width = static_cast<int>(1280.0f * g_ui_scale);
+        int target_height = static_cast<int>(820.0f * g_ui_scale);
+        // Never grow past the monitor work area, or the window spills off-screen
+        // (and the swap chain gets a client area the desktop can't fully show).
+        // Clamp to the work area of the monitor the window is on and re-center.
+        if (HMONITOR monitor =
+                MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)) {
+            MONITORINFO monitor_info{};
+            monitor_info.cbSize = sizeof(monitor_info);
+            if (GetMonitorInfoW(monitor, &monitor_info)) {
+                const int work_width =
+                    monitor_info.rcWork.right - monitor_info.rcWork.left;
+                const int work_height =
+                    monitor_info.rcWork.bottom - monitor_info.rcWork.top;
+                target_width = std::min(target_width, work_width);
+                target_height = std::min(target_height, work_height);
+                const int x = monitor_info.rcWork.left +
+                              (work_width - target_width) / 2;
+                const int y = monitor_info.rcWork.top +
+                              (work_height - target_height) / 2;
+                SetWindowPos(window, nullptr, x, y, target_width, target_height,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            } else {
+                SetWindowPos(window, nullptr, 0, 0, target_width, target_height,
+                             SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
+            }
+        } else {
+            SetWindowPos(window, nullptr, 0, 0, target_width, target_height,
+                         SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
+        }
+    }
+    // Shown only once the DPI-correct size is in place.
+    ShowWindow(window, SW_SHOWDEFAULT);
 
     DashboardState dashboard;
     if (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_VIETNAMESE) {
@@ -3419,8 +3610,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     }
     dashboard.pairing_panel_open =
         arguments.find(L"--pairing") != std::wstring_view::npos;
+    // Dark is the default palette (easier on the eyes in a darkened classroom
+    // and avoids the bright-white "flashbang"). --light forces the light
+    // palette; --dark is still accepted as a no-op for backward compatibility.
     dashboard.dark_mode =
-        arguments.find(L"--dark") != std::wstring_view::npos;
+        arguments.find(L"--light") == std::wstring_view::npos;
     g_language = dashboard.language;
 
     IMGUI_CHECKVERSION();
@@ -3430,6 +3624,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     load_dashboard_fonts();
     ImGui_ImplWin32_Init(window);
     ImGui_ImplDX11_Init(g_device.Get(), g_context.Get());
+    g_imgui_ready = true;
 
     nstu::server::ClientRegistry registry;
     nstu::security::KeyStore key_store;
@@ -3794,6 +3989,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     control_plane.stop();
     Shell_NotifyIconW(NIM_DELETE, &g_tray_icon);
     g_snapshot_textures.clear();
+    g_imgui_ready = false;
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
