@@ -232,6 +232,17 @@ if(TARGET nstu_client_platform)
     add_test(NAME nstu.exam_network_lockdown
         COMMAND nstu_exam_network_lockdown_tests)
 
+    # Exam app-suppression policy; pure classifier with a built-in never-kill
+    # floor, no real process touched.
+    add_executable(nstu_exam_app_suppression_tests
+        exam_app_suppression_tests.cpp)
+    target_link_libraries(nstu_exam_app_suppression_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_app_suppression_tests)
+    nstu_enable_test_assertions(nstu_exam_app_suppression_tests)
+    add_test(NAME nstu.exam_app_suppression
+        COMMAND nstu_exam_app_suppression_tests)
+
     add_executable(nstu_client_freeze_tests client_freeze_tests.cpp)
     target_link_libraries(nstu_client_freeze_tests PRIVATE nstu_client_platform)
     nstu_enable_warnings(nstu_client_freeze_tests)
