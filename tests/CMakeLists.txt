@@ -204,6 +204,14 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_exam_start_barrier_tests)
     add_test(NAME nstu.exam_start_barrier
         COMMAND nstu_exam_start_barrier_tests)
+
+    # Operator sign-in gate: constant-time hash check + lockout. Pure, so the
+    # Windows KDF and DPAPI storage are not needed to test it.
+    add_executable(nstu_operator_login_tests operator_login_tests.cpp)
+    target_link_libraries(nstu_operator_login_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_operator_login_tests)
+    nstu_enable_test_assertions(nstu_operator_login_tests)
+    add_test(NAME nstu.operator_login COMMAND nstu_operator_login_tests)
 endif()
 
 if(TARGET nstu_client_platform)
