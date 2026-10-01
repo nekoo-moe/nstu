@@ -195,6 +195,15 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_pairing_transport_tests)
     add_test(NAME nstu.pairing_transport
         COMMAND nstu_pairing_transport_tests)
+
+    # Pure cohort/barrier logic; links the server lib only for its include path.
+    add_executable(nstu_exam_start_barrier_tests exam_start_barrier_tests.cpp)
+    target_link_libraries(nstu_exam_start_barrier_tests PRIVATE
+        nstu_server_state)
+    nstu_enable_warnings(nstu_exam_start_barrier_tests)
+    nstu_enable_test_assertions(nstu_exam_start_barrier_tests)
+    add_test(NAME nstu.exam_start_barrier
+        COMMAND nstu_exam_start_barrier_tests)
 endif()
 
 if(TARGET nstu_client_platform)
