@@ -214,6 +214,13 @@ int main() {
     assert(decoded_state->session_id == start.session_id);
     assert(decoded_state->answers.size() == 1);
 
+    // The synchronized start is gated on readiness. Releasing a client that has
+    // not reported exam_ready would hand it a running clock while its package is
+    // still staging, so begin_exam must refuse until the report arrives.
+    error.clear();
+    assert(!control_plane.begin_exam(registry_id, 3600, &error));
+    assert(!error.empty());
+
     // Synchronized-start barrier: a matching exam_ready marks the client ready,
     // and begin_exam then sends it an authoritative exam_begin.
     nstu::exam::ExamReadyReport ready;
@@ -243,6 +250,13 @@ int main() {
     assert(decoded_begin->session_id == start.session_id);
     assert(decoded_begin->duration_seconds == 3600);
     assert(decoded_begin->server_start_unix_milliseconds != 0);
+
+    // The release is single-use. A repeated begin_exam would mint a later start
+    // timestamp and silently restart the candidate's clock, desynchronizing the
+    // cohort the barrier exists to keep together, so it must be refused.
+    error.clear();
+    assert(!control_plane.begin_exam(registry_id, 3600, &error));
+    assert(!error.empty());
 
     const auto accepted_hash = nstu::exam::hash_answer_event(accepted_event);
     assert(accepted_hash.has_value());

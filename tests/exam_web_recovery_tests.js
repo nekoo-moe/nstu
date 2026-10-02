@@ -103,6 +103,7 @@ class FakeDocument {
     this.body = this.addNode("body");
     this.body.classList = new FakeClassList();
     const ids = [
+      "exam-shell", "loading-screen", "loading-status",
       "exam-title", "exam-subject", "candidate-label", "timer",
       "connection-status", "save-status", "question-count", "question-list",
       "question-position", "question-type", "question-points", "question-content",
@@ -203,14 +204,16 @@ class BrowserURL extends globalThis.URL {
   static revokeObjectURL() {}
 }
 
-function contextFor(candidateId, clientIdHex = HEX16, sessionIdHex = HEX16_B) {
+function contextFor(candidateId, clientIdHex = HEX16, sessionIdHex = HEX16_B,
+                    synchronizedStart = false) {
   return {
     packageId: MANIFEST.id,
     packageDigestHex: HEX32_A,
     clientIdHex,
     sessionIdHex,
     candidateId,
-    nextSequence: 1
+    nextSequence: 1,
+    synchronizedStart
   };
 }
 
@@ -255,10 +258,12 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
   const webview = new FakeWebView();
   let timerId = 0;
   const timers = new Map();
+  let now = Number.isSafeInteger(options.now) ? options.now : 1_700_000_000_000;
+  const intervalCallbacks = [];
   const window = {
     NSTU_EXAM_MANIFEST: options.manifest || MANIFEST,
     NSTU_EXAM_CONTEXT: initialContext,
-    chrome: { webview },
+    chrome: options.hosted === false ? undefined : { webview },
     crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000000" },
     setTimeout: (callback, delay) => {
       const id = ++timerId;
@@ -266,7 +271,10 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
       return id;
     },
     clearTimeout: (id) => { timers.delete(id); },
-    setInterval: () => 0
+    setInterval: (callback, delay) => {
+      intervalCallbacks.push({ callback, delay });
+      return intervalCallbacks.length;
+    }
   };
   if (Object.prototype.hasOwnProperty.call(options, "assetBase")) {
     window.NSTU_EXAM_ASSET_BASE = options.assetBase;
@@ -280,10 +288,16 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
     Blob: class Blob {},
     URL: options.urlConstructor ? BrowserURL :
       { createObjectURL: () => "blob:test", revokeObjectURL: () => {} },
+    Date: class extends Date {
+      static now() { return now; }
+    },
     console
   });
   vm.runInContext(APP_SOURCE, context, { filename: "exam/web/app.js" });
-  return { document, localStorage, webview, window, timers };
+  return {
+    document, localStorage, webview, window, timers, intervalCallbacks,
+    setNow: (value) => { now = value; }
+  };
 }
 
 function stateResponse(context, highest, lastEventHashHex, stateHashHex, finalized = false, answers = []) {
@@ -851,9 +865,63 @@ function testExpiredTimerDoesNotResetAfterReload() {
   const context = contextFor("expired-timer");
   const storage = new FakeStorage();
   storage.setItem(`${storageKey(context)}:remaining`, "0");
-  const harness = createHarness(context, null, storage);
+  const harness = createHarness(context, null, storage, { hosted: false });
   assert.equal(harness.document.getElementById("timer").textContent, "00:00",
     "an expired persisted timer must remain expired after reload");
+}
+
+function testHostedExamWaitsForAuthenticatedBegin() {
+  const context = contextFor("barrier-candidate", HEX16, HEX16_B, true);
+  const startedAt = 1_700_000_000_000;
+  const harness = createHarness(context, null, new FakeStorage(), {
+    now: startedAt
+  });
+  assert.equal(harness.document.getElementById("loading-screen").hidden, false,
+    "the hosted exam must show a loading screen before the cohort begins");
+  assert.equal(harness.document.getElementById("exam-shell").hidden, true,
+    "questions must stay hidden before an authenticated begin");
+  assert.equal(harness.document.getElementById("timer").textContent, "10:00",
+    "waiting must not consume exam time");
+  const ready = harness.webview.messages.find((message) => message.type === "exam_ready");
+  assert.ok(ready, "the loaded package must report ready to the native host");
+
+  harness.setNow(startedAt + 5_000);
+  for (const timer of harness.intervalCallbacks) timer.callback();
+  assert.equal(harness.document.getElementById("timer").textContent, "10:00",
+    "the countdown must remain frozen while waiting for the cohort");
+
+  harness.webview.emit({
+    type: "exam_begin",
+    begin: {
+      packageId: MANIFEST.id,
+      packageDigestHex: context.packageDigestHex,
+      clientIdHex: context.clientIdHex,
+      sessionIdHex: "ff".repeat(16),
+      candidateId: context.candidateId,
+      serverStartUnixMilliseconds: startedAt,
+      durationSeconds: 300
+    }
+  });
+  assert.equal(harness.document.getElementById("exam-shell").hidden, true,
+    "a begin for another session must not reveal the questions");
+
+  harness.webview.emit({
+    type: "exam_begin",
+    begin: {
+      packageId: MANIFEST.id,
+      packageDigestHex: context.packageDigestHex,
+      clientIdHex: context.clientIdHex,
+      sessionIdHex: context.sessionIdHex,
+      candidateId: context.candidateId,
+      serverStartUnixMilliseconds: startedAt,
+      durationSeconds: 300
+    }
+  });
+  assert.equal(harness.document.getElementById("loading-screen").hidden, true);
+  assert.equal(harness.document.getElementById("exam-shell").hidden, false,
+    "a context-matching begin must reveal the questions");
+  assert.equal(harness.document.getElementById("timer").textContent, "04:55",
+    "remaining time must be anchored to the authoritative server start");
 }
 
 function testMalformedManifestDoesNotCrashInitialRender() {
@@ -895,5 +963,6 @@ testInjectedAssetBaseRejectsExternalAndTraversal();
 testInjectedAssetBaseRejectsQueryAndFragmentSuffixes();
 testStaticPreviewKeepsRelativeAssetPaths();
 testExpiredTimerDoesNotResetAfterReload();
+testHostedExamWaitsForAuthenticatedBegin();
 testMalformedManifestDoesNotCrashInitialRender();
-console.log("exam web recovery tests: 22 passed");
+console.log("exam web recovery tests: 23 passed");

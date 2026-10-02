@@ -7,7 +7,15 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="exam-shell" id="exam-shell">
+  <section class="loading-screen" id="loading-screen" role="status" aria-live="polite" aria-busy="true">
+    <div class="loading-panel">
+      <span class="wordmark">NSTU</span>
+      <h1 data-i18n="loadingDocuments">Loading exam documents</h1>
+      <p id="loading-status" data-i18n="waitingForClass">Waiting for every computer to be ready. The timer has not started.</p>
+      <div class="loading-progress" aria-hidden="true"><span></span></div>
+    </div>
+  </section>
+  <div class="exam-shell" id="exam-shell" hidden>
     <header class="topbar">
       <div class="identity">
         <span class="wordmark">NSTU</span>

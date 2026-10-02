@@ -573,7 +573,7 @@ bool start_exam_from_command_ui(
         "\",\"clientIdHex\":\"" + bytes_to_hex(request->client_id) +
         "\",\"sessionIdHex\":\"" + bytes_to_hex(request->session_id) +
         "\",\"candidateId\":\"" + json_escape(request->candidate_id) +
-        "\"}";
+        "\",\"synchronizedStart\":true}";
     nstu::client::ExamHostOptions options;
     options.package_root = package_root;
     options.web_root = web_root;

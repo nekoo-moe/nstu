@@ -193,8 +193,12 @@ public:
         std::string candidate_id;
         // Set when the client reports exam_ready (package staged and verified,
         // kiosk locked, loading screen up). The cohort coordinator reads this
-        // to decide when to release the synchronized start.
+        // to decide when to release the synchronized start. `begun` makes the
+        // release single-use: repeated operator/UI actions cannot restart the
+        // timer with a later timestamp.
         bool ready = false;
+        bool begun = false;
+        std::uint64_t server_start_unix_milliseconds = 0;
     };
 
     bool start(ServerControlPlaneConfig config, std::string* error) {
@@ -514,17 +518,28 @@ public:
             set_error(error, "authenticated command sequence is unavailable");
             return false;
         }
-        const auto context = active_exam_for(state->registry_id.load());
-        if (!context) {
+        const auto registry_id = state->registry_id.load();
+        std::scoped_lock context_lock(exam_contexts_mutex_);
+        const auto found = active_exam_contexts_.find(registry_id);
+        if (found == active_exam_contexts_.end()) {
             set_error(error, "client has no active exam session");
             return false;
         }
+        auto& context = found->second;
+        if (!context.ready) {
+            set_error(error, "client is not ready to begin the exam");
+            return false;
+        }
+        if (context.begun) {
+            set_error(error, "client exam has already begun");
+            return false;
+        }
         exam::ExamBeginCommand begin;
-        begin.package_id = context->package_id;
-        begin.candidate_id = context->candidate_id;
-        begin.package_digest = context->package_digest;
-        begin.client_id = context->client_id;
-        begin.session_id = context->session_id;
+        begin.package_id = context.package_id;
+        begin.candidate_id = context.candidate_id;
+        begin.package_digest = context.package_digest;
+        begin.client_id = context.client_id;
+        begin.session_id = context.session_id;
         begin.server_start_unix_milliseconds = unix_milliseconds_now();
         begin.duration_seconds = duration_seconds;
         const auto payload = exam::encode_exam_begin_command(begin);
@@ -532,9 +547,15 @@ public:
             set_error(error, "could not encode exam begin command");
             return false;
         }
-        return send_authenticated_locked(
-            *state, protocol::CommandType::exam_begin,
-            next_request_id_.fetch_add(1), payload, error);
+        if (!send_authenticated_locked(
+                *state, protocol::CommandType::exam_begin,
+                next_request_id_.fetch_add(1), payload, error)) {
+            return false;
+        }
+        context.begun = true;
+        context.server_start_unix_milliseconds =
+            begin.server_start_unix_milliseconds;
+        return true;
     }
 
     std::vector<std::uint64_t> ready_exam_clients() const {
