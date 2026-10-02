@@ -195,6 +195,23 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_pairing_transport_tests)
     add_test(NAME nstu.pairing_transport
         COMMAND nstu_pairing_transport_tests)
+
+    # Pure cohort/barrier logic; links the server lib only for its include path.
+    add_executable(nstu_exam_start_barrier_tests exam_start_barrier_tests.cpp)
+    target_link_libraries(nstu_exam_start_barrier_tests PRIVATE
+        nstu_server_state)
+    nstu_enable_warnings(nstu_exam_start_barrier_tests)
+    nstu_enable_test_assertions(nstu_exam_start_barrier_tests)
+    add_test(NAME nstu.exam_start_barrier
+        COMMAND nstu_exam_start_barrier_tests)
+
+    # Operator sign-in gate: constant-time hash check + lockout. Pure, so the
+    # Windows KDF and DPAPI storage are not needed to test it.
+    add_executable(nstu_operator_login_tests operator_login_tests.cpp)
+    target_link_libraries(nstu_operator_login_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_operator_login_tests)
+    nstu_enable_test_assertions(nstu_operator_login_tests)
+    add_test(NAME nstu.operator_login COMMAND nstu_operator_login_tests)
 endif()
 
 if(TARGET nstu_client_platform)
@@ -211,6 +228,28 @@ if(TARGET nstu_client_platform)
     nstu_enable_warnings(nstu_exam_host_protocol_tests)
     nstu_enable_test_assertions(nstu_exam_host_protocol_tests)
     add_test(NAME nstu.exam_host_protocol COMMAND nstu_exam_host_protocol_tests)
+
+    # Fail-safe exam network-lockdown policy; pure state machine over the WFP
+    # allowlist config, no firewall touched.
+    add_executable(nstu_exam_network_lockdown_tests
+        exam_network_lockdown_tests.cpp)
+    target_link_libraries(nstu_exam_network_lockdown_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_network_lockdown_tests)
+    nstu_enable_test_assertions(nstu_exam_network_lockdown_tests)
+    add_test(NAME nstu.exam_network_lockdown
+        COMMAND nstu_exam_network_lockdown_tests)
+
+    # Exam app-suppression policy; pure classifier with a built-in never-kill
+    # floor, no real process touched.
+    add_executable(nstu_exam_app_suppression_tests
+        exam_app_suppression_tests.cpp)
+    target_link_libraries(nstu_exam_app_suppression_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_app_suppression_tests)
+    nstu_enable_test_assertions(nstu_exam_app_suppression_tests)
+    add_test(NAME nstu.exam_app_suppression
+        COMMAND nstu_exam_app_suppression_tests)
 
     add_executable(nstu_client_freeze_tests client_freeze_tests.cpp)
     target_link_libraries(nstu_client_freeze_tests PRIVATE nstu_client_platform)

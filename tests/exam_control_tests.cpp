@@ -92,5 +92,65 @@ int main() {
     invalid_package_id.package_id = "bad\x01id";
     assert(!nstu::exam::validate_exam_start_request(invalid_package_id));
     assert(nstu::exam::encode_exam_start_request(invalid_package_id).empty());
+    // Synchronized-start barrier: ERDY ready report round-trip + rejections.
+    nstu::exam::ExamReadyReport ready;
+    ready.package_id = original.package_id;
+    ready.candidate_id = original.candidate_id;
+    ready.package_digest = original.package_digest;
+    ready.client_id = original.client_id;
+    ready.session_id = original.session_id;
+    assert(nstu::exam::validate_exam_ready_report(ready));
+    const auto ready_wire = nstu::exam::encode_exam_ready_report(ready);
+    assert(!ready_wire.empty());
+    const auto ready_decoded = nstu::exam::decode_exam_ready_report(ready_wire);
+    assert(ready_decoded.has_value());
+    assert(ready_decoded->package_id == ready.package_id);
+    assert(ready_decoded->candidate_id == ready.candidate_id);
+    assert(ready_decoded->package_digest == ready.package_digest);
+    assert(ready_decoded->client_id == ready.client_id);
+    assert(ready_decoded->session_id == ready.session_id);
+    auto ready_truncated = ready_wire;
+    ready_truncated.pop_back();
+    assert(!nstu::exam::decode_exam_ready_report(ready_truncated));
+    auto ready_trailing = ready_wire;
+    ready_trailing.push_back(std::byte{0});
+    assert(!nstu::exam::decode_exam_ready_report(ready_trailing));
+    auto ready_bad_version = ready_wire;
+    ready_bad_version[4] = std::byte{0xff};
+    assert(!nstu::exam::decode_exam_ready_report(ready_bad_version));
+    // EBGN begin command: round-trip, cross-magic rejection, bounds.
+    nstu::exam::ExamBeginCommand begin;
+    begin.package_id = original.package_id;
+    begin.candidate_id = original.candidate_id;
+    begin.package_digest = original.package_digest;
+    begin.client_id = original.client_id;
+    begin.session_id = original.session_id;
+    begin.server_start_unix_milliseconds = 1770000000000ull;
+    begin.duration_seconds = 3600;
+    assert(nstu::exam::validate_exam_begin_command(begin));
+    const auto begin_wire = nstu::exam::encode_exam_begin_command(begin);
+    assert(!begin_wire.empty());
+    const auto begin_decoded = nstu::exam::decode_exam_begin_command(begin_wire);
+    assert(begin_decoded.has_value());
+    assert(begin_decoded->server_start_unix_milliseconds ==
+           begin.server_start_unix_milliseconds);
+    assert(begin_decoded->duration_seconds == begin.duration_seconds);
+    assert(begin_decoded->package_id == begin.package_id);
+    assert(begin_decoded->session_id == begin.session_id);
+    // The two barrier messages must never be confused on the wire.
+    assert(!nstu::exam::decode_exam_ready_report(begin_wire));
+    assert(!nstu::exam::decode_exam_begin_command(ready_wire));
+    // duration 0 means "use the manifest duration" and is accepted.
+    auto begin_zero_duration = begin;
+    begin_zero_duration.duration_seconds = 0;
+    assert(nstu::exam::validate_exam_begin_command(begin_zero_duration));
+    // Out-of-range duration and a zero start instant are rejected.
+    auto begin_short_duration = begin;
+    begin_short_duration.duration_seconds = 59;
+    assert(!nstu::exam::validate_exam_begin_command(begin_short_duration));
+    assert(nstu::exam::encode_exam_begin_command(begin_short_duration).empty());
+    auto begin_zero_start = begin;
+    begin_zero_start.server_start_unix_milliseconds = 0;
+    assert(!nstu::exam::validate_exam_begin_command(begin_zero_start));
     return 0;
 }

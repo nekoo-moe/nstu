@@ -29,6 +29,15 @@ int main() {
            first->payload.front() == std::byte{1});
     assert(!bridge.try_pop().has_value());
 
+    // The synchronized-start exam_begin rides the same bridge as acks.
+    assert(bridge.publish({AgentMessageType::exam_begin, {std::byte{9}}}));
+    const auto begin = bridge.try_pop();
+    assert(begin.has_value());
+    assert(begin->type == AgentMessageType::exam_begin);
+    assert(begin->payload.size() == 1 &&
+           begin->payload.front() == std::byte{9});
+    assert(!bridge.try_pop().has_value());
+
     for (std::size_t index = 0; index < kMaximumExamBridgeMessages + 5;
          ++index) {
         assert(bridge.publish(make_message(static_cast<std::uint8_t>(index))));

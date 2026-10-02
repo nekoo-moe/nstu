@@ -138,6 +138,17 @@ public:
         std::string* error = nullptr);
     [[nodiscard]] bool stop_exam(std::uint64_t client_id,
                                  std::string* error = nullptr);
+    // Synchronized-start barrier. Clients report readiness over the control
+    // channel (recorded against their server-issued exam context); the operator
+    // -- or a cohort coordinator driving an ExamStartBarrier over
+    // ready_exam_clients() -- then releases a client with begin_exam, which
+    // sends the authoritative start time (and optional per-start duration, 0 to
+    // use the manifest's) so the cohort reveals the questions together.
+    [[nodiscard]] bool begin_exam(std::uint64_t client_id,
+                                  std::uint32_t duration_seconds,
+                                  std::string* error = nullptr);
+    // Registry ids of clients that have reported ready for their active exam.
+    [[nodiscard]] std::vector<std::uint64_t> ready_exam_clients() const;
 
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::uint16_t local_port() const noexcept;

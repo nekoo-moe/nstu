@@ -191,6 +191,14 @@ public:
         exam::SessionId session_id{};
         std::string package_id;
         std::string candidate_id;
+        // Set when the client reports exam_ready (package staged and verified,
+        // kiosk locked, loading screen up). The cohort coordinator reads this
+        // to decide when to release the synchronized start. `begun` makes the
+        // release single-use: repeated operator/UI actions cannot restart the
+        // timer with a later timestamp.
+        bool ready = false;
+        bool begun = false;
+        std::uint64_t server_start_unix_milliseconds = 0;
     };
 
     bool start(ServerControlPlaneConfig config, std::string* error) {
@@ -262,6 +270,12 @@ public:
         // different exclusion ranges, so a TCP-selected number can be denied
         // to UDP with WSAEACCES. Retry the pair rather than making a valid
         // ephemeral request fail depending on host networking configuration.
+        // Both binds are retried: releasing the previous attempt's listener can
+        // leave the next TCP bind transiently unavailable, and failing the whole
+        // start on that would defeat the retry. Each attempt asks for a fresh
+        // ephemeral pair, which is what actually breaks the conflict. A
+        // configured port keeps a single attempt, so a genuine conflict there
+        // still fails fast instead of being retried 32 times.
         constexpr int maximum_ephemeral_attempts = 32;
         const int attempts = config_.port == 0 ? maximum_ephemeral_attempts : 1;
         bool started = false;
@@ -270,7 +284,7 @@ public:
             start_error.clear();
             if (!dispatcher_.start(dispatcher_config, callbacks(),
                                    &start_error)) {
-                break;
+                continue;
             }
             const auto control_port = dispatcher_.local_port();
             if (discovery_responder_.start(control_port, control_port,
@@ -495,6 +509,70 @@ public:
         std::scoped_lock context_lock(exam_contexts_mutex_);
         active_exam_contexts_.erase(state->registry_id.load());
         return true;
+    }
+
+    bool begin_exam(std::uint64_t client_id, std::uint32_t duration_seconds,
+                    std::string* error) {
+        auto state = state_for_client(client_id);
+        if (!state) {
+            set_error(error, "client is not authenticated");
+            return false;
+        }
+        std::scoped_lock state_lock(state->mutex);
+        if (state->stage != Stage::authenticated ||
+            state->registry_id.load() == 0) {
+            set_error(error, "authenticated command sequence is unavailable");
+            return false;
+        }
+        const auto registry_id = state->registry_id.load();
+        std::scoped_lock context_lock(exam_contexts_mutex_);
+        const auto found = active_exam_contexts_.find(registry_id);
+        if (found == active_exam_contexts_.end()) {
+            set_error(error, "client has no active exam session");
+            return false;
+        }
+        auto& context = found->second;
+        if (!context.ready) {
+            set_error(error, "client is not ready to begin the exam");
+            return false;
+        }
+        if (context.begun) {
+            set_error(error, "client exam has already begun");
+            return false;
+        }
+        exam::ExamBeginCommand begin;
+        begin.package_id = context.package_id;
+        begin.candidate_id = context.candidate_id;
+        begin.package_digest = context.package_digest;
+        begin.client_id = context.client_id;
+        begin.session_id = context.session_id;
+        begin.server_start_unix_milliseconds = unix_milliseconds_now();
+        begin.duration_seconds = duration_seconds;
+        const auto payload = exam::encode_exam_begin_command(begin);
+        if (payload.empty()) {
+            set_error(error, "could not encode exam begin command");
+            return false;
+        }
+        if (!send_authenticated_locked(
+                *state, protocol::CommandType::exam_begin,
+                next_request_id_.fetch_add(1), payload, error)) {
+            return false;
+        }
+        context.begun = true;
+        context.server_start_unix_milliseconds =
+            begin.server_start_unix_milliseconds;
+        return true;
+    }
+
+    std::vector<std::uint64_t> ready_exam_clients() const {
+        std::vector<std::uint64_t> clients;
+        std::scoped_lock lock(exam_contexts_mutex_);
+        for (const auto& [registry_id, context] : active_exam_contexts_) {
+            if (context.ready) {
+                clients.push_back(registry_id);
+            }
+        }
+        return clients;
     }
 
     // Writes one server-originated audit record. Best effort: a closed or
@@ -873,6 +951,16 @@ private:
                context.session_id == request.session_id &&
                context.package_id == request.package_id &&
                context.candidate_id == request.candidate_id;
+    }
+
+    static bool matches_exam_context(
+        const ActiveExamContext& context,
+        const exam::ExamReadyReport& report) noexcept {
+        return context.client_id == report.client_id &&
+               context.package_digest == report.package_digest &&
+               context.session_id == report.session_id &&
+               context.package_id == report.package_id &&
+               context.candidate_id == report.candidate_id;
     }
 
     void on_bytes(net::ConnectionId id, std::vector<std::byte> bytes) {
@@ -1411,6 +1499,9 @@ private:
         if (command->envelope.type == protocol::CommandType::exam_state_request) {
             return process_exam_state_request(state, *command);
         }
+        if (command->envelope.type == protocol::CommandType::exam_ready) {
+            return process_exam_ready(state, *command);
+        }
         if (command->envelope.type == protocol::CommandType::heartbeat) {
             (void)registry_.touch(state.registry_id.load());
             return true;
@@ -1608,6 +1699,29 @@ private:
                     command.envelope.request_id, payload, nullptr)) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
+            }
+        }
+        return true;
+    }
+
+    bool process_exam_ready(
+        ConnectionState& state, const control::AuthenticatedCommand& command) {
+        const auto report = exam::decode_exam_ready_report(command.payload);
+        // Same discipline as answer events: the socket identity is
+        // authenticated, but the full exam tuple is server-issued, so a report
+        // is only honored when it matches this client's active context.
+        const auto context = active_exam_for(state.registry_id.load());
+        if (!report || !context || report->client_id != state.hello.client_id ||
+            !matches_exam_context(*context, *report)) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+        {
+            std::scoped_lock lock(exam_contexts_mutex_);
+            const auto found =
+                active_exam_contexts_.find(state.registry_id.load());
+            if (found != active_exam_contexts_.end()) {
+                found->second.ready = true;
             }
         }
         return true;
@@ -1976,6 +2090,16 @@ bool ServerControlPlane::start_exam(
 bool ServerControlPlane::stop_exam(std::uint64_t client_id,
                                    std::string* error) {
     return impl_->stop_exam(client_id, error);
+}
+
+bool ServerControlPlane::begin_exam(std::uint64_t client_id,
+                                    std::uint32_t duration_seconds,
+                                    std::string* error) {
+    return impl_->begin_exam(client_id, duration_seconds, error);
+}
+
+std::vector<std::uint64_t> ServerControlPlane::ready_exam_clients() const {
+    return impl_->ready_exam_clients();
 }
 
 bool ServerControlPlane::running() const noexcept {
