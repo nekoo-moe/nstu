@@ -270,6 +270,12 @@ public:
         // different exclusion ranges, so a TCP-selected number can be denied
         // to UDP with WSAEACCES. Retry the pair rather than making a valid
         // ephemeral request fail depending on host networking configuration.
+        // Both binds are retried: releasing the previous attempt's listener can
+        // leave the next TCP bind transiently unavailable, and failing the whole
+        // start on that would defeat the retry. Each attempt asks for a fresh
+        // ephemeral pair, which is what actually breaks the conflict. A
+        // configured port keeps a single attempt, so a genuine conflict there
+        // still fails fast instead of being retried 32 times.
         constexpr int maximum_ephemeral_attempts = 32;
         const int attempts = config_.port == 0 ? maximum_ephemeral_attempts : 1;
         bool started = false;
@@ -278,7 +284,7 @@ public:
             start_error.clear();
             if (!dispatcher_.start(dispatcher_config, callbacks(),
                                    &start_error)) {
-                break;
+                continue;
             }
             const auto control_port = dispatcher_.local_port();
             if (discovery_responder_.start(control_port, control_port,
