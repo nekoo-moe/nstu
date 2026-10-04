@@ -137,7 +137,7 @@ int main() {
             return session.snapshot().state == RemoteSessionState::exited;
         }));
         const auto snapshot = session.snapshot();
-        assert(snapshot.exit_code == 7);
+        assert(snapshot.exit_code == 7u);
         assert(snapshot.bounded_diagnostic.size() == 64);
     }
 
@@ -152,7 +152,7 @@ int main() {
             return session.snapshot().state == RemoteSessionState::exited;
         }));
         const auto flooded = session.snapshot();
-        assert(flooded.exit_code == 9);
+        assert(flooded.exit_code == 9u);
         assert(flooded.bounded_diagnostic.size() == 64);
     }
 
