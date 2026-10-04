@@ -54,6 +54,26 @@ struct PairingDiscoveryStats {
     std::uint64_t beacons_sent = 0;
 };
 
+// Operator-supplied fields for launching a staged exam. The control plane binds
+// the authenticated client identity and generates a fresh session identifier;
+// callers must not be able to forge either security-sensitive field.
+struct ExamLaunchRequest {
+    std::string package_root;
+    std::string web_root;
+    std::string user_data_root;
+    std::string package_id;
+    std::string candidate_id;
+    security::Sha256Digest package_digest{};
+};
+
+struct ExamClientState {
+    std::uint64_t client_id = 0;
+    std::string package_id;
+    std::string candidate_id;
+    bool ready = false;
+    bool begun = false;
+};
+
 // One line of the per-client chat transcript kept for the teacher UI. A
 // display convenience only - never exam or answer content, which lives in the
 // server-owned journal and audit sink.
@@ -133,11 +153,30 @@ public:
     // Starts/stops the client-side exam host over the authenticated control
     // channel. The server stores the package and answer journal; it never
     // creates a desktop overlay or applies reboot-to-restore itself.
+    [[nodiscard]] bool launch_exam(
+        std::uint64_t client_id, const ExamLaunchRequest& request,
+        std::string* error = nullptr);
     [[nodiscard]] bool start_exam(
         std::uint64_t client_id, const exam::ExamStartRequest& request,
         std::string* error = nullptr);
     [[nodiscard]] bool stop_exam(std::uint64_t client_id,
                                  std::string* error = nullptr);
+    // Synchronized-start barrier. Clients report readiness over the control
+    // channel (recorded against their server-issued exam context); the operator
+    // -- or a cohort coordinator driving an ExamStartBarrier over
+    // ready_exam_clients() -- then releases a client with begin_exam, which
+    // sends the authoritative start time (and optional per-start duration, 0 to
+    // use the manifest's) so the cohort reveals the questions together.
+    [[nodiscard]] bool begin_exam(std::uint64_t client_id,
+                                  std::uint32_t duration_seconds,
+                                  std::string* error = nullptr);
+    // Registry ids of clients that have reported ready for their active exam.
+    [[nodiscard]] std::vector<std::uint64_t> ready_exam_clients() const;
+    [[nodiscard]] std::vector<ExamClientState> exam_client_states() const;
+    [[nodiscard]] bool exam_active(std::uint64_t client_id) const;
+    void record_remote_session_audit(
+        std::uint64_t client_id, std::string_view action,
+        std::string_view result, std::string_view detail = {});
 
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::uint16_t local_port() const noexcept;

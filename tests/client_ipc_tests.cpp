@@ -151,6 +151,22 @@ int main() {
         assert(decoded_online->payload == std::vector<std::byte>{flag});
     }
 
+    // exam_ready / exam_begin are the synchronized-start barrier IPC types
+    // (agent <-> service). Same stale-bound guard as server_online: if
+    // valid_type() is not raised to include them, the start handshake is
+    // silently dropped and no cohort ever begins together.
+    for (const auto barrier_type :
+         {nstu::client::AgentMessageType::exam_ready,
+          nstu::client::AgentMessageType::exam_begin}) {
+        const auto barrier_wire = nstu::client::encode_agent_message(
+            {barrier_type, {std::byte{7}, std::byte{8}}});
+        assert(!barrier_wire.empty());
+        const auto barrier_decoded =
+            nstu::client::decode_agent_message(barrier_wire);
+        assert(barrier_decoded.has_value());
+        assert(barrier_decoded->type == barrier_type);
+    }
+
     auto corrupt = status_wire;
     corrupt[0] ^= std::byte{1};
     assert(!nstu::client::decode_agent_message(corrupt).has_value());

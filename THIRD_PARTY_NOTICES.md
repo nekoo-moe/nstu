@@ -21,5 +21,18 @@ compiled executables:
 These DLLs are copied from the selected MinGW toolchain at package time. MSVC
 packages do not include them.
 
+## LizardByte Sunshine
+
+- Project: https://github.com/LizardByte/Sunshine
+- Release: 2026.914.233613
+- License: GPL-3.0
+- Usage: Host-side desktop streaming service (`SunshineService` / `sunshine.exe`) on managed student endpoints. Invoked as an external Windows service; not statically or dynamically linked into NSTU binaries, nor redistributed within the installer packages without explicit configuration.
+
+## Moonlight Game Streaming
+
+- Project: https://github.com/moonlight-stream/moonlight-qt
+- License: GPL-3.0
+- Usage: Client-side desktop streaming viewer (`Moonlight.exe`) on teacher workstations. Managed and launched as an external isolated process under Windows Job Objects; not statically or dynamically linked into NSTU binaries.
+
 Windows, Direct3D, DXGI, Media Foundation, Winsock, and related SDK libraries are
 provided by the Windows SDK and are not redistributed as source dependencies.

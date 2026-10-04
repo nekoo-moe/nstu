@@ -9,6 +9,7 @@
 #include "nstu/stream_rearm_watchdog.hpp"
 #include "nstu/telemetry.hpp"
 #include "nstu/protocol_headers.h"
+#include "nstu/remote_session_process.hpp"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -392,6 +393,7 @@ constexpr int kMaximumSnapshotInterval = 10;
 enum class DashboardView : int {
     room_screens,
     selected_client,
+    exam,
 };
 
 enum class RoomFilter : int {
@@ -477,6 +479,13 @@ struct DashboardState {
     bool telemetry_report_requested = false;
     std::array<char, 96> client_filter{};
     std::array<char, 512> chat_input{};
+    std::array<char, nstu::exam::kMaximumExamControlPathBytes + 1>
+        exam_package_root{};
+    std::array<char, nstu::exam::kMaximumExamControlPackageIdBytes + 1>
+        exam_package_id{};
+    std::array<char, nstu::exam::kMaximumExamControlCandidateBytes + 1>
+        exam_candidate_id{};
+    std::array<char, nstu::security::kSha256Bytes * 2 + 1> exam_digest_hex{};
     // Chat notification state. `chat_counts` is the current per-client inbound
     // (student) message count refreshed each frame; `chat_seen_counts` is the
     // count when the teacher last had that client's chat on screen (badge
@@ -505,6 +514,30 @@ const char* tr(const DashboardState& state, const char* english,
 
 // A client has unread student chat when its current inbound count exceeds the
 // count the teacher last had on screen for it.
+bool parse_sha256_hex(std::string_view text,
+                      nstu::security::Sha256Digest& digest) noexcept {
+    if (text.size() != digest.size() * 2) {
+        return false;
+    }
+    const auto nibble = [](char value) -> int {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    };
+    bool non_zero = false;
+    for (std::size_t index = 0; index < digest.size(); ++index) {
+        const int high = nibble(text[index * 2]);
+        const int low = nibble(text[index * 2 + 1]);
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        digest[index] = static_cast<std::byte>((high << 4) | low);
+        non_zero = non_zero || digest[index] != std::byte{0};
+    }
+    return non_zero;
+}
+
 bool client_has_unread_chat(const DashboardState& state, std::uint64_t id) {
     const auto current = state.chat_counts.find(id);
     if (current == state.chat_counts.end()) {
@@ -804,6 +837,44 @@ nstu::server::ServerControlPlane* g_remote_control_plane = nullptr;
 RemoteImageRect g_remote_image_rect;
 std::atomic_bool g_remote_close_pending{false};
 bool g_remote_class_registered = false;
+std::unique_ptr<nstu::server::RemoteSessionProcess> g_remote_session;
+bool g_use_legacy_remote = false;
+
+std::filesystem::path default_remote_viewer_path() {
+    wchar_t env_buffer[MAX_PATH]{};
+    const DWORD env_len =
+        GetEnvironmentVariableW(L"NSTU_REMOTE_CLIENT_PATH", env_buffer, MAX_PATH);
+    if (env_len > 0 && env_len < MAX_PATH) {
+        return std::filesystem::path(env_buffer);
+    }
+    const DWORD ml_len =
+        GetEnvironmentVariableW(L"MOONLIGHT_PATH", env_buffer, MAX_PATH);
+    if (ml_len > 0 && ml_len < MAX_PATH) {
+        return std::filesystem::path(env_buffer);
+    }
+
+    wchar_t prog_files[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"ProgramFiles", prog_files, MAX_PATH) > 0) {
+        const auto candidate = std::filesystem::path(prog_files) /
+                               L"Moonlight Game Streaming" / L"Moonlight.exe";
+        if (std::filesystem::exists(candidate)) {
+            return candidate;
+        }
+    }
+    wchar_t prog_files_x86[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"ProgramFiles(x86)", prog_files_x86, MAX_PATH) > 0) {
+        const auto candidate = std::filesystem::path(prog_files_x86) /
+                               L"Moonlight Game Streaming" / L"Moonlight.exe";
+        if (std::filesystem::exists(candidate)) {
+            return candidate;
+        }
+    }
+    if (prog_files[0] != L'\0') {
+        return std::filesystem::path(prog_files) / L"Moonlight Game Streaming" /
+               L"Moonlight.exe";
+    }
+    return L"C:\\Program Files\\Moonlight Game Streaming\\Moonlight.exe";
+}
 
 void apply_dashboard_style(bool dark_mode);
 void load_dashboard_fonts();
@@ -2379,25 +2450,108 @@ void draw_selected_client(
     ImGui::SameLine();
     const bool remote_available = selected_client->status !=
         nstu::server::ClientStatus::offline;
-    const bool remote_open_here = g_remote_window != nullptr &&
+    const bool legacy_open_here = g_remote_window != nullptr &&
         g_remote_target_client == selected_client->id;
-    if (ImGui::Button(remote_open_here
-                          ? tr(state, "Stop remote", "Dừng điều khiển")
-                          : tr(state, "Start remote", "Bắt đầu điều khiển"))) {
-        if (remote_open_here) {
+
+    const auto session_snapshot = g_remote_session ? g_remote_session->snapshot()
+                                                   : nstu::server::RemoteSessionSnapshot{};
+    const bool session_active_here = session_snapshot.client_id == selected_client->id &&
+        (session_snapshot.state == nstu::server::RemoteSessionState::preflighting ||
+         session_snapshot.state == nstu::server::RemoteSessionState::launching ||
+         session_snapshot.state == nstu::server::RemoteSessionState::running ||
+         session_snapshot.state == nstu::server::RemoteSessionState::stopping);
+    const bool any_session_active =
+        (session_snapshot.state == nstu::server::RemoteSessionState::preflighting ||
+         session_snapshot.state == nstu::server::RemoteSessionState::launching ||
+         session_snapshot.state == nstu::server::RemoteSessionState::running ||
+         session_snapshot.state == nstu::server::RemoteSessionState::stopping);
+
+    if (session_active_here) {
+        if (ImGui::Button(tr(state, "Stop remote", "Dừng điều khiển"))) {
+            if (g_remote_session) {
+                g_remote_session->stop(nstu::server::RemoteSessionStopReason::explicit_stop);
+            }
+            state.control_status = tr(state, "Stopping remote session...",
+                                      "Đang dừng phiên điều khiển từ xa...");
+            ImGui::OpenPopup("control-status");
+        }
+    } else if (legacy_open_here) {
+        if (ImGui::Button(tr(state, "Stop legacy remote", "Dừng điều khiển cũ"))) {
             close_remote_window(control_plane);
             state.control_status = tr(state, "Remote control window closed.",
                                       "Đã đóng cửa sổ điều khiển từ xa.");
-        } else if (remote_available) {
-            const bool ok =
-                open_remote_window(control_plane, selected_client->id);
-            state.control_status = ok
-                ? tr(state, "Remote control window opened.",
-                     "Đã mở cửa sổ điều khiển từ xa.")
-                : tr(state, "Could not open the remote control window.",
-                     "Không thể mở cửa sổ điều khiển từ xa.");
+            ImGui::OpenPopup("control-status");
         }
-        ImGui::OpenPopup("control-status");
+    } else {
+        const bool button_disabled = !remote_available ||
+                                     any_session_active ||
+                                     g_remote_window != nullptr;
+        ImGui::BeginDisabled(button_disabled);
+        if (ImGui::Button(tr(state, "Start remote", "Bắt đầu điều khiển"))) {
+            if (g_use_legacy_remote) {
+                const bool ok =
+                    open_remote_window(control_plane, selected_client->id);
+                state.control_status = ok
+                    ? tr(state, "Legacy remote control window opened.",
+                         "Đã mở cửa sổ điều khiển từ xa cũ.")
+                    : tr(state, "Could not open the remote control window.",
+                         "Không thể mở cửa sổ điều khiển từ xa.");
+            } else {
+                if (control_plane.exam_active(selected_client->id)) {
+                    state.control_status = tr(
+                        state,
+                        "Remote control is blocked while an exam is active.",
+                        "Không thể điều khiển từ xa khi đang có bài thi hoạt động.");
+                    control_plane.record_remote_session_audit(
+                        selected_client->id, "remote_session_start", "denied", "exam_active");
+                } else {
+                    nstu::server::RemoteSessionTarget target;
+                    std::string resolve_err;
+                    if (!nstu::server::resolve_remote_session_target(
+                            clients, selected_client->id, &target, &resolve_err)) {
+                        state.control_status = tr(
+                            state, "Failed to resolve client address: ",
+                            "Không thể xác định địa chỉ máy: ") + resolve_err;
+                        control_plane.record_remote_session_audit(
+                            selected_client->id, "remote_session_start", "failed", resolve_err);
+                    } else if (g_remote_session) {
+                        std::string start_err;
+                        auto auth = [&control_plane](
+                                        std::uint64_t id, std::string* denial) {
+                            if (control_plane.exam_active(id)) {
+                                if (denial) *denial = "exam is active on client";
+                                return false;
+                            }
+                            return true;
+                        };
+                        if (g_remote_session->start(target, auth, &start_err)) {
+                            state.control_status = tr(
+                                state, "Starting remote session...",
+                                "Đang khởi động phiên điều khiển từ xa...");
+                            control_plane.record_remote_session_audit(
+                                selected_client->id, "remote_session_start", "succeeded");
+                        } else {
+                            state.control_status = tr(
+                                state, "Could not start remote session: ",
+                                "Không thể khởi động điều khiển từ xa: ") + start_err;
+                            control_plane.record_remote_session_audit(
+                                selected_client->id, "remote_session_start", "failed", start_err);
+                        }
+                    }
+                }
+            }
+            ImGui::OpenPopup("control-status");
+        }
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox(tr(state, "Legacy remote", "Điều khiển cũ"),
+                    &g_use_legacy_remote);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", tr(
+            state,
+            "Use legacy built-in D3D remote window instead of Moonlight.",
+            "Dùng cửa sổ D3D cũ thay vì Moonlight."));
     }
     // Keyboard entry and the offline auto-stop now belong to the separate
     // remote-control window: it forwards real key events and the main loop
@@ -3161,6 +3315,137 @@ void draw_pairing_popup(DashboardState& state,
     }
 }
 
+void draw_exam_panel(
+    const nstu::server::ClientRecord* selected_client, DashboardState& state,
+    nstu::server::ServerControlPlane& control_plane) {
+    if (g_heading_font != nullptr) ImGui::PushFont(g_heading_font);
+    ImGui::TextUnformatted(tr(state, "Exam", "Bài thi"));
+    if (g_heading_font != nullptr) ImGui::PopFont();
+    ImGui::TextWrapped("%s", tr(
+        state,
+        "Launch a package already staged at the same path on the selected client.",
+        "Mở gói đã được chuẩn bị sẵn tại cùng đường dẫn trên máy đang chọn."));
+
+    ImGui::SetNextItemWidth(std::min(scaled(720.0f),
+                                     ImGui::GetContentRegionAvail().x));
+    ImGui::InputTextWithHint(
+        "##exam-package-root",
+        tr(state, "Package root on client", "Thư mục gói trên máy client"),
+        state.exam_package_root.data(), state.exam_package_root.size());
+    ImGui::SetNextItemWidth(std::min(scaled(420.0f),
+                                     ImGui::GetContentRegionAvail().x));
+    ImGui::InputTextWithHint("##exam-package-id", "Package ID",
+                             state.exam_package_id.data(),
+                             state.exam_package_id.size());
+    ImGui::SetNextItemWidth(std::min(scaled(420.0f),
+                                     ImGui::GetContentRegionAvail().x));
+    ImGui::InputTextWithHint("##exam-candidate-id", "Candidate ID",
+                             state.exam_candidate_id.data(),
+                             state.exam_candidate_id.size());
+    ImGui::SetNextItemWidth(std::min(scaled(720.0f),
+                                     ImGui::GetContentRegionAvail().x));
+    ImGui::InputTextWithHint("##exam-digest", "Content SHA-256",
+                             state.exam_digest_hex.data(),
+                             state.exam_digest_hex.size());
+
+    const auto active = control_plane.exam_client_states();
+    const auto active_for_selected = std::find_if(
+        active.begin(), active.end(), [selected_client](const auto& exam) {
+            return selected_client != nullptr &&
+                   exam.client_id == selected_client->id;
+        });
+    const bool has_active = active_for_selected != active.end();
+    const bool client_online = selected_client != nullptr &&
+        selected_client->status != nstu::server::ClientStatus::offline;
+    [[maybe_unused]] const bool protection_proven = selected_client != nullptr &&
+        selected_client->uwf.proves_current_protection();
+
+    if (selected_client == nullptr) {
+        ImGui::TextDisabled("%s", tr(state, "Select a client first.",
+                                     "Hãy chọn máy client trước."));
+    } else {
+        ImGui::Text("%s: %s", tr(state, "Selected client", "Máy đã chọn"),
+                    selected_client->hostname.c_str());
+#if !NSTU_DEV_UNPROTECTED_EXAM
+        if (!protection_proven) {
+            ImGui::TextColored(
+                g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
+                            : ImVec4{0.63f, 0.36f, 0.02f, 1.0f},
+                "%s", tr(state,
+                    "Blocked: current-session reboot-to-restore protection is not proven.",
+                    "Bị chặn: chưa xác minh bảo vệ khôi phục sau reboot cho phiên hiện tại."));
+        }
+#endif
+    }
+
+    if (has_active) {
+        const char* phase = active_for_selected->begun
+            ? tr(state, "In progress", "Đang thi")
+            : (active_for_selected->ready
+                   ? tr(state, "Ready to begin", "Sẵn sàng bắt đầu")
+                   : tr(state, "Loading package", "Đang tải gói"));
+        ImGui::Text("%s: %s", tr(state, "Exam state", "Trạng thái bài thi"),
+                    phase);
+        ImGui::TextDisabled("%s / %s",
+                            active_for_selected->package_id.c_str(),
+                            active_for_selected->candidate_id.c_str());
+    }
+
+#if NSTU_DEV_UNPROTECTED_EXAM
+    const bool start_allowed = client_online && !has_active;
+#else
+    const bool start_allowed = client_online && protection_proven && !has_active;
+#endif
+    ImGui::BeginDisabled(!start_allowed);
+    if (ImGui::Button(tr(state, "Load exam", "Tải bài thi"),
+                      {scaled(120.0f), 0})) {
+        nstu::server::ExamLaunchRequest launch;
+        launch.package_root = state.exam_package_root.data();
+        launch.package_id = state.exam_package_id.data();
+        launch.candidate_id = state.exam_candidate_id.data();
+        while (!launch.package_root.empty() &&
+               (launch.package_root.back() == '/' ||
+                launch.package_root.back() == '\\')) {
+            launch.package_root.pop_back();
+        }
+        launch.web_root = launch.package_root + "/exam/web";
+        std::string error;
+        const bool valid_digest = parse_sha256_hex(
+            state.exam_digest_hex.data(), launch.package_digest);
+        const bool sent = valid_digest && control_plane.launch_exam(
+            selected_client->id, launch, &error);
+        if (!valid_digest) error = "Content SHA-256 must be 64 non-zero hex digits.";
+        state.control_status = sent
+            ? tr(state, "Exam loading request sent.",
+                 "Đã gửi yêu cầu tải bài thi.")
+            : error;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!has_active || active_for_selected->begun ||
+                         !active_for_selected->ready);
+    if (ImGui::Button(tr(state, "Begin", "Bắt đầu"),
+                      {scaled(92.0f), 0})) {
+        std::string error;
+        state.control_status = control_plane.begin_exam(
+            selected_client->id, 0, &error)
+            ? tr(state, "Exam begun.", "Đã bắt đầu bài thi.")
+            : error;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!has_active);
+    if (ImGui::Button(tr(state, "Stop", "Dừng"), {scaled(92.0f), 0})) {
+        std::string error;
+        state.control_status = control_plane.stop_exam(
+            selected_client->id, &error)
+            ? tr(state, "Exam stop request sent.",
+                 "Đã gửi yêu cầu dừng bài thi.")
+            : error;
+    }
+    ImGui::EndDisabled();
+}
+
 void draw_menu_strip(DashboardState& state, bool has_clients,
                      nstu::server::ServerControlPlane& control_plane) {
     if (!ImGui::BeginChild("menu-strip", {0, scaled(31.0f)}, false,
@@ -3196,6 +3481,14 @@ void draw_menu_strip(DashboardState& state, bool has_clients,
                             state.view == DashboardView::selected_client,
                             scaled(60.0f))) {
         state.view = DashboardView::selected_client;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!has_clients);
+    if (draw_segment_option(tr(state, "Exam", "Bài thi"),
+                            state.view == DashboardView::exam,
+                            scaled(60.0f))) {
+        state.view = DashboardView::exam;
     }
     ImGui::EndDisabled();
     draw_pairing_popup(state, control_plane);
@@ -3422,6 +3715,12 @@ void draw_navigation_rail(
                          selected_client != nullptr, false)) {
         state.view = DashboardView::selected_client;
     }
+    if (draw_icon_button("nav-exam", tr(state, "Exam", "Bài thi"),
+                         IconKind::lock, {scaled(36.0f), scaled(38.0f)},
+                         state.view == DashboardView::exam,
+                         selected_client != nullptr, false)) {
+        state.view = DashboardView::exam;
+    }
     ImGui::Separator();
     if (draw_icon_button("nav-lock", tr(state, "Lock room", "Khóa phòng"),
                          IconKind::lock, {scaled(36.0f), scaled(38.0f)}, false,
@@ -3493,9 +3792,11 @@ void draw_dashboard_shell(
         if (ImGui::BeginChild("workspace-content", {0, 0}, false)) {
             if (state.view == DashboardView::room_screens) {
                 draw_room_screen_wall(clients, state);
-            } else {
+            } else if (state.view == DashboardView::selected_client) {
                 draw_selected_client(clients, selected_client, state,
                                      control_plane);
+            } else {
+                draw_exam_panel(selected_client, state, control_plane);
             }
         }
         ImGui::EndChild();
@@ -3629,6 +3930,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     nstu::server::ClientRegistry registry;
     nstu::security::KeyStore key_store;
     nstu::server::ServerControlPlane control_plane(registry, key_store);
+
+    nstu::server::RemoteSessionProcessConfig remote_session_config;
+    remote_session_config.executable = default_remote_viewer_path();
+    remote_session_config.application = L"Desktop";
+    remote_session_config.host_port = 47984;
+    g_remote_session = std::make_unique<nstu::server::RemoteSessionProcess>(
+        std::move(remote_session_config));
     std::string deployment_error;
     const auto data_directory = nstu::deployment::data_root(&deployment_error);
     if (!data_directory.empty() &&
@@ -3953,6 +4261,59 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             }
         }
 
+        // Handle RemoteSessionProcess events and lifetime interlocks
+        if (g_remote_session) {
+            for (const auto& ev : g_remote_session->drain_events()) {
+                if (ev.state == nstu::server::RemoteSessionState::running) {
+                    dashboard.control_status = tr(dashboard,
+                        "Remote session connected.", "Đã kết nối điều khiển từ xa.");
+                } else if (ev.state == nstu::server::RemoteSessionState::failed) {
+                    dashboard.control_status = tr(dashboard,
+                        "Remote session failed: ", "Điều khiển từ xa thất bại: ") +
+                        ev.bounded_diagnostic;
+                    control_plane.record_remote_session_audit(
+                        ev.client_id, "remote_session_stop", "failed", ev.bounded_diagnostic);
+                } else if (ev.state == nstu::server::RemoteSessionState::exited) {
+                    dashboard.control_status = tr(dashboard,
+                        "Remote session closed.", "Đã đóng phiên điều khiển từ xa.");
+                    control_plane.record_remote_session_audit(
+                        ev.client_id, "remote_session_stop", "exited",
+                        ev.exit_code ? std::to_string(*ev.exit_code) : "");
+                }
+            }
+
+            const auto snap = g_remote_session->snapshot();
+            if (snap.state == nstu::server::RemoteSessionState::running ||
+                snap.state == nstu::server::RemoteSessionState::preflighting ||
+                snap.state == nstu::server::RemoteSessionState::launching) {
+                if (control_plane.exam_active(snap.client_id)) {
+                    g_remote_session->stop(nstu::server::RemoteSessionStopReason::exam_started);
+                    dashboard.control_status = tr(
+                        dashboard, "Remote session stopped: exam started.",
+                        "Phiên điều khiển từ xa đã dừng: bắt đầu bài thi.");
+                    control_plane.record_remote_session_audit(
+                        snap.client_id, "remote_session_stop", "stopped", "exam_started");
+                } else {
+                    bool client_online = false;
+                    for (const auto& candidate : clients) {
+                        if (candidate.id == snap.client_id &&
+                            candidate.status != nstu::server::ClientStatus::offline) {
+                            client_online = true;
+                            break;
+                        }
+                    }
+                    if (!client_online) {
+                        g_remote_session->stop(nstu::server::RemoteSessionStopReason::client_offline);
+                        dashboard.control_status = tr(
+                            dashboard, "Remote session stopped: client offline.",
+                            "Phiên điều khiển từ xa đã dừng: máy học sinh ngoại tuyến.");
+                        control_plane.record_remote_session_audit(
+                            snap.client_id, "remote_session_stop", "stopped", "client_offline");
+                    }
+                }
+            }
+        }
+
         // Independent remote-control window: process a pending close (posted by
         // its WM_CLOSE) and otherwise blit the controlled client's latest frame
         // through the shared device's second swap chain.
@@ -3981,6 +4342,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         }
     }
 
+    if (g_remote_session) {
+        g_remote_session->stop(nstu::server::RemoteSessionStopReason::teacher_shutdown);
+        g_remote_session.reset();
+    }
     close_remote_window(control_plane);
     if (dashboard.streaming_client_id != 0) {
         (void)control_plane.set_streaming(dashboard.streaming_client_id, false,

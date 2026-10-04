@@ -1,6 +1,7 @@
 #include "nstu/exam_host.hpp"
 
 #include "nstu/exam_bridge.hpp"
+#include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
 
 #include <windows.h>
@@ -982,6 +983,15 @@ bool same_context(const exam::StateRequest& request,
            request.candidate_id == context.candidate_id;
 }
 
+[[maybe_unused]] bool same_context(const exam::ExamBeginCommand& begin,
+                                   const ContextIdentity& context) {
+    return begin.package_id == context.package_id &&
+           begin.package_digest == context.package_digest &&
+           begin.client_id == context.client_id &&
+           begin.session_id == context.session_id &&
+           begin.candidate_id == context.candidate_id;
+}
+
 [[maybe_unused]] bool parse_answer_event(const JsonValue& root, const ContextIdentity& context,
                         exam::AnswerEvent& output, std::string* error) {
     const auto* value = member(root, "event");
@@ -1127,6 +1137,20 @@ std::string ack_status_name(exam::AnswerAckStatus status) {
            std::to_string(ack.server_time_unix_milliseconds) +
            ",\"eventHashHex\":\"" + hex_string(ack.event_hash) +
            "\",\"stateHashHex\":\"" + hex_string(ack.state_hash) + "\"}}";
+}
+
+[[maybe_unused]] std::string make_begin_json(
+    const exam::ExamBeginCommand& begin) {
+    return "{\"type\":\"exam_begin\",\"begin\":{"
+           "\"packageId\":\"" + json_escape(begin.package_id) +
+           "\",\"packageDigestHex\":\"" + hex_string(begin.package_digest) +
+           "\",\"clientIdHex\":\"" + hex_string(begin.client_id) +
+           "\",\"sessionIdHex\":\"" + hex_string(begin.session_id) +
+           "\",\"candidateId\":\"" + json_escape(begin.candidate_id) +
+           "\",\"serverStartUnixMilliseconds\":" +
+           std::to_string(begin.server_start_unix_milliseconds) +
+           ",\"durationSeconds\":" + std::to_string(begin.duration_seconds) +
+           "}}";
 }
 
 [[maybe_unused]] std::string make_state_json(const exam::StateResponse& response) {
@@ -1437,6 +1461,7 @@ struct ExamHost::Impl {
     HHOOK keyboard_hook = nullptr;
     bool stopping = false;
     std::set<std::string> allowed_package_assets;
+    bool ready_reported = false;
     // Incremented whenever an exam host operation is stopped/restarted.  The
     // WebView2 API completes asynchronously, so callbacks from an older
     // operation must never mutate a newly-started host.
@@ -1990,7 +2015,26 @@ HRESULT on_web_message(ExamHost::Impl& host,
                 {AgentMessageType::exam_state_request, payload});
         }
     } else if (type == "exam_ready") {
-        post_webview_json(host, "{\"type\":\"exam_host_ready\"}");
+        // The page signals that its DOM/assets are usable, but the identity in
+        // the browser message is not trusted. Build ERDY exclusively from the
+        // immutable, native-validated context and emit it at most once.
+        if (!host.ready_reported && host.callbacks.send_to_service) {
+            exam::ExamReadyReport report;
+            report.package_id = host.context.package_id;
+            report.candidate_id = host.context.candidate_id;
+            report.package_digest = host.context.package_digest;
+            report.client_id = host.context.client_id;
+            report.session_id = host.context.session_id;
+            const auto payload = exam::encode_exam_ready_report(report);
+            if (!payload.empty()) {
+                host.callbacks.send_to_service(
+                    {AgentMessageType::exam_ready, payload});
+                host.ready_reported = true;
+                post_webview_json(host, "{\"type\":\"exam_host_ready\"}");
+            } else {
+                notify_status(host, "Exam readiness could not be encoded.");
+            }
+        }
     }
     return S_OK;
 }
@@ -2402,6 +2446,7 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
     impl_->owner = owner;
     impl_->options = options;
     impl_->callbacks = std::move(callbacks);
+    impl_->ready_reported = false;
 #if NSTU_HAS_WEBVIEW2
     impl_->webview_ready = false;
     impl_->last_blocked_resource_notice_ms = 0;
@@ -2587,6 +2632,11 @@ void ExamHost::drain_bridge() {
                 response->session_id == impl_->context.session_id &&
                 response->candidate_id == impl_->context.candidate_id) {
                 post_webview_json(*impl_, make_state_json(*response));
+            }
+        } else if (message->type == AgentMessageType::exam_begin) {
+            const auto begin = exam::decode_exam_begin_command(message->payload);
+            if (begin.has_value() && same_context(*begin, impl_->context)) {
+                post_webview_json(*impl_, make_begin_json(*begin));
             }
         }
     }

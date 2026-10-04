@@ -33,7 +33,44 @@ button { cursor: pointer; }
 button:focus-visible, input:focus-visible, select:focus-visible,
 textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
+[hidden] { display: none !important; }
 .exam-shell { min-height: 100vh; display: flex; flex-direction: column; }
+
+.loading-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: var(--canvas);
+}
+.loading-panel {
+  width: min(520px, 100%);
+  padding: 36px 40px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.loading-panel h1 {
+  margin: 24px 0 10px;
+  font: 600 1.6rem/1.22 Georgia, "Times New Roman", serif;
+}
+.loading-panel p { margin: 0; color: var(--muted); }
+.loading-progress {
+  height: 4px;
+  margin-top: 28px;
+  overflow: hidden;
+  background: var(--border);
+}
+.loading-progress span {
+  display: block;
+  width: 38%;
+  height: 100%;
+  background: var(--accent);
+  animation: loading-slide 1.4s ease-in-out infinite alternate;
+}
+@keyframes loading-slide {
+  from { transform: translateX(0); }
+  to { transform: translateX(164%); }
+}
 
 .topbar {
   display: grid;

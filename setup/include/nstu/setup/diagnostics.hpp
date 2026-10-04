@@ -231,6 +231,43 @@ inline constexpr std::uint32_t kDiagnosticInstallerIssueCloseDelayMs = 6000;
     std::int64_t local_unix_seconds, std::int64_t server_unix_seconds,
     std::int64_t tolerance_seconds = kPairingClockToleranceSeconds) noexcept;
 
+struct RemoteViewerSnapshot {
+    bool present = false;
+    std::filesystem::path path;
+    std::wstring version;
+};
+
+enum class RemoteViewerState : std::uint8_t {
+    ready,
+    missing,
+};
+
+struct StreamHostSnapshot {
+    bool service_present = false;
+    bool service_running = false;
+    bool service_disabled = false;
+    std::uint32_t start_type = 0;
+    std::filesystem::path binary_path;
+    std::wstring version;
+};
+
+enum class StreamHostState : std::uint8_t {
+    ready_running,
+    ready_demand,
+    service_missing,
+    service_disabled,
+};
+
+[[nodiscard]] RemoteViewerState classify_remote_viewer(
+    const RemoteViewerSnapshot& snapshot) noexcept;
+[[nodiscard]] StreamHostState classify_stream_host(
+    const StreamHostSnapshot& snapshot) noexcept;
+
+[[nodiscard]] DiagnosticResult check_remote_viewer(
+    const DiagnosticOptions& options);
+[[nodiscard]] DiagnosticResult check_stream_host(
+    const DiagnosticOptions& options);
+
 [[nodiscard]] std::vector<DiagnosticCheck> diagnostic_checks(
     const DiagnosticOptions& options);
 

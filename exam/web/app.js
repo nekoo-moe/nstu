@@ -68,6 +68,8 @@
   const I18N = {
     en: {
       computerBasedAssessment: "Computer-based assessment", timeRemaining: "Time remaining",
+      loadingDocuments: "Loading exam documents",
+      waitingForClass: "Waiting for every computer to be ready. The timer has not started.",
       settings: "Settings", submit: "Submit", ready: "Ready", localSession: "Local session",
       questions: "Questions", downloadResponse: "Download response", previous: "Previous", next: "Next",
       pdf: "PDF", notes: "Notes", noPdf: "No PDF attached",
@@ -87,6 +89,8 @@
     },
     vi: {
       computerBasedAssessment: "Bài thi trên máy tính", timeRemaining: "Thời gian còn lại",
+      loadingDocuments: "Đang tải tài liệu bài thi",
+      waitingForClass: "Đang chờ tất cả máy tính sẵn sàng. Đồng hồ chưa bắt đầu.",
       settings: "Cài đặt", submit: "Nộp bài", ready: "Sẵn sàng", localSession: "Phiên cục bộ",
       questions: "Câu hỏi", downloadResponse: "Tải câu trả lời", previous: "Trước", next: "Sau",
       pdf: "PDF", notes: "Ghi chú", noPdf: "Chưa có PDF đính kèm",
@@ -294,7 +298,8 @@
       candidateId: candidateId.indexOf("\0") === -1 ? candidateId : "",
       nextSequence: Number.isSafeInteger(source.nextSequence) && source.nextSequence > 0
         ? source.nextSequence
-        : 1
+        : 1,
+      synchronizedStart: source.synchronizedStart === true
     });
   }
 
@@ -866,7 +871,10 @@
     finalizeRequested: false,
     syncError: "",
     stateChunks: null,
-    serverFinalized: false
+    serverFinalized: false,
+    started: examContext.synchronizedStart !== true,
+    serverStartUnixMilliseconds: 0,
+    activeDurationSeconds: manifest.durationSeconds
   };
   function adoptTrustedContextCursor() {
     const durable = state.durable;
@@ -897,10 +905,10 @@
   const question = () => manifest.questions[state.index];
 
   function updateSubmissionLock() {
-    const locked = state.serverFinalized === true ||
-      state.finalizeRequested === true ||
-      hasLocalFinalization(state.durable);
-    state.submitted = locked;
+    const finalized = state.serverFinalized === true ||
+      state.finalizeRequested === true || hasLocalFinalization(state.durable);
+    const locked = state.started !== true || finalized;
+    state.submitted = finalized;
     document.querySelectorAll("button, input, textarea, select").forEach((node) => {
       node.disabled = locked;
     });
@@ -2197,6 +2205,35 @@
       }
       beginStateReconcile();
       flushAnswerBridge();
+    } else if (message.type === "exam_begin") {
+      const begin = message.begin && typeof message.begin === "object"
+        ? message.begin : message;
+      const duration = Number(begin.durationSeconds);
+      const start = Number(begin.serverStartUnixMilliseconds);
+      if (begin.packageId !== manifest.id ||
+          begin.packageId !== examContext.packageId ||
+          normalizeNonZeroHex(begin.packageDigestHex, 32) !== examContext.packageDigestHex ||
+          normalizeNonZeroHex(begin.clientIdHex, 16) !== examContext.clientIdHex ||
+          normalizeNonZeroHex(begin.sessionIdHex, 16) !== examContext.sessionIdHex ||
+          begin.candidateId !== examContext.candidateId ||
+          !Number.isSafeInteger(start) || start <= 0 ||
+          !Number.isSafeInteger(duration) || duration < 0 || duration > 86400) {
+        setConnectionStatus("Exam start did not match this session");
+        return;
+      }
+      state.activeDurationSeconds = duration === 0
+        ? manifest.durationSeconds : duration;
+      state.serverStartUnixMilliseconds = start;
+      state.remainingSeconds = Math.max(0,
+        state.activeDurationSeconds - Math.max(0,
+          Math.floor((Date.now() - start) / 1000)));
+      state.started = true;
+      el("loading-screen").hidden = true;
+      el("loading-screen").setAttribute("aria-busy", "false");
+      el("exam-shell").hidden = false;
+      updateSubmissionLock();
+      updateTimer();
+      if (state.remainingSeconds === 0) submitResponse();
     } else if (message.type === "exam_answer_ack") {
       handleAnswerAck(message);
     } else if (message.type === "exam_state_response") {
@@ -2447,8 +2484,12 @@
   }
 
   function tick() {
-    if (state.submitted) return;
-    const nextRemainingSeconds = Math.max(0, state.remainingSeconds - 1);
+    if (!state.started || state.submitted) return;
+    const elapsedSeconds = state.serverStartUnixMilliseconds > 0
+      ? Math.max(0, Math.floor((Date.now() - state.serverStartUnixMilliseconds) / 1000))
+      : Math.max(0, state.activeDurationSeconds - state.remainingSeconds + 1);
+    const nextRemainingSeconds = Math.max(0,
+      state.activeDurationSeconds - elapsedSeconds);
     if (!writeStorage(`${storageKey}:remaining`, String(nextRemainingSeconds))) {
       state.syncError = "Answer recovery storage is unavailable.";
       setConnectionStatus(state.syncError);
@@ -2604,8 +2645,13 @@
   el("exam-title").textContent = manifest.title || DEFAULT_MANIFEST.title;
   el("exam-subject").textContent = manifest.subject || DEFAULT_MANIFEST.subject;
   el("candidate-label").textContent = `${text("candidate")}: ${examContext.candidateId || "—"}`;
+  const synchronizedStart = Boolean(hostWebView() && examContext.synchronizedStart);
+  state.started = !synchronizedStart;
+  el("loading-screen").hidden = !synchronizedStart;
+  el("exam-shell").hidden = synchronizedStart;
   bindEvents();
   applyLanguage();
+  updateSubmissionLock();
   updateTimer();
   window.setInterval(tick, 1000);
 }());

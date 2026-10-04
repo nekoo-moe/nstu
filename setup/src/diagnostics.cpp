@@ -18,6 +18,7 @@
 #include <winsvc.h>
 #include <wrl/client.h>
 #include <winevt.h>
+#include <winver.h>
 
 #include <algorithm>
 #include <array>
@@ -1893,6 +1894,111 @@ DiagnosticResult check_registry() {
                   L"Các giá trị registry NSTU được tài liệu hóa có thể đọc.");
 }
 
+std::wstring query_file_version_string(const std::filesystem::path& path) {
+    if (path.empty()) return {};
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec) {
+        return {};
+    }
+    const auto path_str = path.wstring();
+    DWORD dummy = 0;
+    const DWORD size = GetFileVersionInfoSizeW(path_str.c_str(), &dummy);
+    if (size == 0) return {};
+    std::vector<std::byte> buffer(size);
+    if (!GetFileVersionInfoW(path_str.c_str(), 0, size, buffer.data())) {
+        return {};
+    }
+    struct LANGANDCODEPAGE {
+        WORD wLanguage;
+        WORD wCodePage;
+    } *translate = nullptr;
+    UINT cbTranslate = 0;
+    if (VerQueryValueW(buffer.data(), L"\\VarFileInfo\\Translation",
+                       reinterpret_cast<void**>(&translate), &cbTranslate) &&
+        cbTranslate >= sizeof(LANGANDCODEPAGE) && translate != nullptr) {
+        std::wostringstream block_stream;
+        block_stream << L"\\StringFileInfo\\"
+                     << std::hex << std::setw(4) << std::setfill(L'0') << translate[0].wLanguage
+                     << std::setw(4) << std::setfill(L'0') << translate[0].wCodePage
+                     << L"\\ProductVersion";
+        const auto sub_block = block_stream.str();
+        wchar_t* product_ver = nullptr;
+        UINT ver_len = 0;
+        if (VerQueryValueW(buffer.data(), sub_block.c_str(),
+                           reinterpret_cast<void**>(&product_ver), &ver_len) &&
+            product_ver != nullptr && ver_len > 0) {
+            std::wstring ver_str(product_ver);
+            if (!ver_str.empty()) {
+                return ver_str;
+            }
+        }
+    }
+    VS_FIXEDFILEINFO* ffi = nullptr;
+    UINT len = 0;
+    if (VerQueryValueW(buffer.data(), L"\\", reinterpret_cast<void**>(&ffi), &len) &&
+        len >= sizeof(VS_FIXEDFILEINFO) && ffi != nullptr) {
+        std::wstring version = std::to_wstring(HIWORD(ffi->dwFileVersionMS)) + L"." +
+                               std::to_wstring(LOWORD(ffi->dwFileVersionMS)) + L"." +
+                               std::to_wstring(HIWORD(ffi->dwFileVersionLS));
+        if (LOWORD(ffi->dwFileVersionLS) != 0) {
+            version += L"." + std::to_wstring(LOWORD(ffi->dwFileVersionLS));
+        }
+        return version;
+    }
+    return {};
+}
+
+std::filesystem::path find_remote_viewer_path() {
+    wchar_t env_buffer[MAX_PATH]{};
+    const DWORD env_len =
+        GetEnvironmentVariableW(L"NSTU_REMOTE_CLIENT_PATH", env_buffer, MAX_PATH);
+    if (env_len > 0 && env_len < MAX_PATH) {
+        std::error_code ec;
+        const std::filesystem::path path(env_buffer);
+        if (std::filesystem::is_regular_file(path, ec) && !ec) {
+            return path;
+        }
+    }
+    const DWORD ml_len =
+        GetEnvironmentVariableW(L"MOONLIGHT_PATH", env_buffer, MAX_PATH);
+    if (ml_len > 0 && ml_len < MAX_PATH) {
+        std::error_code ec;
+        const std::filesystem::path path(env_buffer);
+        if (std::filesystem::is_regular_file(path, ec) && !ec) {
+            return path;
+        }
+    }
+
+    wchar_t prog_files[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"ProgramFiles", prog_files, MAX_PATH) > 0) {
+        std::error_code ec;
+        const auto candidate = std::filesystem::path(prog_files) /
+                               L"Moonlight Game Streaming" / L"Moonlight.exe";
+        if (std::filesystem::is_regular_file(candidate, ec) && !ec) {
+            return candidate;
+        }
+    }
+    wchar_t prog_files_x86[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"ProgramFiles(x86)", prog_files_x86, MAX_PATH) > 0) {
+        std::error_code ec;
+        const auto candidate = std::filesystem::path(prog_files_x86) /
+                               L"Moonlight Game Streaming" / L"Moonlight.exe";
+        if (std::filesystem::is_regular_file(candidate, ec) && !ec) {
+            return candidate;
+        }
+    }
+    wchar_t local_app_data[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"LocalAppData", local_app_data, MAX_PATH) > 0) {
+        std::error_code ec;
+        const auto candidate = std::filesystem::path(local_app_data) /
+                               L"Moonlight Game Streaming" / L"Moonlight.exe";
+        if (std::filesystem::is_regular_file(candidate, ec) && !ec) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
 } // namespace
 
 UwfState classify_uwf(const UwfProbeSnapshot& snapshot) noexcept {
@@ -2002,6 +2108,181 @@ ClockSkewAssessment classify_clock_skew(std::int64_t local_unix_seconds,
     return {ClockSkewState::in_tolerance, skew};
 }
 
+RemoteViewerState classify_remote_viewer(
+    const RemoteViewerSnapshot& snapshot) noexcept {
+    return snapshot.present ? RemoteViewerState::ready
+                            : RemoteViewerState::missing;
+}
+
+StreamHostState classify_stream_host(
+    const StreamHostSnapshot& snapshot) noexcept {
+    if (!snapshot.service_present) {
+        return StreamHostState::service_missing;
+    }
+    if (snapshot.service_disabled) {
+        return StreamHostState::service_disabled;
+    }
+    if (snapshot.service_running) {
+        return StreamHostState::ready_running;
+    }
+    return StreamHostState::ready_demand;
+}
+
+DiagnosticResult check_remote_viewer(const DiagnosticOptions& options) {
+    if (options.role != DiagnosticRole::server) {
+        return result("remote_viewer", DiagnosticSeverity::not_applicable,
+                      L"Remote viewer", L"Trình xem điều khiển từ xa",
+                      L"Remote viewer verification is applicable only to the server role.",
+                      L"Xác minh trình xem điều khiển từ xa chỉ áp dụng cho vai trò server.");
+    }
+    RemoteViewerSnapshot snapshot;
+    snapshot.path = find_remote_viewer_path();
+    snapshot.present = !snapshot.path.empty();
+    if (snapshot.present) {
+        snapshot.version = query_file_version_string(snapshot.path);
+    }
+    const auto state = classify_remote_viewer(snapshot);
+    if (state == RemoteViewerState::ready) {
+        std::wstring detail_en = L"Remote viewer executable found at '" +
+                                 snapshot.path.wstring() + L"'";
+        std::wstring detail_vi = L"Đã tìm thấy trình xem điều khiển từ xa tại '" +
+                                 snapshot.path.wstring() + L"'";
+        if (!snapshot.version.empty()) {
+            detail_en += L" (version " + snapshot.version + L").";
+            detail_vi += L" (phiên bản " + snapshot.version + L").";
+        } else {
+            detail_en += L".";
+            detail_vi += L".";
+        }
+        return result("remote_viewer", DiagnosticSeverity::pass,
+                      L"Remote viewer", L"Trình xem điều khiển từ xa",
+                      std::move(detail_en), std::move(detail_vi));
+    }
+    return result(
+        "remote_viewer", DiagnosticSeverity::warning,
+        L"Remote viewer", L"Trình xem điều khiển từ xa",
+        L"Remote viewer executable (Moonlight) was not found. High-performance desktop streaming is unavailable; fallback remote will be used.",
+        L"Không tìm thấy trình xem điều khiển từ xa (Moonlight). Tính năng truyền phát màn hình hiệu năng cao sẽ không khả dụng; chế độ điều khiển cũ sẽ được sử dụng.",
+        L"Install Moonlight Game Streaming to 'C:\\Program Files\\Moonlight Game Streaming\\Moonlight.exe' or configure the NSTU_REMOTE_CLIENT_PATH environment variable.",
+        L"Cài đặt Moonlight Game Streaming vào 'C:\\Program Files\\Moonlight Game Streaming\\Moonlight.exe' hoặc cấu hình biến môi trường NSTU_REMOTE_CLIENT_PATH.",
+        40);
+}
+
+DiagnosticResult check_stream_host(const DiagnosticOptions& options) {
+    if (options.role != DiagnosticRole::client) {
+        return result("stream_host", DiagnosticSeverity::not_applicable,
+                      L"Stream host service", L"Dịch vụ truyền phát host",
+                      L"Stream host service verification is applicable only to the client role.",
+                      L"Xác minh dịch vụ truyền phát host chỉ áp dụng cho vai trò client.");
+    }
+    StreamHostSnapshot snapshot;
+    SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    SC_HANDLE service = manager == nullptr
+        ? nullptr
+        : OpenServiceW(manager, L"SunshineService",
+                       SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS);
+    if (service != nullptr) {
+        snapshot.service_present = true;
+        SERVICE_STATUS_PROCESS status{};
+        DWORD bytes = 0;
+        if (QueryServiceStatusEx(
+                service, SC_STATUS_PROCESS_INFO,
+                reinterpret_cast<BYTE*>(&status), sizeof(status), &bytes) != FALSE) {
+            snapshot.service_running = (status.dwCurrentState == SERVICE_RUNNING);
+        }
+        DWORD required = 0;
+        QueryServiceConfigW(service, nullptr, 0, &required);
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && required > 0) {
+            std::vector<std::byte> buffer(required);
+            auto* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data());
+            if (QueryServiceConfigW(service, config, required, &required)) {
+                snapshot.start_type = config->dwStartType;
+                snapshot.service_disabled = (config->dwStartType == SERVICE_DISABLED);
+                if (config->lpBinaryPathName != nullptr) {
+                    std::wstring raw_path = config->lpBinaryPathName;
+                    if (raw_path.size() >= 2 && raw_path.front() == L'"') {
+                        const auto end_quote = raw_path.find(L'"', 1);
+                        if (end_quote != std::wstring::npos) {
+                            raw_path = raw_path.substr(1, end_quote - 1);
+                        }
+                    }
+                    snapshot.binary_path = raw_path;
+                }
+            }
+        }
+        CloseServiceHandle(service);
+    }
+    if (manager != nullptr) {
+        CloseServiceHandle(manager);
+    }
+
+    if (!snapshot.binary_path.empty()) {
+        snapshot.version = query_file_version_string(snapshot.binary_path);
+    } else {
+        wchar_t prog_files[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"ProgramFiles", prog_files, MAX_PATH) > 0) {
+            std::error_code ec;
+            const auto candidate = std::filesystem::path(prog_files) /
+                                   L"LizardByte" / L"Sunshine" / L"sunshine.exe";
+            if (std::filesystem::is_regular_file(candidate, ec) && !ec) {
+                snapshot.binary_path = candidate;
+                snapshot.version = query_file_version_string(candidate);
+            }
+        }
+    }
+
+    const auto state = classify_stream_host(snapshot);
+    switch (state) {
+    case StreamHostState::ready_running: {
+        std::wstring detail_en = L"SunshineService is installed and running";
+        std::wstring detail_vi = L"SunshineService đã được cài đặt và đang chạy";
+        if (!snapshot.version.empty()) {
+            detail_en += L" (version " + snapshot.version + L").";
+            detail_vi += L" (phiên bản " + snapshot.version + L").";
+        } else {
+            detail_en += L".";
+            detail_vi += L".";
+        }
+        return result("stream_host", DiagnosticSeverity::pass,
+                      L"Stream host service", L"Dịch vụ truyền phát host",
+                      std::move(detail_en), std::move(detail_vi));
+    }
+    case StreamHostState::ready_demand: {
+        std::wstring detail_en = L"SunshineService is installed and configured for on-demand start by nstu-service";
+        std::wstring detail_vi = L"SunshineService đã được cài đặt và được cấu hình để khởi động theo yêu cầu bởi nstu-service";
+        if (!snapshot.version.empty()) {
+            detail_en += L" (version " + snapshot.version + L").";
+            detail_vi += L" (phiên bản " + snapshot.version + L").";
+        } else {
+            detail_en += L".";
+            detail_vi += L".";
+        }
+        return result("stream_host", DiagnosticSeverity::pass,
+                      L"Stream host service", L"Dịch vụ truyền phát host",
+                      std::move(detail_en), std::move(detail_vi));
+    }
+    case StreamHostState::service_disabled:
+        return result(
+            "stream_host", DiagnosticSeverity::warning,
+            L"Stream host service", L"Dịch vụ truyền phát host",
+            L"SunshineService is installed but disabled. It cannot be started on demand.",
+            L"SunshineService đã được cài đặt nhưng bị vô hiệu hóa (disabled). Không thể khởi động theo yêu cầu.",
+            L"Set SunshineService startup type to Manual or Automatic in Windows Services.",
+            L"Đặt chế độ khởi động của SunshineService thành Manual hoặc Automatic trong Windows Services.",
+            42);
+    case StreamHostState::service_missing:
+    default:
+        return result(
+            "stream_host", DiagnosticSeverity::warning,
+            L"Stream host service", L"Dịch vụ truyền phát host",
+            L"SunshineService is not installed or cannot be queried. Screen streaming host is unavailable.",
+            L"SunshineService chưa được cài đặt hoặc không thể truy vấn. Host truyền phát màn hình không khả dụng.",
+            L"Install LizardByte Sunshine (pinned release 2026.914.233613) and ensure SunshineService is registered.",
+            L"Cài đặt LizardByte Sunshine (phiên bản ghim 2026.914.233613) và đảm bảo SunshineService đã được đăng ký.",
+            41);
+    }
+}
+
 std::vector<DiagnosticCheck> diagnostic_checks(const DiagnosticOptions&) {
     std::vector<DiagnosticCheck> checks = {
         {"os", L"Operating system", L"Hệ điều hành"},
@@ -2023,6 +2304,8 @@ std::vector<DiagnosticCheck> diagnostic_checks(const DiagnosticOptions&) {
         {"pairing_discovery", L"Server discovery", L"Dò tìm server"},
     };
     checks.push_back({"service", L"Client runtime", L"Tiến trình client"});
+    checks.push_back({"remote_viewer", L"Remote viewer", L"Trình xem điều khiển từ xa"});
+    checks.push_back({"stream_host", L"Stream host service", L"Dịch vụ truyền phát host"});
     return checks;
 }
 
@@ -2079,6 +2362,8 @@ void run_startup_diagnostics(const DiagnosticOptions& options,
     run_named("pairing_discovery",
               [&] { return check_pairing_discovery(options); });
     run_named("service", [&] { return check_service(options); });
+    run_named("remote_viewer", [&] { return check_remote_viewer(options); });
+    run_named("stream_host", [&] { return check_stream_host(options); });
 }
 
 std::string json_escape(std::wstring_view value) {

@@ -280,15 +280,62 @@ int main() {
     // The MSVC diagnostics library must decode UTF-8 source independently of
     // the developer machine's active ANSI code page.
     assert(checks.front().title_vi == L"H\u1ec7 \u0111i\u1ec1u h\u00e0nh");
-    constexpr std::array<const char*, 18> expected_ids = {
+    constexpr std::array<const char*, 20> expected_ids = {
         "os",          "uwf",          "uwf_volumes",  "uwf_exclusions",
         "uwf_overlay", "uwf_events",   "safe_mode",    "installation",
         "registry",    "hardware",     "network",      "graphics",
         "encoder",     "time",         "internet",     "server",
-        "pairing_discovery",           "service"};
+        "pairing_discovery",           "service",      "remote_viewer",
+        "stream_host"};
     assert(checks.size() == expected_ids.size());
     for (std::size_t index = 0; index < expected_ids.size(); ++index) {
         assert(checks[index].id == expected_ids[index]);
+    }
+
+    {
+        nstu::setup::RemoteViewerSnapshot viewer;
+        assert(nstu::setup::classify_remote_viewer(viewer) ==
+               nstu::setup::RemoteViewerState::missing);
+        viewer.present = true;
+        assert(nstu::setup::classify_remote_viewer(viewer) ==
+               nstu::setup::RemoteViewerState::ready);
+    }
+    {
+        nstu::setup::StreamHostSnapshot host;
+        assert(nstu::setup::classify_stream_host(host) ==
+               nstu::setup::StreamHostState::service_missing);
+        host.service_present = true;
+        assert(nstu::setup::classify_stream_host(host) ==
+               nstu::setup::StreamHostState::ready_demand);
+        host.service_running = true;
+        assert(nstu::setup::classify_stream_host(host) ==
+               nstu::setup::StreamHostState::ready_running);
+        host.service_disabled = true;
+        assert(nstu::setup::classify_stream_host(host) ==
+               nstu::setup::StreamHostState::service_disabled);
+    }
+    {
+        nstu::setup::DiagnosticOptions client_opts;
+        client_opts.role = nstu::setup::DiagnosticRole::client;
+        const auto rv_client = nstu::setup::check_remote_viewer(client_opts);
+        assert(rv_client.id == "remote_viewer");
+        assert(rv_client.severity == nstu::setup::DiagnosticSeverity::not_applicable);
+
+        nstu::setup::DiagnosticOptions server_opts;
+        server_opts.role = nstu::setup::DiagnosticRole::server;
+        const auto sh_server = nstu::setup::check_stream_host(server_opts);
+        assert(sh_server.id == "stream_host");
+        assert(sh_server.severity == nstu::setup::DiagnosticSeverity::not_applicable);
+
+        const auto rv_server = nstu::setup::check_remote_viewer(server_opts);
+        assert(rv_server.id == "remote_viewer");
+        assert(rv_server.severity == nstu::setup::DiagnosticSeverity::pass ||
+               rv_server.severity == nstu::setup::DiagnosticSeverity::warning);
+
+        const auto sh_client = nstu::setup::check_stream_host(client_opts);
+        assert(sh_client.id == "stream_host");
+        assert(sh_client.severity == nstu::setup::DiagnosticSeverity::pass ||
+               sh_client.severity == nstu::setup::DiagnosticSeverity::warning);
     }
     return 0;
 }

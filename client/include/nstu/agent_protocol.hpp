@@ -61,6 +61,14 @@ enum class AgentMessageType : std::uint16_t {
     // teacher server, 0 == not connected. The agent gates the chat window on
     // this so chat only opens once a teacher is actually reachable.
     server_online = 32,
+    // Synchronized exam start barrier. The agent reports exam_ready once the
+    // package is staged, verified, and the kiosk is up and showing the loading
+    // screen; the service relays it to the server. The server holds the cohort
+    // until everyone is ready (or a quorum/timeout) and then sends exam_begin
+    // with the authoritative start time, which the service relays back here so
+    // every machine reveals the questions together.
+    exam_ready = 33,
+    exam_begin = 34,
 };
 
 struct AgentMessage {

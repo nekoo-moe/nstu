@@ -4,6 +4,7 @@
 #include "nstu/exam_sync.hpp"
 #include "nstu/multicast.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstddef>
@@ -172,6 +173,42 @@ int main() {
     uwf_verified.detail = "UWF protects this session";
     assert(registry.set_uwf_fleet_status(registry_id, uwf_verified));
 
+    // The teacher UI supplies package/candidate fields only. The control plane
+    // must bind the authenticated client identity and mint a fresh session so
+    // UI code cannot accidentally authorize another client or reuse a session.
+    nstu::server::ExamLaunchRequest launch;
+    launch.package_root = "C:/ProgramData/NSTU/exams/packages/auth-test/";
+    launch.web_root = launch.package_root + "exam/web";
+    launch.user_data_root =
+        "C:/ProgramData/NSTU/exam-user-data/candidate-auth-ui";
+    launch.package_id = "auth-test-package";
+    launch.candidate_id = "candidate-auth-ui";
+    for (std::size_t index = 0; index < launch.package_digest.size(); ++index) {
+        launch.package_digest[index] = static_cast<std::byte>(0x60u + index);
+    }
+    assert(control_plane.launch_exam(registry_id, launch, &error));
+    const auto launched_command = channel->receive(&error);
+    assert(launched_command.has_value());
+    const auto launched =
+        nstu::exam::decode_exam_start_request(launched_command->payload);
+    assert(launched.has_value());
+    assert(launched->client_id == id);
+    assert(launched->package_id == launch.package_id);
+    assert(launched->candidate_id == launch.candidate_id);
+    assert(std::any_of(launched->session_id.begin(), launched->session_id.end(),
+                       [](std::byte value) { return value != std::byte{0}; }));
+    const auto launched_states = control_plane.exam_client_states();
+    assert(launched_states.size() == 1);
+    assert(launched_states.front().client_id == registry_id);
+    assert(!launched_states.front().ready);
+    assert(!launched_states.front().begun);
+    assert(control_plane.stop_exam(registry_id, &error));
+    const auto launched_stop = channel->receive(&error);
+    assert(launched_stop.has_value());
+    assert(launched_stop->envelope.type ==
+           nstu::protocol::CommandType::exam_stop);
+    assert(control_plane.exam_client_states().empty());
+
     const auto start = make_start(id);
     assert(control_plane.start_exam(registry_id, start, &error));
     const auto start_command = channel->receive(&error);
@@ -213,6 +250,50 @@ int main() {
     assert(decoded_state->session_id == start.session_id);
     assert(decoded_state->answers.size() == 1);
 
+    // The synchronized start is gated on readiness. Releasing a client that has
+    // not reported exam_ready would hand it a running clock while its package is
+    // still staging, so begin_exam must refuse until the report arrives.
+    error.clear();
+    assert(!control_plane.begin_exam(registry_id, 3600, &error));
+    assert(!error.empty());
+
+    // Synchronized-start barrier: a matching exam_ready marks the client ready,
+    // and begin_exam then sends it an authoritative exam_begin.
+    nstu::exam::ExamReadyReport ready;
+    ready.package_id = start.package_id;
+    ready.candidate_id = start.candidate_id;
+    ready.package_digest = start.package_digest;
+    ready.client_id = start.client_id;
+    ready.session_id = start.session_id;
+    const auto ready_wire = nstu::exam::encode_exam_ready_report(ready);
+    assert(!ready_wire.empty());
+    assert(channel->send(nstu::protocol::CommandType::exam_ready, 12, ready_wire,
+                         &error));
+    assert(wait_until([&] {
+        const auto clients = control_plane.ready_exam_clients();
+        return std::find(clients.begin(), clients.end(), registry_id) !=
+               clients.end();
+    }));
+    assert(control_plane.begin_exam(registry_id, 3600, &error));
+    const auto begin_command = channel->receive(&error);
+    assert(begin_command.has_value());
+    assert(begin_command->envelope.type ==
+           nstu::protocol::CommandType::exam_begin);
+    const auto decoded_begin =
+        nstu::exam::decode_exam_begin_command(begin_command->payload);
+    assert(decoded_begin.has_value());
+    assert(decoded_begin->package_id == start.package_id);
+    assert(decoded_begin->session_id == start.session_id);
+    assert(decoded_begin->duration_seconds == 3600);
+    assert(decoded_begin->server_start_unix_milliseconds != 0);
+
+    // The release is single-use. A repeated begin_exam would mint a later start
+    // timestamp and silently restart the candidate's clock, desynchronizing the
+    // cohort the barrier exists to keep together, so it must be refused.
+    error.clear();
+    assert(!control_plane.begin_exam(registry_id, 3600, &error));
+    assert(!error.empty());
+
     const auto accepted_hash = nstu::exam::hash_answer_event(accepted_event);
     assert(accepted_hash.has_value());
 
@@ -225,7 +306,7 @@ int main() {
     const auto mismatched_wire =
         nstu::exam::encode_answer_event(mismatched_event);
     assert(!mismatched_wire.empty());
-    assert(channel->send(nstu::protocol::CommandType::exam_answer_event, 12,
+    assert(channel->send(nstu::protocol::CommandType::exam_answer_event, 13,
                          mismatched_wire, &error));
     error.clear();
     assert(!channel->receive(&error).has_value());
