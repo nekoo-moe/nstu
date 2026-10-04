@@ -7,6 +7,7 @@ add_library(nstu_client_platform STATIC
     src/client_uwf_request.cpp
     src/exam_bridge.cpp
     src/exam_host.cpp
+    src/exam_lockdown_controller.cpp
     src/exam_profile.cpp
     src/named_pipe.cpp
     src/session.cpp

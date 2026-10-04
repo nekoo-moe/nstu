@@ -69,6 +69,9 @@ enum class AgentMessageType : std::uint16_t {
     // every machine reveals the questions together.
     exam_ready = 33,
     exam_begin = 34,
+    // Agent UI-thread liveness signal. Emitted every 10s during preparing,
+    // initializing, and running states to refresh the service lockdown watchdog.
+    exam_alive = 35,
 };
 
 struct AgentMessage {

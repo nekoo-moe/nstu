@@ -10,6 +10,12 @@
     "subject": { "type": "string", "maxLength": 120 },
     "candidate": { "type": "string", "maxLength": 160 },
     "durationSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+    "allowedOrigins": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+    },
     "documents": {
       "type": "array",
       "items": { "type": "object", "required": ["id", "url"], "properties": {

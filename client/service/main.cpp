@@ -8,12 +8,15 @@
 #include "nstu/control_messages.hpp"
 #include "nstu/deployment.hpp"
 #include "nstu/exam_control.hpp"
+#include "nstu/exam_host.hpp"
+#include "nstu/exam_lockdown_controller.hpp"
 #include "nstu/exam_sync.hpp"
 #include "nstu/session.hpp"
 #include "nstu/service_install.hpp"
 #include "nstu/setup/diagnostics.hpp"
 #include "nstu/setup/uwf.hpp"
 #include "nstu/stream_host_service.hpp"
+#include "nstu/wfp_allowlist.hpp"
 
 #include <windows.h>
 #include <reason.h>
@@ -101,6 +104,16 @@ std::uint64_t g_fleet_operation_id = 0;
 std::mutex g_server_endpoint_mutex;
 std::string g_server_address;
 std::uint16_t g_server_port = 0;
+nstu::net::WfpWebsiteAllowlist g_wfp_allowlist;
+nstu::client::ExamLockdownController g_exam_lockdown_controller(
+    [](const nstu::net::WfpAllowlistConfig& config, std::string* error) {
+        return g_wfp_allowlist.apply(config, error);
+    },
+    [](std::string* error) {
+        return g_wfp_allowlist.clear(error);
+    });
+std::mutex g_exam_arm_worker_mutex;
+std::jthread g_exam_arm_worker;
 nstu::client::StreamHostSupervisor g_stream_host_supervisor;
 std::atomic_bool g_agent_locked = false;
 std::atomic_bool g_agent_streaming = false;
@@ -319,20 +332,23 @@ void clear_agent_queue() {
 }
 
 void queue_exam_stop() {
-    std::scoped_lock lock(g_agent_queue_mutex);
-    // A stop is a terminal boundary for the current authenticated session.
-    // Remove stale start/stop commands so a reconnect cannot resurrect an old
-    // exam before the fail-closed stop is delivered.
-    std::erase_if(g_agent_queue, [](const auto& message) {
-        return message.type == nstu::client::AgentMessageType::exam_start ||
-               message.type == nstu::client::AgentMessageType::exam_begin ||
-               message.type == nstu::client::AgentMessageType::exam_stop;
-    });
-    if (g_agent_queue.size() >= kMaximumQueuedAgentMessages) {
-        g_agent_queue.pop_front();
+    {
+        std::scoped_lock lock(g_agent_queue_mutex);
+        // A stop is a terminal boundary for the current authenticated session.
+        // Remove stale start/stop commands so a reconnect cannot resurrect an old
+        // exam before the fail-closed stop is delivered.
+        std::erase_if(g_agent_queue, [](const auto& message) {
+            return message.type == nstu::client::AgentMessageType::exam_start ||
+                   message.type == nstu::client::AgentMessageType::exam_begin ||
+                   message.type == nstu::client::AgentMessageType::exam_stop;
+        });
+        if (g_agent_queue.size() >= kMaximumQueuedAgentMessages) {
+            g_agent_queue.pop_front();
+        }
+        g_agent_queue.push_back(
+            {nstu::client::AgentMessageType::exam_stop, {}});
     }
-    g_agent_queue.push_back(
-        {nstu::client::AgentMessageType::exam_stop, {}});
+    g_exam_lockdown_controller.disarm();
 }
 
 void clear_exam_ingress() {
@@ -357,6 +373,7 @@ void set_configured_client_id(const nstu::security::ClientId& client_id) {
         clear_outbound_queue();
         clear_exam_ingress();
         clear_agent_queue();
+        g_exam_lockdown_controller.disarm();
     }
 }
 
@@ -373,6 +390,7 @@ void clear_configured_client_id() {
         clear_outbound_queue();
         clear_exam_ingress();
         clear_agent_queue();
+        g_exam_lockdown_controller.disarm();
     }
 }
 
@@ -857,6 +875,12 @@ void agent_pipe_loop() {
                             nstu::protocol::CommandType::client_chat,
                             std::move(message->payload));
                     }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::exam_alive) {
+                    const auto now_ms = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count());
+                    g_exam_lockdown_controller.heartbeat(now_ms);
                 }
             }
             Sleep(25);
@@ -1398,6 +1422,162 @@ void configure_uwf_fleet_async(std::uint64_t operation_id,
     }
 }
 
+std::string bytes_to_hex(std::span<const std::byte> bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (const auto byte : bytes) {
+        const auto value = std::to_integer<unsigned int>(byte);
+        result.push_back(digits[(value >> 4u) & 0x0fu]);
+        result.push_back(digits[value & 0x0fu]);
+    }
+    return result;
+}
+
+std::filesystem::path utf8_to_path(std::string_view text) {
+    if (text.empty()) {
+        return {};
+    }
+    const int length = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+        static_cast<int>(text.size()), nullptr, 0);
+    if (length <= 0) {
+        return {};
+    }
+    std::wstring wide(static_cast<std::size_t>(length), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                            static_cast<int>(text.size()), wide.data(),
+                            length) != length) {
+        return {};
+    }
+    return std::filesystem::path(wide);
+}
+
+void run_exam_arm_worker(
+    std::uint64_t token,
+    nstu::exam::ExamStartRequest request,
+    nstu::security::ClientId configured_client_id) {
+    try {
+        std::string data_root_error;
+        const auto data_root = nstu::deployment::data_root(&data_root_error);
+        if (data_root.empty()) {
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "exam_lockdown",
+                       "verify_package", "failed",
+                       "data root unavailable: " + data_root_error);
+            return;
+        }
+
+        const auto package_root = utf8_to_path(request.package_root);
+        const auto web_root = utf8_to_path(request.web_root);
+        if (package_root.empty() ||
+            (!request.web_root.empty() && web_root.empty())) {
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "exam_lockdown",
+                       "verify_package", "failed",
+                       "package or web root is not valid UTF-8");
+            return;
+        }
+
+        std::string path_error;
+        if (!nstu::client::validate_exam_path_policy(
+                data_root, package_root, web_root, {}, &path_error)) {
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "exam_lockdown",
+                       "verify_package", "failed",
+                       "path policy rejected: " + path_error);
+            return;
+        }
+
+        nstu::client::ExamPackageReport report;
+        std::string inspect_error;
+        const std::string digest_hex = bytes_to_hex(request.package_digest);
+        if (!nstu::client::inspect_exam_package(
+                package_root, web_root, digest_hex,
+                /*require_digest=*/true, report, &inspect_error)) {
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "exam_lockdown",
+                       "verify_package", "failed",
+                       "package inspection failed: " + inspect_error);
+            return;
+        }
+
+        nstu::client::ExamLockdownPolicy policy;
+        std::string policy_error;
+        if (!nstu::client::extract_exam_lockdown_policy(
+                report.manifest_json, policy, &policy_error)) {
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "exam_lockdown",
+                       "extract_policy", "failed",
+                       "policy extraction failed: " + policy_error);
+            return;
+        }
+
+        if (policy.allowed_origins.empty()) {
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::info, "exam_lockdown",
+                       "arm", "skipped", "manifest has no allowedOrigins");
+            return;
+        }
+
+        auto resolved_ips =
+            nstu::client::resolve_allowed_origins(policy.allowed_origins);
+        if (resolved_ips.empty()) {
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "exam_lockdown",
+                       "arm", "skipped",
+                       "declared origins failed to resolve");
+            return;
+        }
+
+        std::string teacher_address;
+        {
+            std::scoped_lock lock(g_server_endpoint_mutex);
+            teacher_address = g_server_address;
+        }
+        if (!teacher_address.empty()) {
+            std::vector<std::string> teacher_origins = {teacher_address};
+            const auto teacher_ips =
+                nstu::client::resolve_allowed_origins(teacher_origins);
+            for (const auto tip : teacher_ips) {
+                resolved_ips.push_back(tip);
+            }
+            std::sort(resolved_ips.begin(), resolved_ips.end());
+            resolved_ips.erase(
+                std::unique(resolved_ips.begin(), resolved_ips.end()),
+                resolved_ips.end());
+        }
+
+        nstu::client::ExamLockdownArmParams arm_params;
+        arm_params.session_id = request.session_id;
+        arm_params.client_id = request.client_id;
+        arm_params.package_verified = true;
+        arm_params.duration_seconds = policy.duration_seconds;
+        arm_params.allowed_ipv4 = std::move(resolved_ips);
+
+        const auto now_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+
+        std::string arm_error;
+        if (!g_exam_lockdown_controller.arm(
+                token, arm_params, configured_client_id, now_ms, &arm_error)) {
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "exam_lockdown",
+                       "arm", "rejected", arm_error);
+        } else {
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::info, "exam_lockdown",
+                       "arm", "success");
+        }
+    } catch (...) {
+        emit_audit(nstu::audit::Category::security,
+                   nstu::audit::Severity::warning, "exam_lockdown",
+                   "arm", "failed", "unexpected exception in arm worker");
+    }
+}
+
 void handle_server_command(
     const nstu::control::AuthenticatedCommand& command) {
     switch (command.envelope.type) {
@@ -1495,6 +1675,17 @@ void handle_server_command(
         if (request && configured_client_id_matches(request->client_id)) {
             queue_agent_message({nstu::client::AgentMessageType::exam_start,
                                  command.payload});
+            const auto token = g_exam_lockdown_controller.begin_attempt();
+            nstu::security::ClientId current_client_id{};
+            {
+                std::scoped_lock lock(g_client_identity_mutex);
+                current_client_id = g_configured_client_id;
+            }
+            std::scoped_lock worker_lock(g_exam_arm_worker_mutex);
+            g_exam_arm_worker = std::jthread(
+                [token, req = *request, current_client_id]() {
+                    run_exam_arm_worker(token, req, current_client_id);
+                });
         }
         break;
     }
@@ -1512,6 +1703,7 @@ void handle_server_command(
         if (begin && configured_client_id_matches(begin->client_id)) {
             queue_agent_message({nstu::client::AgentMessageType::exam_begin,
                                  command.payload});
+            g_exam_lockdown_controller.update_duration(begin->duration_seconds);
         }
         break;
     }
@@ -1975,6 +2167,11 @@ void launch_agent() {
 
 void agent_supervisor_loop(std::stop_token stop_token) {
     while (!stop_token.stop_requested() && !g_stop_requested.load()) {
+        const auto now_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+        g_exam_lockdown_controller.tick(now_ms);
         if (!g_agent_connected.load()) {
             launch_agent();
         }
@@ -2155,6 +2352,16 @@ void WINAPI service_main(DWORD, wchar_t**) {
             return;
         }
     }
+    std::string sweep_error;
+    if (!g_exam_lockdown_controller.startup_sweep(&sweep_error)) {
+        emit_audit(nstu::audit::Category::security,
+                   nstu::audit::Severity::warning, "exam_lockdown",
+                   "startup_sweep", "failed", sweep_error);
+    } else {
+        emit_audit(nstu::audit::Category::security,
+                   nstu::audit::Severity::info, "exam_lockdown",
+                   "startup_sweep", "cleared");
+    }
     g_stop_requested = false;
     std::thread pipe_thread(agent_pipe_loop);
     std::jthread control_thread(remote_control_loop);
@@ -2184,6 +2391,13 @@ void WINAPI service_main(DWORD, wchar_t**) {
             g_uwf_worker.join();
         }
     }
+    {
+        std::scoped_lock arm_lock(g_exam_arm_worker_mutex);
+        if (g_exam_arm_worker.joinable()) {
+            g_exam_arm_worker.join();
+        }
+    }
+    g_exam_lockdown_controller.disarm();
     CloseHandle(g_stop_event);
     g_stop_event = nullptr;
     {

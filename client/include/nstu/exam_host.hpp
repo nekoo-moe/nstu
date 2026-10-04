@@ -58,6 +58,16 @@ struct ExamPackageReport {
     std::string digest_hex;
 };
 
+struct ExamLockdownPolicy {
+    std::vector<std::string> allowed_origins;   // validated, de-duplicated
+    std::uint32_t duration_seconds = 0;         // 60..86400, from manifest
+};
+
+[[nodiscard]] bool extract_exam_lockdown_policy(
+    std::string_view manifest_json, ExamLockdownPolicy& out,
+    std::string* error = nullptr);
+
+
 // Validates the bounded, unpacked package boundary without starting a browser.
 // Manifest-declared media and document paths must resolve to regular files
 // inside the package; deployment metadata (manifest.json/manifest.p7s) is not

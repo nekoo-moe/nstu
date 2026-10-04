@@ -132,6 +132,9 @@
     el("exam-title").value = currentExam.title || "";
     el("exam-subject").value = currentExam.subject || "";
     el("exam-duration").value = Math.round((currentExam.durationSeconds || 3600) / 60);
+    el("exam-allowed-origins").value = Array.isArray(currentExam.allowedOrigins)
+      ? currentExam.allowedOrigins.join("\n")
+      : "";
 
     // Questions rail
     const navList = el("question-nav-list");
@@ -713,6 +716,51 @@
      Validation & Packaging (.nstuexam Export)
      ======================================================================== */
 
+  function parseOriginsInput(raw) {
+    if (!raw || typeof raw !== "string") return [];
+    const lines = raw.split(/[\r\n,]+/);
+    const seen = new Set();
+    const origins = [];
+    for (const item of lines) {
+      const trimmed = item.trim();
+      if (!trimmed) continue;
+      if (!seen.has(trimmed)) {
+        seen.add(trimmed);
+        origins.push(trimmed);
+      }
+    }
+    return origins;
+  }
+
+  function validateOrigin(origin) {
+    if (typeof origin !== "string" || origin.length < 1 || origin.length > 253) return false;
+    if (origin.includes("@")) return false; // no userinfo
+    let host = origin;
+    if (/^https?:\/\//i.test(host)) {
+      host = host.replace(/^https?:\/\//i, "");
+    } else if (host.includes("://")) {
+      return false; // unsupported scheme
+    }
+    const cut = host.search(/[\/?#]/);
+    if (cut !== -1) {
+      host = host.substring(0, cut);
+    }
+    const colon = host.lastIndexOf(":");
+    if (colon !== -1) {
+      const port = host.substring(colon + 1);
+      if (!/^\d{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65535) return false;
+      host = host.substring(0, colon);
+    }
+    if (!host || host.length > 253) return false;
+    const labels = host.split(".");
+    for (const label of labels) {
+      if (!label || label.length > 63) return false;
+      if (!/^[a-zA-Z0-9-]+$/.test(label)) return false;
+      if (label.startsWith("-") || label.endsWith("-")) return false;
+    }
+    return true;
+  }
+
   function validateExam(exam) {
     const errors = [];
     if (!exam.id || !/^[a-zA-Z0-9._-]{1,96}$/.test(exam.id)) {
@@ -723,6 +771,24 @@
     }
     if (!exam.durationSeconds || exam.durationSeconds < 60 || exam.durationSeconds > 86400) {
       errors.push("Duration must be between 1 minute and 24 hours.");
+    }
+    if (exam.allowedOrigins) {
+      if (!Array.isArray(exam.allowedOrigins)) {
+        errors.push("Allowed origins must be a list.");
+      } else if (exam.allowedOrigins.length > 32) {
+        errors.push("Allowed origins list cannot exceed 32 items.");
+      } else {
+        const seen = new Set();
+        exam.allowedOrigins.forEach((orig, idx) => {
+          if (seen.has(orig)) {
+            errors.push(`Duplicate origin declared: ${orig}`);
+          }
+          seen.add(orig);
+          if (!validateOrigin(orig)) {
+            errors.push(`Allowed origin #${idx + 1} (${orig}) is invalid. Must be a bare hostname or http(s) URL (1–253 chars, no userinfo).`);
+          }
+        });
+      }
     }
     if (!Array.isArray(exam.questions) || exam.questions.length === 0) {
       errors.push("Exam must contain at least one question.");
@@ -757,7 +823,7 @@
 
   function compileManifest(exam) {
     // Generate clean manifest matching manifest.schema.json
-    return {
+    const manifest = {
       id: exam.id,
       title: exam.title,
       subject: exam.subject || "General",
@@ -779,6 +845,10 @@
         return item;
       })
     };
+    if (Array.isArray(exam.allowedOrigins) && exam.allowedOrigins.length > 0) {
+      manifest.allowedOrigins = exam.allowedOrigins;
+    }
+    return manifest;
   }
 
   async function exportPackage() {
@@ -787,6 +857,12 @@
     currentExam.title = el("exam-title").value.trim();
     currentExam.subject = el("exam-subject").value.trim();
     currentExam.durationSeconds = Math.max(60, parseInt(el("exam-duration").value, 10) * 60 || 3600);
+    const origins = parseOriginsInput(el("exam-allowed-origins").value);
+    if (origins.length > 0) {
+      currentExam.allowedOrigins = origins;
+    } else {
+      delete currentExam.allowedOrigins;
+    }
 
     const modal = el("export-modal");
     const statusBox = el("export-validation-status");
@@ -900,6 +976,12 @@
     currentExam.title = el("exam-title").value.trim();
     currentExam.subject = el("exam-subject").value.trim();
     currentExam.durationSeconds = Math.max(60, parseInt(el("exam-duration").value, 10) * 60 || 3600);
+    const origins = parseOriginsInput(el("exam-allowed-origins").value);
+    if (origins.length > 0) {
+      currentExam.allowedOrigins = origins;
+    } else {
+      delete currentExam.allowedOrigins;
+    }
 
     const manifestObj = compileManifest(currentExam);
     const jsonStr = JSON.stringify(manifestObj, null, 2);
