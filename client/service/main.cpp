@@ -13,6 +13,7 @@
 #include "nstu/service_install.hpp"
 #include "nstu/setup/diagnostics.hpp"
 #include "nstu/setup/uwf.hpp"
+#include "nstu/stream_host_service.hpp"
 
 #include <windows.h>
 #include <reason.h>
@@ -100,6 +101,7 @@ std::uint64_t g_fleet_operation_id = 0;
 std::mutex g_server_endpoint_mutex;
 std::string g_server_address;
 std::uint16_t g_server_port = 0;
+nstu::client::StreamHostSupervisor g_stream_host_supervisor;
 std::atomic_bool g_agent_locked = false;
 std::atomic_bool g_agent_streaming = false;
 std::atomic<std::uint8_t> g_agent_stream_fps = 0;
@@ -1471,6 +1473,7 @@ void handle_server_command(
         break;
     case nstu::protocol::CommandType::remote_start:
         queue_agent_message({nstu::client::AgentMessageType::remote_start, {}});
+        g_stream_host_supervisor.handle_remote_session_start();
         break;
     case nstu::protocol::CommandType::remote_input:
         if (nstu::client::decode_remote_input(command.payload)) {
@@ -1480,8 +1483,10 @@ void handle_server_command(
         break;
     case nstu::protocol::CommandType::remote_end:
         queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
+        g_stream_host_supervisor.handle_remote_session_stop();
         break;
     case nstu::protocol::CommandType::exam_start: {
+        g_stream_host_supervisor.handle_exam_lockdown();
         // The TCP command is authenticated by the client control session.
         // Bind the variable-length request to the identity provisioned for
         // this service before it crosses into the interactive agent.
@@ -1921,6 +1926,7 @@ void remote_control_loop(std::stop_token stop_token) {
             queue_agent_message(
                 {nstu::client::AgentMessageType::overlay_clear, {}});
             queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
+            g_stream_host_supervisor.handle_disconnect();
             nstu::client::clear_client_runtime_config(config);
         } else if (attempt_pairing(stop_token, path, entropy)) {
             // A machine that just earned an identity should use it now
@@ -2159,6 +2165,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
     g_stop_requested = true;
     queue_exam_stop();
     queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
+    g_stream_host_supervisor.handle_disconnect();
     control_thread.request_stop();
     agent_supervisor_thread.request_stop();
     wake_pipe_listener();

@@ -1,10 +1,11 @@
 add_library(nstu_server_state STATIC
     src/client_registry.cpp
     src/control_plane.cpp
+    src/remote_session_process.cpp
 )
 target_include_directories(nstu_server_state PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(nstu_server_state PUBLIC cxx_std_20)
-target_link_libraries(nstu_server_state PUBLIC nstu_common)
+target_link_libraries(nstu_server_state PUBLIC nstu_common version)
 nstu_enable_warnings(nstu_server_state)
 
 option(NSTU_SERVER_USE_IMGUI "Build the Dear ImGui server UI" ON)

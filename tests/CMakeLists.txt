@@ -157,6 +157,25 @@ nstu_enable_test_assertions(nstu_iocp_dispatcher_tests)
 add_test(NAME nstu.iocp_dispatcher COMMAND nstu_iocp_dispatcher_tests)
 
 if(TARGET nstu_server_state)
+    add_executable(nstu_remote_session_fake_child
+        remote_session_fake_child.cpp
+        remote_session_fake_child.rc)
+    nstu_enable_warnings(nstu_remote_session_fake_child)
+    if(MINGW)
+        target_link_options(nstu_remote_session_fake_child PRIVATE -municode)
+    endif()
+
+    add_executable(nstu_remote_session_process_tests
+        remote_session_process_tests.cpp)
+    target_link_libraries(nstu_remote_session_process_tests PRIVATE
+        nstu_server_state)
+    add_dependencies(nstu_remote_session_process_tests
+        nstu_remote_session_fake_child)
+    nstu_enable_warnings(nstu_remote_session_process_tests)
+    nstu_enable_test_assertions(nstu_remote_session_process_tests)
+    add_test(NAME nstu.remote_session_process
+        COMMAND nstu_remote_session_process_tests)
+
     add_executable(nstu_server_state_tests server_state_tests.cpp)
     target_link_libraries(nstu_server_state_tests PRIVATE nstu_server_state)
     nstu_enable_warnings(nstu_server_state_tests)
@@ -270,6 +289,12 @@ if(TARGET nstu_client_platform)
     nstu_enable_warnings(nstu_client_config_tests)
     nstu_enable_test_assertions(nstu_client_config_tests)
     add_test(NAME nstu.client_config COMMAND nstu_client_config_tests)
+
+    add_executable(nstu_stream_host_service_tests stream_host_service_tests.cpp)
+    target_link_libraries(nstu_stream_host_service_tests PRIVATE nstu_client_platform)
+    nstu_enable_warnings(nstu_stream_host_service_tests)
+    nstu_enable_test_assertions(nstu_stream_host_service_tests)
+    add_test(NAME nstu.stream_host_service COMMAND nstu_stream_host_service_tests)
 
     if(TARGET nstu_server_state)
         add_executable(nstu_client_control_tests client_control_tests.cpp)

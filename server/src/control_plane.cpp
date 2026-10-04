@@ -372,6 +372,37 @@ public:
             *state, type, next_request_id_.fetch_add(1), payload, error);
     }
 
+    bool launch_exam(std::uint64_t client_id,
+                     const ExamLaunchRequest& launch,
+                     std::string* error) {
+        const auto state = state_for_client(client_id);
+        if (!state) {
+            set_error(error, "client is not authenticated");
+            return false;
+        }
+        exam::ExamStartRequest request;
+        request.package_root = launch.package_root;
+        request.web_root = launch.web_root;
+        request.user_data_root = launch.user_data_root;
+        request.package_id = launch.package_id;
+        request.candidate_id = launch.candidate_id;
+        request.package_digest = launch.package_digest;
+        {
+            std::scoped_lock lock(state->mutex);
+            if (state->stage != Stage::authenticated ||
+                state->registry_id.load() != client_id) {
+                set_error(error, "client is not authenticated");
+                return false;
+            }
+            request.client_id = state->hello.client_id;
+        }
+        if (!security::generate_random(request.session_id)) {
+            set_error(error, "could not generate exam session identity");
+            return false;
+        }
+        return start_exam(client_id, request, error);
+    }
+
     bool start_exam(std::uint64_t client_id,
                     const exam::ExamStartRequest& request,
                     std::string* error) {
@@ -573,6 +604,41 @@ public:
             }
         }
         return clients;
+    }
+
+    std::vector<ExamClientState> exam_client_states() const {
+        std::vector<ExamClientState> clients;
+        std::scoped_lock lock(exam_contexts_mutex_);
+        clients.reserve(active_exam_contexts_.size());
+        for (const auto& [registry_id, context] : active_exam_contexts_) {
+            clients.push_back({registry_id, context.package_id,
+                               context.candidate_id, context.ready,
+                               context.begun});
+        }
+        return clients;
+    }
+
+    bool exam_active(std::uint64_t registry_id) const {
+        std::scoped_lock lock(exam_contexts_mutex_);
+        return active_exam_contexts_.find(registry_id) != active_exam_contexts_.end();
+    }
+
+    void record_remote_session_audit(
+        std::uint64_t client_id, std::string_view action,
+        std::string_view result, std::string_view detail) {
+        audit::Event event;
+        event.category = audit::Category::session;
+        event.severity = (result == "failed" || result == "denied")
+                             ? audit::Severity::warning
+                             : audit::Severity::info;
+        event.component = "remote_session";
+        event.action = std::string(action);
+        event.result = std::string(result);
+        event.client_id = client_id;
+        if (!detail.empty()) {
+            event.detail = std::string(detail);
+        }
+        audit_emit(std::move(event));
     }
 
     // Writes one server-originated audit record. Best effort: a closed or
@@ -2081,6 +2147,12 @@ bool ServerControlPlane::stop_remote_control(std::uint64_t client_id,
                         error);
 }
 
+bool ServerControlPlane::launch_exam(
+    std::uint64_t client_id, const ExamLaunchRequest& request,
+    std::string* error) {
+    return impl_->launch_exam(client_id, request, error);
+}
+
 bool ServerControlPlane::start_exam(
     std::uint64_t client_id, const exam::ExamStartRequest& request,
     std::string* error) {
@@ -2100,6 +2172,20 @@ bool ServerControlPlane::begin_exam(std::uint64_t client_id,
 
 std::vector<std::uint64_t> ServerControlPlane::ready_exam_clients() const {
     return impl_->ready_exam_clients();
+}
+
+std::vector<ExamClientState> ServerControlPlane::exam_client_states() const {
+    return impl_->exam_client_states();
+}
+
+bool ServerControlPlane::exam_active(std::uint64_t client_id) const {
+    return impl_->exam_active(client_id);
+}
+
+void ServerControlPlane::record_remote_session_audit(
+    std::uint64_t client_id, std::string_view action,
+    std::string_view result, std::string_view detail) {
+    impl_->record_remote_session_audit(client_id, action, result, detail);
 }
 
 bool ServerControlPlane::running() const noexcept {

@@ -173,6 +173,42 @@ int main() {
     uwf_verified.detail = "UWF protects this session";
     assert(registry.set_uwf_fleet_status(registry_id, uwf_verified));
 
+    // The teacher UI supplies package/candidate fields only. The control plane
+    // must bind the authenticated client identity and mint a fresh session so
+    // UI code cannot accidentally authorize another client or reuse a session.
+    nstu::server::ExamLaunchRequest launch;
+    launch.package_root = "C:/ProgramData/NSTU/exams/packages/auth-test/";
+    launch.web_root = launch.package_root + "exam/web";
+    launch.user_data_root =
+        "C:/ProgramData/NSTU/exam-user-data/candidate-auth-ui";
+    launch.package_id = "auth-test-package";
+    launch.candidate_id = "candidate-auth-ui";
+    for (std::size_t index = 0; index < launch.package_digest.size(); ++index) {
+        launch.package_digest[index] = static_cast<std::byte>(0x60u + index);
+    }
+    assert(control_plane.launch_exam(registry_id, launch, &error));
+    const auto launched_command = channel->receive(&error);
+    assert(launched_command.has_value());
+    const auto launched =
+        nstu::exam::decode_exam_start_request(launched_command->payload);
+    assert(launched.has_value());
+    assert(launched->client_id == id);
+    assert(launched->package_id == launch.package_id);
+    assert(launched->candidate_id == launch.candidate_id);
+    assert(std::any_of(launched->session_id.begin(), launched->session_id.end(),
+                       [](std::byte value) { return value != std::byte{0}; }));
+    const auto launched_states = control_plane.exam_client_states();
+    assert(launched_states.size() == 1);
+    assert(launched_states.front().client_id == registry_id);
+    assert(!launched_states.front().ready);
+    assert(!launched_states.front().begun);
+    assert(control_plane.stop_exam(registry_id, &error));
+    const auto launched_stop = channel->receive(&error);
+    assert(launched_stop.has_value());
+    assert(launched_stop->envelope.type ==
+           nstu::protocol::CommandType::exam_stop);
+    assert(control_plane.exam_client_states().empty());
+
     const auto start = make_start(id);
     assert(control_plane.start_exam(registry_id, start, &error));
     const auto start_command = channel->receive(&error);

@@ -8,7 +8,7 @@ target_compile_definitions(nstu_setup_diagnostics PUBLIC
     NSTU_INTERNAL_TEST_BUILD=$<BOOL:${NSTU_INTERNAL_TEST_BUILD}>)
 target_link_libraries(nstu_setup_diagnostics PUBLIC
     nstu_common nstu_uwf d3d11 dxgi iphlpapi mf mfplat mfuuid netapi32 ole32 shell32
-    oleaut32 user32 wbemuuid wevtapi ws2_32
+    oleaut32 user32 wbemuuid wevtapi ws2_32 version
 )
 nstu_enable_warnings(nstu_setup_diagnostics)
 if(MSVC)
