@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NSTU Exam Studio | Author & Package IELTS Assessments</title>
+  <meta name="description" content="Visual authoring studio and compiler for NSTU computer-based assessments and .nstuexam packages.">
+  <link rel="stylesheet" href="studio.css">
+</head>
+<body>
+
+  <!-- Top Studio Header -->
+  <header class="studio-header" id="studio-header">
+    <div class="brand-section">
+      <div class="brand-logo">
+        <span class="brand-badge">NSTU</span>
+        <span class="brand-title">Exam Studio</span>
+      </div>
+      <span class="brand-subtitle">Assessment Authoring & Packaging</span>
+    </div>
+
+    <!-- Mode Switcher -->
+    <div class="mode-toggle-group" role="tablist" aria-label="Studio Mode">
+      <button class="mode-btn active" id="btn-mode-editor" type="button" role="tab" aria-selected="true">
+        <span>✍️</span> Authoring
+      </button>
+      <button class="mode-btn" id="btn-mode-preview" type="button" role="tab" aria-selected="false">
+        <span>👁️</span> IELTS Live Preview
+      </button>
+    </div>
+
+    <!-- Global Actions -->
+    <div class="header-actions">
+      <button class="btn btn-secondary" id="btn-load-sample" type="button" title="Load sample IELTS test">
+        <span>📋</span> Sample
+      </button>
+      <button class="btn btn-secondary" id="btn-open-file" type="button" title="Open existing .nstuexam or manifest.json">
+        <span>📂</span> Open
+      </button>
+      <button class="btn btn-secondary" id="btn-save-draft" type="button" title="Save JSON manifest">
+        <span>💾</span> Save
+      </button>
+      <button class="btn btn-success" id="btn-export-pkg" type="button" title="Compile and export .nstuexam bundle">
+        <span>📦</span> Export .nstuexam
+      </button>
+    </div>
+  </header>
+
+  <!-- Hidden File Input for Import -->
+  <input type="file" id="file-import-input" accept=".nstuexam,.zip,.json" style="display: none;">
+
+  <!-- ========================================================================
+       VIEW 1: Studio Authoring Mode
+       ======================================================================== -->
+  <div class="studio-main" id="editor-view">
+    <!-- Left Sidebar: Exam Metadata & Question Navigator -->
+    <aside class="editor-sidebar" aria-label="Exam settings and questions">
+      <!-- Section 1: General Exam Details -->
+      <div class="sidebar-section">
+        <div class="section-title">
+          <span>Exam Configuration</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="exam-id">Package ID (Alphanumeric)</label>
+          <input class="form-input" id="exam-id" type="text" value="ielts-sample-01" pattern="^[a-zA-Z0-9._-]{1,96}$" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="exam-title">Assessment Title</label>
+          <input class="form-input" id="exam-title" type="text" value="IELTS Academic Reading & Listening Mock" required>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="exam-subject">Subject</label>
+            <input class="form-input" id="exam-subject" type="text" value="English Language">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="exam-duration">Time (Minutes)</label>
+            <input class="form-input" id="exam-duration" type="number" min="1" max="1440" value="60" required>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 2: Questions List & Add Button -->
+      <div class="sidebar-section" style="flex: 1; display: flex; flex-direction: column;">
+        <div class="section-title">
+          <span>Questions (<span id="question-count-badge">0</span>)</span>
+          <div style="display: flex; gap: 4px;">
+            <select class="form-select btn-sm" id="select-add-type" style="width: auto; padding: 2px 6px;">
+              <option value="matching">✚ Matching (Drag & Drop)</option>
+              <option value="reading">✚ Reading (Passage)</option>
+              <option value="multiple_choice">✚ Multiple Choice</option>
+              <option value="short_answer">✚ Short Answer</option>
+              <option value="essay">✚ Essay / Writing</option>
+              <option value="listening">✚ Listening (Audio)</option>
+            </select>
+            <button class="btn btn-primary btn-sm" id="btn-add-question" type="button">Add</button>
+          </div>
+        </div>
+
+        <div class="question-nav-list" id="question-nav-list" style="overflow-y: auto; flex: 1;">
+          <!-- Dynamically populated question cards -->
+        </div>
+      </div>
+    </aside>
+
+    <!-- Center/Right: Question Editor Workspace -->
+    <main class="editor-workspace" id="editor-workspace">
+      <div class="workspace-container">
+        
+        <!-- Active Question Card -->
+        <div class="card" id="question-editor-card">
+          <div class="card-header">
+            <div class="card-title">
+              <span id="active-q-badge" class="nav-item-type-badge matching">Matching</span>
+              <span id="active-q-title">Question 1</span>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 6px;">
+                <label class="form-label" style="margin-bottom: 0;" for="q-points">Points:</label>
+                <input class="form-input" id="q-points" type="number" min="1" max="100" value="4" style="width: 60px;">
+              </div>
+            </div>
+          </div>
+
+          <!-- Stimulus / Passage Section (IELTS Split Content) -->
+          <div class="passage-banner" id="stimulus-container">
+            <div class="passage-banner-header">
+              <div class="passage-banner-title">
+                <span>📖 Reading Passage / Stimulus Material (Left Screen)</span>
+              </div>
+              <span class="helper-text">Appears on the left side of the candidate screen</span>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="q-passage">Passage Text (Use [Paragraph A], [Paragraph B] for section headers):</label>
+              <textarea class="form-textarea" id="q-passage" rows="7" placeholder="Paste your reading passage here. Label paragraphs like [Paragraph A], [Paragraph B] so candidates can reference them..."></textarea>
+            </div>
+          </div>
+
+          <!-- Listening Audio Section (shown if Listening type) -->
+          <div class="passage-banner" id="audio-container" style="display: none;">
+            <div class="passage-banner-header">
+              <div class="passage-banner-title">
+                <span>🎧 Listening Audio Track</span>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Audio File (.mp3, .wav):</label>
+              <div style="display: flex; gap: 10px; align-items: center;">
+                <input class="form-input" id="q-audio-path" type="text" placeholder="media/listening-01.mp3" readonly>
+                <input type="file" id="q-audio-file" accept="audio/*" style="display: none;">
+                <button class="btn btn-secondary btn-sm" type="button" onclick="document.getElementById('q-audio-file').click()">Browse Audio</button>
+              </div>
+              <audio id="q-audio-preview" controls style="width: 100%; margin-top: 8px; display: none;"></audio>
+            </div>
+          </div>
+
+          <!-- Question Prompt & Instruction -->
+          <div class="form-group">
+            <label class="form-label" for="q-prompt">Question Prompt / Heading Task</label>
+            <input class="form-input" id="q-prompt" type="text" placeholder="e.g. Choose the correct heading for Paragraphs A–D from the list below.">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="q-instruction">Instruction for Candidate</label>
+            <input class="form-input" id="q-instruction" type="text" placeholder="e.g. Drag each heading into the appropriate paragraph answer slot.">
+          </div>
+
+          <!-- Dynamic Interaction Section Based on Type -->
+          
+          <!-- TYPE A: Drag-and-Drop Matching / Gap-Fill -->
+          <div id="matching-editor" class="token-config-grid">
+            <!-- Left Col: Draggable Token Bank -->
+            <div>
+              <div class="config-col-title">
+                <span>Draggable Items (Token Bank)</span>
+                <button class="btn btn-secondary btn-sm" id="btn-add-token" type="button">✚ Add Item</button>
+              </div>
+              <p class="helper-text" style="margin-bottom: 8px;">These chips appear in the tray for the candidate to drag.</p>
+              <div class="chip-input-list" id="token-input-list">
+                <!-- Dynamically generated rows -->
+              </div>
+            </div>
+
+            <!-- Right Col: Drop Target Blanks -->
+            <div>
+              <div class="config-col-title">
+                <span>Target Slots (Answer Slots)</span>
+                <button class="btn btn-secondary btn-sm" id="btn-add-target" type="button">✚ Add Slot</button>
+              </div>
+              <p class="helper-text" style="margin-bottom: 8px;">Drop targets where candidates place their chosen items.</p>
+              <div class="chip-input-list" id="target-input-list">
+                <!-- Dynamically generated rows -->
+              </div>
+            </div>
+          </div>
+
+          <!-- TYPE B: Multiple Choice -->
+          <div id="mc-editor" style="display: none; margin-top: 16px;">
+            <div class="config-col-title">
+              <span>Answer Options</span>
+              <button class="btn btn-secondary btn-sm" id="btn-add-mc-option" type="button">✚ Add Option</button>
+            </div>
+            <div class="chip-input-list" id="mc-option-list" style="margin-top: 8px;">
+              <!-- Option rows -->
+            </div>
+          </div>
+
+          <!-- TYPE C: Short Answer -->
+          <div id="sa-editor" style="display: none; margin-top: 16px;">
+            <div class="form-group">
+              <label class="form-label" for="q-sa-placeholder">Input Placeholder</label>
+              <input class="form-input" id="q-sa-placeholder" type="text" placeholder="e.g. Type one word or a number">
+            </div>
+          </div>
+
+          <!-- TYPE D: Essay -->
+          <div id="essay-editor" style="display: none; margin-top: 16px;">
+            <div class="form-group">
+              <label class="form-label" for="q-essay-limit">Suggested Word Limit (Optional)</label>
+              <input class="form-input" id="q-essay-limit" type="number" min="10" max="2000" value="250" style="width: 140px;">
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- ========================================================================
+       VIEW 2: IELTS Live Preview (Candidate Split Screen)
+       ======================================================================== -->
+  <div class="preview-view" id="preview-view" style="display: none;">
+    <!-- Preview Topbar -->
+    <div class="preview-toolbar">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <span class="brand-badge" style="font-size: 11px;">IELTS Mode</span>
+        <strong id="preview-exam-title">IELTS Academic Reading & Listening Mock</strong>
+      </div>
+      <div style="display: flex; align-items: center; gap: 20px;">
+        <div class="preview-timer-box">
+          <span>Time Remaining</span>
+          <span class="timer-digits" id="preview-timer">60:00</span>
+        </div>
+        <button class="btn btn-primary btn-sm" id="btn-preview-exit" type="button">Exit Preview</button>
+      </div>
+    </div>
+
+    <!-- Dual-Pane Split Container -->
+    <div class="preview-split-container" id="preview-split-container">
+      
+      <!-- Left Column: Reading Passage / Stimulus -->
+      <section class="preview-pane-left" id="preview-pane-left" aria-label="Reading Passage">
+        <article class="ielts-passage-article">
+          <h2 class="ielts-passage-title" id="p-passage-heading">Reading Passage</h2>
+          <div class="ielts-passage-subtitle" id="p-passage-sub">You should spend about 20 minutes on Questions 1–4, which are based on the reading passage below.</div>
+          <div id="p-passage-content">
+            <!-- Formatted paragraphs with [Paragraph A] badges -->
+          </div>
+          <div id="p-audio-container" style="display: none; margin-top: 20px;">
+            <audio id="p-audio-player" controls style="width: 100%;"></audio>
+          </div>
+        </article>
+      </section>
+
+      <!-- Draggable Splitter Divider -->
+      <div class="preview-splitter" id="preview-splitter" title="Drag to adjust column widths"></div>
+
+      <!-- Right Column: Interactive Questions & Answer Area -->
+      <section class="preview-pane-right" id="preview-pane-right" aria-label="Questions and Answer Sheet">
+        <div class="ielts-question-card">
+          
+          <div class="question-prompt-box">
+            <div class="question-header-tag">
+              <span class="tag-badge" id="p-question-badge">Matching</span>
+              <span class="tag-points" id="p-question-points">4 points</span>
+            </div>
+            <h3 class="question-prompt-text" id="p-question-prompt">Choose the correct heading for each paragraph from the list below.</h3>
+            <p class="question-instruction-text" id="p-question-instruction">Drag each heading into the appropriate answer slot, or click a heading then click a slot to place it.</p>
+          </div>
+
+          <!-- Answer Interactive Area -->
+          <div id="p-interactive-answer-area">
+            <!-- Matching / Drag-and-Drop Area -->
+            <div id="p-matching-surface">
+              <!-- Draggable Token Bank Tray -->
+              <div class="token-bank-tray">
+                <div class="token-bank-header">
+                  <span>List of Headings / Draggable Items</span>
+                  <span style="font-size: 11px; color: var(--text-faint); font-weight: 500;">Drag or click to place</span>
+                </div>
+                <div class="token-chips-wrapper" id="p-token-tray">
+                  <!-- Chips dynamically injected -->
+                </div>
+              </div>
+
+              <!-- Matching Drop Target Blanks -->
+              <div class="matching-targets-list" id="p-target-list">
+                <!-- Target rows dynamically injected -->
+              </div>
+            </div>
+
+            <!-- Multiple Choice Surface -->
+            <div id="p-mc-surface" style="display: none;" class="options-group"></div>
+
+            <!-- Short Answer Surface -->
+            <div id="p-sa-surface" style="display: none;">
+              <input class="form-input" id="p-sa-input" type="text" placeholder="Type your answer here..." style="font-size: 16px; padding: 12px 16px;">
+            </div>
+
+            <!-- Essay Surface -->
+            <div id="p-essay-surface" style="display: none;">
+              <textarea class="essay-preview-area" id="p-essay-input" placeholder="Write your essay response here..."></textarea>
+              <div class="word-count-badge" id="p-essay-count">0 words</div>
+            </div>
+          </div>
+
+          <!-- Question Navigation Toolbar -->
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border-subtle);">
+            <button class="btn btn-secondary btn-sm" id="btn-p-prev" type="button">← Previous</button>
+            <span style="font-size: 13px; font-weight: 600; color: var(--text-muted);" id="p-nav-counter">Question 1 of 1</span>
+            <button class="btn btn-secondary btn-sm" id="btn-p-next" type="button">Next →</button>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- ========================================================================
+       MODALS
+       ======================================================================== -->
+
+  <!-- Export Package Modal -->
+  <div class="modal-backdrop" id="export-modal" role="dialog" aria-modal="true">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 class="modal-title">📦 Export .nstuexam Package</h3>
+        <button class="icon-btn" id="btn-close-export" type="button" style="font-size: 18px;">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 14px; color: var(--text-muted);">
+          Your exam will be validated against the official schema, bundled with the student kiosk runtime, and packaged into an offline <code>.nstuexam</code> container.
+        </p>
+
+        <div id="export-validation-status" style="padding: 12px; border-radius: var(--radius-sm); font-size: 13px; background-color: var(--bg-input);">
+          Validating manifest...
+        </div>
+
+        <div id="export-hashes" style="display: none; flex-direction: column; gap: 12px;">
+          <div class="hash-row">
+            <span class="hash-label">Archive SHA-256 (File Hash)</span>
+            <div class="code-box" id="lbl-archive-hash">-</div>
+          </div>
+          <div class="hash-row">
+            <span class="hash-label">Content SHA-256 (Canonical ExamHost Pin)</span>
+            <div class="code-box" id="lbl-content-hash">-</div>
+          </div>
+          <div class="hash-row">
+            <span class="hash-label">Staging Command (PowerShell)</span>
+            <div class="code-box" id="lbl-stage-command" style="color: var(--success);">-</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="btn-cancel-export" type="button">Cancel</button>
+        <button class="btn btn-success" id="btn-download-nstuexam" type="button" disabled>Download .nstuexam</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Application Scripts -->
+  <script src="template.js"></script>
+  <script src="zip.js"></script>
+  <script src="studio.js"></script>
+</body>
+</html>
