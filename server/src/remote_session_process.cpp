@@ -109,17 +109,19 @@ std::wstring command_line(std::span<const std::wstring> arguments) {
     return output;
 }
 
-void drain_pipe(HANDLE pipe, std::string& output, std::size_t limit) {
-    std::array<char, 1024> buffer{};
+bool drain_pipe(HANDLE pipe, std::string& output, std::size_t limit) {
+    std::array<char, 8192> buffer{};
+    bool read_any = false;
     for (;;) {
         DWORD available = 0;
         if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr) ||
-            available == 0) return;
+            available == 0) return read_any;
         const DWORD wanted = std::min<DWORD>(
             static_cast<DWORD>(buffer.size()), available);
         DWORD read = 0;
         if (!ReadFile(pipe, buffer.data(), wanted, &read, nullptr) || read == 0)
-            return;
+            return read_any;
+        read_any = true;
         const std::size_t retained = std::min<std::size_t>(
             read, limit > output.size() ? limit - output.size() : 0);
         output.append(buffer.data(), retained);
@@ -275,7 +277,7 @@ struct RemoteSessionProcess::Impl {
         SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
         HANDLE read_pipe = nullptr;
         HANDLE write_pipe = nullptr;
-        if (!CreatePipe(&read_pipe, &write_pipe, &security, 0)) {
+        if (!CreatePipe(&read_pipe, &write_pipe, &security, 65536)) {
             set_error(error, "could not create remote-session diagnostic pipe");
             return false;
         }
@@ -312,9 +314,10 @@ struct RemoteSessionProcess::Impl {
         const auto deadline = std::chrono::steady_clock::now() +
                               config.preflight_timeout;
         for (;;) {
-            drain_pipe(process.pipe.get(), output,
-                       config.maximum_diagnostic_bytes);
-            if (WaitForSingleObject(process.process.get(), 10) == WAIT_OBJECT_0)
+            const bool drained = drain_pipe(process.pipe.get(), output,
+                                            config.maximum_diagnostic_bytes);
+            if (WaitForSingleObject(process.process.get(), drained ? 0 : 10) ==
+                WAIT_OBJECT_0)
                 break;
             {
                 std::scoped_lock lock(mutex);
@@ -417,9 +420,10 @@ struct RemoteSessionProcess::Impl {
         }
         std::string output;
         for (;;) {
-            drain_pipe(process.pipe.get(), output,
-                       config.maximum_diagnostic_bytes);
-            if (WaitForSingleObject(child.get(), 20) == WAIT_OBJECT_0) break;
+            const bool drained = drain_pipe(process.pipe.get(), output,
+                                            config.maximum_diagnostic_bytes);
+            if (WaitForSingleObject(child.get(), drained ? 0 : 10) == WAIT_OBJECT_0)
+                break;
             bool should_stop = false;
             RemoteSessionStopReason requested = RemoteSessionStopReason::explicit_stop;
             {

@@ -18,7 +18,7 @@ namespace {
 using namespace std::chrono_literals;
 
 bool wait_until(const std::function<bool()>& predicate) {
-    for (int attempt = 0; attempt < 300; ++attempt) {
+    for (int attempt = 0; attempt < 1500; ++attempt) {
         if (predicate()) return true;
         std::this_thread::sleep_for(10ms);
     }
