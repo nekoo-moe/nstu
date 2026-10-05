@@ -2,6 +2,7 @@
 
 #include "nstu/client_freeze.hpp"
 #include "nstu/session.hpp"
+#include "nstu/wfp_allowlist.hpp"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -591,6 +592,9 @@ bool uninstall_service(std::string* error) {
         set_error(error,
                   win32_error("remove NSTU service registration", delete_error));
     }
+    // Clean up persistent firewall filters so removing NSTU leaves no stranded block.
+    nstu::net::WfpWebsiteAllowlist allowlist;
+    (void)allowlist.clear(nullptr);
     return deleted;
 }
 

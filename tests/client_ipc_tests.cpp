@@ -167,6 +167,18 @@ int main() {
         assert(barrier_decoded->type == barrier_type);
     }
 
+    // exam_alive is the liveness signal (agent -> service) for network lockdown.
+    {
+        const auto alive_wire = nstu::client::encode_agent_message(
+            {nstu::client::AgentMessageType::exam_alive, {}});
+        assert(!alive_wire.empty());
+        const auto alive_decoded =
+            nstu::client::decode_agent_message(alive_wire);
+        assert(alive_decoded.has_value());
+        assert(alive_decoded->type == nstu::client::AgentMessageType::exam_alive);
+        assert(alive_decoded->payload.empty());
+    }
+
     auto corrupt = status_wire;
     corrupt[0] ^= std::byte{1};
     assert(!nstu::client::decode_agent_message(corrupt).has_value());

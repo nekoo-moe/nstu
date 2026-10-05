@@ -2,6 +2,7 @@
 
 #include "nstu/exam_bridge.hpp"
 #include "nstu/exam_control.hpp"
+#include "nstu/exam_lockdown_controller.hpp"
 #include "nstu/exam_sync.hpp"
 
 #include <windows.h>
@@ -50,6 +51,8 @@ constexpr wchar_t kExamWindowTitle[] = L"NSTU Assessment";
 constexpr wchar_t kExamVirtualHost[] = L"nstu.exam";
 constexpr UINT_PTR kBridgeTimerId = 0x4e535455u;
 constexpr UINT kBridgeTimerPeriodMs = 250;
+constexpr UINT_PTR kExamAliveTimerId = 0x4e535456u;
+constexpr UINT kExamAliveTimerPeriodMs = 10'000;
 // The initialization timer uses a generation-derived id.  This matters on
 // Win32 because a WM_TIMER queued for a previous window operation can arrive
 // after KillTimer() and a new exam can already be initializing.  Distinct ids
@@ -802,6 +805,31 @@ bool validate_manifest_shape(const JsonValue& manifest, std::string* error) {
             }
         }
     }
+    const auto* allowed_origins = member(manifest, "allowedOrigins");
+    if (allowed_origins != nullptr) {
+        if (allowed_origins->kind != JsonValue::Kind::array ||
+            allowed_origins->array.size() > 32) {
+            set_error(error, "exam manifest allowedOrigins is invalid");
+            return false;
+        }
+        std::set<std::string> seen_origins;
+        for (const auto& item : allowed_origins->array) {
+            if (item.kind != JsonValue::Kind::string ||
+                item.scalar.empty() || item.scalar.size() > 253) {
+                set_error(error, "exam manifest allowed origin item is invalid");
+                return false;
+            }
+            if (!seen_origins.insert(item.scalar).second) {
+                set_error(error, "exam manifest allowedOrigins contains duplicate entries");
+                return false;
+            }
+            std::string hostname;
+            if (!parse_origin_hostname(item.scalar, hostname)) {
+                set_error(error, "exam manifest allowed origin item format is invalid");
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -1306,6 +1334,57 @@ bool validate_exam_path_policy(
     return true;
 }
 
+bool extract_exam_lockdown_policy(
+    std::string_view manifest_json, ExamLockdownPolicy& out,
+    std::string* error) {
+    out.allowed_origins.clear();
+    out.duration_seconds = 0;
+
+    JsonValue manifest;
+    if (!parse_json_object(manifest_json, manifest, error)) {
+        return false;
+    }
+    std::uint64_t duration = 0;
+    if (!uint64_member(manifest, "durationSeconds", duration) ||
+        duration < 60 || duration > 86400) {
+        set_error(error, "manifest durationSeconds is invalid or out of bounds");
+        return false;
+    }
+    out.duration_seconds = static_cast<std::uint32_t>(duration);
+
+    const auto* allowed_origins = member(manifest, "allowedOrigins");
+    if (allowed_origins == nullptr) {
+        return true;
+    }
+
+    if (allowed_origins->kind != JsonValue::Kind::array ||
+        allowed_origins->array.size() > 32) {
+        set_error(error, "manifest allowedOrigins is not an array or exceeds 32 items");
+        return false;
+    }
+
+    std::set<std::string> seen;
+    for (const auto& item : allowed_origins->array) {
+        if (item.kind != JsonValue::Kind::string || item.scalar.empty() ||
+            item.scalar.size() > 253) {
+            set_error(error, "manifest allowed origin entry is invalid");
+            return false;
+        }
+        if (!seen.insert(item.scalar).second) {
+            set_error(error, "manifest allowedOrigins contains duplicate entries");
+            return false;
+        }
+        std::string host;
+        if (!parse_origin_hostname(item.scalar, host)) {
+            set_error(error, "manifest allowed origin entry format is invalid");
+            return false;
+        }
+        out.allowed_origins.push_back(item.scalar);
+    }
+
+    return true;
+}
+
 bool inspect_exam_package(const std::filesystem::path& package_root,
                           const std::filesystem::path& web_root,
                           std::string_view expected_digest_hex,
@@ -1658,6 +1737,17 @@ LRESULT CALLBACK exam_window_proc(HWND window, UINT message, WPARAM wparam,
             if (host->api != nullptr) {
                 host->api->drain_bridge();
                 host->api->enforce_foreground();
+            }
+            return 0;
+        }
+        if (wparam == kExamAliveTimerId) {
+            if (host->state == ExamHostState::preparing ||
+                host->state == ExamHostState::initializing ||
+                host->state == ExamHostState::running) {
+                if (host->callbacks.send_to_service) {
+                    host->callbacks.send_to_service(
+                        {AgentMessageType::exam_alive, {}});
+                }
             }
             return 0;
         }
@@ -2495,6 +2585,8 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
         stop();
         return false;
     }
+    (void)SetTimer(impl_->window, kExamAliveTimerId, kExamAliveTimerPeriodMs,
+                   nullptr);
 #if NSTU_HAS_WEBVIEW2
     if (!begin_initialization_watchdog(*impl_, generation)) {
         set_host_state(*impl_, ExamHostState::failed,
@@ -2605,6 +2697,7 @@ void ExamHost::stop() noexcept {
     exam_bridge().clear();
     if (impl_->window != nullptr) {
         KillTimer(impl_->window, kBridgeTimerId);
+        KillTimer(impl_->window, kExamAliveTimerId);
         DestroyWindow(impl_->window);
         impl_->window = nullptr;
     }

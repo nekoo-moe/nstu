@@ -86,7 +86,7 @@ struct ClientRecord {
     bool frozen = false;
     // Reboot-to-restore state.  Distinct from managed mode above: this is disk
     // protection, that is the service and uninstall guard.
-    UwfFleetState uwf;
+    UwfFleetState uwf{};
     std::uint8_t frames_per_second = 0;
     std::uint16_t snapshot_interval_seconds = 0;
     std::uint16_t snapshot_width = 0;

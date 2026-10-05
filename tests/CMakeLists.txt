@@ -259,6 +259,17 @@ if(TARGET nstu_client_platform)
     add_test(NAME nstu.exam_network_lockdown
         COMMAND nstu_exam_network_lockdown_tests)
 
+    # Exam network-lockdown controller: reconciliation loop, arm guards,
+    # watchdog, and origin resolver against fake WFP seam (no real firewall touched).
+    add_executable(nstu_exam_lockdown_controller_tests
+        exam_lockdown_controller_tests.cpp)
+    target_link_libraries(nstu_exam_lockdown_controller_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_lockdown_controller_tests)
+    nstu_enable_test_assertions(nstu_exam_lockdown_controller_tests)
+    add_test(NAME nstu.exam_lockdown_controller
+        COMMAND nstu_exam_lockdown_controller_tests)
+
     # Exam app-suppression policy; pure classifier with a built-in never-kill
     # floor, no real process touched.
     add_executable(nstu_exam_app_suppression_tests
